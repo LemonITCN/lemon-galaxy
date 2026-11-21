@@ -6,7 +6,7 @@ using LemonGalaxy.Core;
 
 namespace LemonGalaxy.UI;
 
-internal enum NavSection { Hosts, Sftp, Ai, Snippets, Local, Settings }
+internal enum NavSection { Hosts, Sftp, Ai, Forwards, Snippets, Local, Settings }
 internal enum HostsListTab { Hosts, Credentials, KnownHosts }
 internal enum SettingsPage { Account, Appearance, Terminal, Connection, Ai, About }
 internal enum TabKind { Terminal, Sftp, Remote, Ai }
@@ -20,6 +20,8 @@ internal abstract record EditTarget
     public sealed record NewCredential : EditTarget;
     public sealed record Device(string Id) : EditTarget;
     public sealed record NewSnippet : EditTarget;
+    /// <summary>端口映射规则；Id 为空表示新建</summary>
+    public sealed record Forward(string? Id) : EditTarget;
 }
 
 /// <summary>界面内的模态卡片（画在主窗口里，不用系统对话框，selftest 也能离屏渲染出来）</summary>
@@ -33,7 +35,8 @@ internal sealed class ModalSpec
     public Action? OnDismiss;
 }
 
-internal sealed record Toast(string Text, bool IsError);
+/// <summary>提示条；可带一个操作（如「在资源管理器中显示」）</summary>
+internal sealed record Toast(string Text, bool IsError, string? ActionTitle = null, Action? Action = null);
 
 /// <summary>主窗口的全部状态。界面只通过它和内核打交道。</summary>
 internal sealed class AppModel
@@ -69,6 +72,7 @@ internal sealed class AppModel
     public string? TagFilter;
     public SettingsPage SettingsPage = SettingsPage.Account;
     public string? SelectedSnippet;
+    public string? SelectedForward;
 
     public readonly List<TabModel> Tabs = new();
     public string? ActiveTabId;
@@ -79,6 +83,7 @@ internal sealed class AppModel
     public readonly AiHub Ai;
     public readonly WorkerServiceModel Worker;
     public readonly Updater Updater;
+    public readonly PortForwardHub Forwards;
 
     private readonly Dictionary<string, Task<PeerConnection>> connecting = new();
     private readonly Dictionary<string, PeerConnection> peers = new();
@@ -102,6 +107,7 @@ internal sealed class AppModel
             HostEnabled: false);
         (Client, CoreFallbackReason) = CoreProvider.Make(config, store, adapter, forceMock, mockOptions);
         Ai = new AiHub(this);
+        Forwards = new PortForwardHub(this);
         Worker = new WorkerServiceModel(this);
         Updater = new Updater(this);
         if (!selfTest && Client.Restore()) DidLogin();
@@ -121,7 +127,12 @@ internal sealed class AppModel
         Ai.ReloadSummaries();
         PhaseChanged.Notify();
         Data.Notify();
-        Ui.Run(async () => { try { await Client.RefreshDevices(); } catch { } });
+        Ui.Run(async () =>
+        {
+            try { await Client.RefreshDevices(); } catch { }
+            // 设备列表刷新后再开自动开启的端口映射（经由的设备要先知道在不在线）
+            if (LoggedIn) Forwards.AutoStart();
+        });
     }
 
     /// <summary>Windows 上被控交给 lemon-galaxy-worker 系统服务；内核里 control 客户端自带的被控服务关掉，免得同一台机器出现两个可连的设备。</summary>
@@ -143,6 +154,7 @@ internal sealed class AppModel
     public async Task Logout()
     {
         CloseAllTabs();
+        Forwards.StopAll();
         try { await Client.Logout(); } catch { }
         LoggedIn = false;
         builtInHostOff = false;
@@ -160,6 +172,7 @@ internal sealed class AppModel
         if (s == ClientState.LoggedOut && LoggedIn)
         {
             LoggedIn = false;
+            Forwards.StopAll();
             PhaseChanged.Notify();
         }
         if (s == ClientState.Online && LoggedIn)
@@ -174,6 +187,7 @@ internal sealed class AppModel
     public void HandleSessionRevoked()
     {
         CloseAllTabs();
+        Forwards.StopAll();
         LoggedIn = false;
         PhaseChanged.Notify();
         ShowToast(L.T("login.revoked"), true);
@@ -185,7 +199,12 @@ internal sealed class AppModel
         if (LoggedIn) DisableBuiltInHost();
         Data.Notify();
     }
-    public void ReloadVault() { Vault = Client.Vault(); Data.Notify(); }
+    public void ReloadVault()
+    {
+        Vault = Client.Vault();
+        Forwards.VaultChanged();
+        Data.Notify();
+    }
 
     // ---------- 加密库辅助 ----------
 
@@ -206,6 +225,7 @@ internal sealed class AppModel
     public List<VaultEntry> Snippets => Vault.Where(e => e.Data is VaultData.Snippet).OrderBy(e => e.Sort).ToList();
     public List<VaultEntry> KnownHosts => Vault.Where(e => e.Data is VaultData.KnownHost).ToList();
     public List<VaultEntry> SshHosts => Vault.Where(e => e.Data is VaultData.SshHost).OrderBy(e => e.Sort).ThenBy(e => SshLabel(e.Id)).ToList();
+    public List<VaultEntry> PortForwards => Vault.Where(e => e.Data is VaultData.PortForward).OrderBy(e => e.Sort).ThenBy(e => ((VaultData.PortForward)e.Data).Label, StringComparer.CurrentCultureIgnoreCase).ToList();
 
     public List<string> AllTags
     {
@@ -260,7 +280,9 @@ internal sealed class AppModel
             await Client.VaultDelete(id);
             ReloadVault();
             if (Selection == id) Selection = null;
+            if (SelectedForward == id) SelectedForward = null;
             if (Editing is EditTarget.Vault v && v.Id == id) Editing = null;
+            if (Editing is EditTarget.Forward f && f.Id == id) Editing = null;
             Nav.Notify();
         }
         catch (Exception e) { ShowError(e); }
@@ -277,13 +299,14 @@ internal sealed class AppModel
 
     // ---------- 提示 ----------
 
-    public void ShowToast(string text, bool error = false)
+    public void ShowToast(string text, bool error = false, string? actionTitle = null, Action? action = null)
     {
-        var t = new Toast(text, error);
+        var t = new Toast(text, error, actionTitle, action);
         CurrentToast = t;
         Overlay.Notify();
         if (SelfTest) return;
-        Ui.After(error ? 5000 : 2500, () =>
+        // 带操作的提示多停一会儿，给用户时间点
+        Ui.After(action != null ? 8000 : error ? 5000 : 2500, () =>
         {
             if (!ReferenceEquals(CurrentToast, t)) return;
             CurrentToast = null;
@@ -513,6 +536,68 @@ internal sealed class AppModel
     }
 
     public bool AiEnabled => User?.AiEnabled ?? false;
+
+    // ---------- 远程开机 ----------
+
+    private readonly HashSet<string> waking = new();
+
+    /// <summary>离线、能被控、上报过网卡地址的设备显示「远程开机」</summary>
+    public bool CanWake(string deviceId)
+    {
+        if (!LoggedIn) return false;
+        try { return Client.CanWake(deviceId); }
+        catch (Exception e) { Log.Error("查询能否远程开机失败：" + e.Message); return false; }
+    }
+
+    public bool IsWaking(string deviceId) => waking.Contains(deviceId);
+
+    public void WakeDevice(string deviceId)
+    {
+        if (!waking.Add(deviceId)) return;
+        Data.Notify();
+        Ui.Run(async () =>
+        {
+            try
+            {
+                var via = await Client.WakeDevice(deviceId);
+                var names = string.Join(L.T("wake.viaSeparator"), via.Select(v => v.Length == 0 ? L.T("wake.viaSelf") : v).Distinct());
+                ShowToast(names.Length == 0 ? L.T("wake.sentPlain") : L.T("wake.sent", names));
+            }
+            catch (Exception e) { ShowToast(L.T("wake.failed", Fmt.Error(e)), true); }
+            finally
+            {
+                waking.Remove(deviceId);
+                Data.Notify();
+            }
+        });
+    }
+
+    // ---------- 会话录像 ----------
+
+    /// <summary>录像保存目录：用户「视频」文件夹下的 LemonGalaxy（selftest 用临时目录，不碰用户目录）</summary>
+    public string RecordingsDir
+    {
+        get
+        {
+            if (SelfTest) return IOPath.Combine(IOPath.GetTempPath(), "lemongalaxy-selftest-recordings");
+            var videos = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
+            if (string.IsNullOrEmpty(videos)) videos = IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Videos");
+            return IOPath.Combine(videos, "LemonGalaxy");
+        }
+    }
+
+    /// <summary>在资源管理器里打开文件所在文件夹并选中它</summary>
+    public void RevealInExplorer(string path)
+    {
+        if (SelfTest) return;
+        try
+        {
+            if (File.Exists(path)) Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = true });
+            else if (IOPath.GetDirectoryName(path) is { } dir && Directory.Exists(dir)) Process.Start(new ProcessStartInfo("explorer.exe", "\"" + dir + "\"") { UseShellExecute = true });
+            else ShowToast(L.T("remote.record.missing"), true);
+        }
+        catch (Exception e) { ShowError(e); }
+    }
 }
 
 /// <summary>一条与被控设备的端到端会话</summary>

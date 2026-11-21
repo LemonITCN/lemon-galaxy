@@ -58,6 +58,10 @@ internal sealed class AppSettings : Observable
     public bool RemoteAudio { get => B("remoteAudio", true); set => Set("remoteAudio", value); }
     public bool ReattachTerminals { get => B("reattachTerminals", true); set => Set("reattachTerminals", value); }
 
+    // 本机被控（Windows 被控服务）
+    /// <summary>远程结束后自动锁屏：最后一次在本机设置成功的值（服务的数据目录只有管理员能读，主控读不到实际值）</summary>
+    public bool WorkerLockOnEnd { get => B("workerLockOnEnd", false); set => Set("workerLockOnEnd", value); }
+
     // AI
     public string AiDefaultMode { get => S("aiDefaultMode", "confirmDangerous"); set => Set("aiDefaultMode", value); }
     public bool AiPlanFirst { get => B("aiPlanFirst", false); set => Set("aiPlanFirst", value); }

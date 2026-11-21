@@ -32,9 +32,16 @@ internal interface ICoreClient
     Task<VaultEntry> VaultSave(VaultEntry entry);
     Task VaultDelete(string id);
 
+    /// <summary>能不能远程开机：设备离线、能被控、上报过网卡地址</summary>
+    bool CanWake(string deviceId);
+    /// <summary>远程开机：本机或同一网络里在线的设备代发唤醒包，返回代发设备名（空字符串表示本机）</summary>
+    Task<string[]> WakeDevice(string deviceId);
+
     Task<ICorePeer> Connect(string deviceId);
     Task<ICorePeer> ConnectAssist(string deviceCode, string verificationCode);
     Task<ICoreSsh> ConnectSsh(string hostId, SecretPrompt prompt);
+    /// <summary>按加密库里的端口映射规则开启映射（经由设备或 SSH 主机），stop() 之前一直有效</summary>
+    Task<ICorePortForward> StartPortForward(string entryId, SecretPrompt prompt);
     /// <summary>准备连接加密库里的 rdp_host：经由设备时在本机开端口转发</summary>
     Task<RdpTarget> OpenRdp(string hostId);
     void CloseRdp(string forwardId);
@@ -145,7 +152,13 @@ internal interface ICoreDisplay
     void SendInput(InputEvent e);
     void RequestKeyframe();
     void SetBitrate(uint kbps);
+    /// <summary>关画面；正在录像时内核会自动结束录像</summary>
     void Stop();
+    /// <summary>开始录像到 path（分片 MP4，不重新编码）；withAudio 时把正在收听的声音一起录</summary>
+    Task StartRecording(string path, bool withAudio);
+    /// <summary>停止录像（没在录时报错）；被控端分辨率中途变化时会分成几个文件</summary>
+    RecordingInfo StopRecording();
+    bool IsRecording();
 }
 
 internal interface ICorePortForward

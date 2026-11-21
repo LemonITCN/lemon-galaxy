@@ -155,6 +155,7 @@ internal static class HostTree
             VaultData.RdpHost r => r with { Label = name },
             VaultData.Credential c => c with { Label = name },
             VaultData.Snippet s => s with { Label = name },
+            VaultData.PortForward p => p with { Label = name },
             _ => null,
         };
         if (d != null) Ui.Run(async () => await app.Save(e with { Data = d }));
@@ -226,6 +227,7 @@ internal static class HostTree
             case NodeKind.Device:
                 if (n.Device is { } d && !d.IsSelf && d.Kind != DeviceKind.Mobile && n.DeviceId is { } id)
                 {
+                    if (app.CanWake(id)) list.Add(new(L.T("wake.action"), () => app.WakeDevice(id), !app.IsWaking(id)));
                     if (d.Platform is Platform.Windows or Platform.Macos) list.Add(new(L.T("connect.desktop"), () => app.OpenRemoteDesktop(id)));
                     list.Add(new(L.T("connect.terminal"), () => app.OpenTerminalAsking(id)));
                     list.Add(new(L.T("connect.files"), () => app.OpenSftp(id)));

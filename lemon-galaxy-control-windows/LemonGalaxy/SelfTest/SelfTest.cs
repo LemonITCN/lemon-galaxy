@@ -51,6 +51,7 @@ internal static class SelfTest
             Styles.Install(app);
             if (Styles.LoadError != null) Problems.Add("控件模板解析失败：" + Styles.LoadError);
             CheckIcons();
+            CheckForwardDraft();
             Clock.FrozenMs = 1_795_225_692_000;      // 2026-11-21 09:48:12（北京时间）
             var fakeHome = MakeFakeHome();
             LocalFileSource.HomeOverride = fakeHome;
@@ -91,6 +92,41 @@ internal static class SelfTest
             try { _ = Icons.Get(n); }
             catch (Exception e) { Problems.Add($"图标 {n} 解析失败：{e.Message}"); }
         }
+    }
+
+    /// <summary>端口映射编辑草稿的校验：经由恰好一个、目标主机必填、端口 1–65535、本机端口 0（或留空）为自动</summary>
+    private static void CheckForwardDraft()
+    {
+        void Expect(bool ok, string what) { if (!ok) Problems.Add("端口映射草稿：" + what); }
+        var d = new ForwardDraft { RemoteHost = "10.0.0.5", RemotePort = "5432" };
+        Expect(!d.IsValid, "没选经由也通过了校验");
+        d.Via = "dev:dev-build";
+        Expect(d.IsValid, "合法的规则没通过校验");
+        Expect(d.LocalPortValue == 0, "本机端口留空应为 0（自动）");
+        d.RemotePort = "70000";
+        Expect(!d.IsValid, "目标端口 70000 通过了校验");
+        d.RemotePort = "0";
+        Expect(!d.IsValid, "目标端口 0 通过了校验");
+        d.RemotePort = "5432";
+        d.LocalPort = "abc";
+        Expect(!d.IsValid, "本机端口 abc 通过了校验");
+        d.LocalPort = "65536";
+        Expect(!d.IsValid, "本机端口 65536 通过了校验");
+        d.LocalPort = "0";
+        Expect(d.IsValid && d.LocalPortValue == 0, "本机端口 0 应表示自动");
+        d.RemoteHost = "  ";
+        Expect(!d.IsValid, "目标主机为空也通过了校验");
+        d.RemoteHost = "db.internal";
+        Expect(d.Build().Data is VaultData.PortForward { ViaDeviceId: "dev-build", ViaSshHostId: null, LocalPort: 0, RemotePort: 5432, Label: "db.internal:5432" }, "经由设备的规则组装不对");
+        d.Via = "ssh:s-web1";
+        d.LocalPort = "15432";
+        Expect(d.Build().Data is VaultData.PortForward { ViaDeviceId: null, ViaSshHostId: "s-web1", LocalPort: 15432 }, "经由 SSH 主机的规则组装不对");
+    }
+
+    private static void ClearToast(AppModel app)
+    {
+        app.CurrentToast = null;
+        app.Overlay.Notify();
     }
 
     /// <summary>本机一侧用的假主目录（文件名、时间都固定）</summary>
@@ -237,6 +273,21 @@ internal static class SelfTest
         app.ShowModal(new ModalSpec { Width = 420, Build = () => Modals.AssistConnectCard(app) });
         Capture($"{prefix}-18-assist-connect", root);
         app.CloseModal();
+        // 离线设备远程开机：详情里的远程开机、右键菜单、发出后的提示
+        if (!app.CanWake("dev-reception")) Problems.Add("远程开机：离线且上报过网卡地址的前台电脑应能远程开机");
+        if (app.CanWake("dev-nas")) Problems.Add("远程开机：没有上报网卡地址的 NAS 不应显示远程开机");
+        if (app.CanWake("dev-office")) Problems.Add("远程开机：在线设备不应显示远程开机");
+        if (app.Nodes().FirstOrDefault(n => n.Id == "dev:dev-reception") is not { } wakeNode || !app.ContextMenu(wakeNode).Any(m => m.Title == L.T("wake.action")))
+            Problems.Add("远程开机：离线设备的右键菜单里没有远程开机");
+        app.Selection = "dev:dev-reception";
+        app.Nav.Notify();
+        app.WakeDevice("dev-reception");
+        Wait("远程开机", () => !app.IsWaking("dev-reception") && app.CurrentToast != null);
+        if (app.CurrentToast is not { IsError: false }) Problems.Add("远程开机：没有成功提示（" + app.CurrentToast?.Text + "）");
+        Capture($"{prefix}-19-hosts-device-wake", root);
+        ClearToast(app);
+        app.Selection = null;
+        app.Nav.Notify();
 
         // 3. 终端
         app.OpenTerminal("dev-build");
@@ -313,6 +364,24 @@ internal static class SelfTest
             remote2.ToggleAudio();
             Wait("远端声音重新开始", () => remote2.AudioOn, 5000);
         }
+        // 录像：工具栏红点与计时；停止后提示保存位置并可在资源管理器中显示
+        if (app.ActiveTab is RemoteTab remote3)
+        {
+            remote3.ToggleRecording();
+            if (Wait("开始录像", () => remote3.Recording))
+            {
+                if (!remote3.ChannelRecording) Problems.Add("录像：界面显示在录，画面通道没有在录");
+                remote3.RecordingSinceMs = Clock.NowMs - 157_000;
+                remote3.Notify();
+                Capture($"{prefix}-42-remote-recording", root);
+                remote3.ToggleRecording();
+                if (remote3.Recording || remote3.ChannelRecording) Problems.Add("录像：停止后状态不对");
+                if (app.CurrentToast is not { IsError: false, ActionTitle: not null })
+                    Problems.Add("录像：停止后没有带「在资源管理器中显示」的提示（" + app.CurrentToast?.Text + "）");
+                Capture($"{prefix}-43-remote-recording-saved", root);
+                ClearToast(app);
+            }
+        }
 
         // 6. AI 智能体
         app.SelectHome(NavSection.Ai);
@@ -351,6 +420,38 @@ internal static class SelfTest
         app.SelectedSnippet = "n-docker";
         app.SelectHome(NavSection.Snippets);
         Capture($"{prefix}-60-snippets", root);
+
+        // 7b. 端口映射：登录后自动开启（经由离线设备的会失败）、手动开启（自动选端口）、详情、编辑、经由 SSH 主机时问主机密钥
+        app.SelectedForward = null;
+        app.Editing = null;
+        app.SelectHome(NavSection.Forwards);
+        Wait("端口映射自动开启", () => app.Forwards.StateOf("p-db") == ForwardState.Running && app.Forwards.StateOf("p-nas") == ForwardState.Failed);
+        if (app.Forwards.StateOf("p-grafana") != ForwardState.Stopped || app.Forwards.StateOf("p-redis") != ForwardState.Stopped)
+            Problems.Add("端口映射：没勾「登录后自动开启」的规则被自动开启了");
+        app.Forwards.Start("p-grafana");
+        Wait("端口映射手动开启", () => app.Forwards.StateOf("p-grafana") == ForwardState.Running);
+        if (app.Forwards.Run("p-grafana") is not { Port: > 0 }) Problems.Add("端口映射：自动选的本机端口没有显示");
+        Capture($"{prefix}-65-forwards", root);
+        app.SelectedForward = "p-db";
+        app.Nav.Notify();
+        Capture($"{prefix}-66-forwards-detail", root);
+        app.SelectedForward = "p-redis";
+        app.Editing = new EditTarget.Forward("p-redis");
+        app.Nav.Notify();
+        Capture($"{prefix}-67-forwards-editor", root);
+        app.Editing = null;
+        app.Nav.Notify();
+        if (app.Modal != null) app.CloseModal();
+        app.Forwards.Start("p-redis");
+        if (Wait("端口映射经 SSH 主机确认主机密钥", () => app.Modal != null && app.Forwards.StateOf("p-redis") == ForwardState.Starting))
+        {
+            Capture($"{prefix}-68-forwards-ssh-prompt", root);
+            app.CloseModal(true);
+            Wait("取消后端口映射回到已停止", () => app.Forwards.StateOf("p-redis") == ForwardState.Stopped);
+        }
+        ClearToast(app);
+        app.SelectedForward = null;
+        app.Nav.Notify();
 
         // 8. 本机被控（Windows 被控端系统服务）
         app.SelectHome(NavSection.Local);
@@ -394,6 +495,7 @@ internal static class SelfTest
         settings.AutoHideList = true;
 
         app.CloseAllTabs();
+        app.Forwards.StopAll();
         Ui.Pump(50);
     }
 

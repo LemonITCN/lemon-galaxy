@@ -30,9 +30,13 @@ internal sealed class RealClient : ICoreClient
     public Task<VaultEntry> VaultSave(VaultEntry entry) => c.VaultSave(entry);
     public Task VaultDelete(string id) => c.VaultDelete(id);
 
+    public bool CanWake(string deviceId) => c.CanWake(deviceId);
+    public Task<string[]> WakeDevice(string deviceId) => c.WakeDevice(deviceId);
+
     public async Task<ICorePeer> Connect(string deviceId) => new RealPeer(await c.Connect(deviceId));
     public async Task<ICorePeer> ConnectAssist(string deviceCode, string verificationCode) => new RealPeer(await c.ConnectAssist(deviceCode, verificationCode));
     public async Task<ICoreSsh> ConnectSsh(string hostId, SecretPrompt prompt) => new RealSsh(await c.ConnectSsh(hostId, prompt));
+    public async Task<ICorePortForward> StartPortForward(string entryId, SecretPrompt prompt) => new RealForward(await c.StartPortForward(entryId, prompt));
     public Task<RdpTarget> OpenRdp(string hostId) => c.OpenRdp(hostId);
     public void CloseRdp(string forwardId) => c.CloseRdp(forwardId);
     public Task<UpdateInfo?> CheckUpdate(string component, string platform, string arch, string current) => c.CheckUpdate(component, platform, arch, current);
@@ -171,6 +175,9 @@ internal sealed class RealDisplay : ICoreDisplay
     public void RequestKeyframe() => d.RequestKeyframe();
     public void SetBitrate(uint kbps) => d.SetBitrate(kbps);
     public void Stop() => d.Stop();
+    public Task StartRecording(string path, bool withAudio) => d.StartRecording(path, withAudio);
+    public RecordingInfo StopRecording() => d.StopRecording();
+    public bool IsRecording() => d.IsRecording();
 }
 
 internal sealed class RealForward : ICorePortForward

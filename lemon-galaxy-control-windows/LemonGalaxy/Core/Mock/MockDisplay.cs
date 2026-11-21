@@ -21,11 +21,18 @@ internal sealed class MockDisplayChannel : ICoreDisplay
     private bool stopped;
     private ulong frame;
     private readonly int w, h;
+    private readonly bool zh;
+    private readonly uint kbps;
+    /// <summary>模拟录像：不写文件，只记下路径与开始时间（Clock 毫秒，selftest 下时钟冻结）</summary>
+    private string? recordPath;
+    private long recordStartMs;
 
     public MockDisplayChannel(DeviceInfo device, DisplayInfo display, DisplayOptions options, VideoSink sink, bool zh, bool live)
     {
         this.sink = sink;
         this.display = display;
+        this.zh = zh;
+        kbps = options.BitrateKbps;
         // 模拟端不按原始分辨率出流（CPU 画图太慢），长边限制在 1280，宽高取偶数
         var scale = Math.Min(1.0, 1280.0 / Math.Max(display.Width, display.Height));
         w = (int)(display.Width * scale) & ~1;
@@ -83,9 +90,40 @@ internal sealed class MockDisplayChannel : ICoreDisplay
 
     public void Stop()
     {
-        lock (lk) stopped = true;
+        lock (lk)
+        {
+            stopped = true;
+            // 与内核一致：关画面时自动结束录像
+            recordPath = null;
+        }
         timer.Dispose();
     }
+
+    public Task StartRecording(string path, bool withAudio)
+    {
+        lock (lk)
+        {
+            if (stopped) return Task.FromException(new GalaxyException.Other(zh ? "画面已关闭" : "The display is closed"));
+            if (recordPath != null) return Task.FromException(new GalaxyException.Other(zh ? "已经在录像" : "Already recording"));
+            recordPath = path;
+            recordStartMs = Clock.NowMs;
+        }
+        return Task.CompletedTask;
+    }
+
+    public RecordingInfo StopRecording()
+    {
+        lock (lk)
+        {
+            if (recordPath == null) throw new GalaxyException.Other(zh ? "没有在录像" : "Not recording");
+            var ms = (ulong)Math.Max(0, Clock.NowMs - recordStartMs);
+            var info = new RecordingInfo(new[] { recordPath }, ms, ms * kbps / 8);
+            recordPath = null;
+            return info;
+        }
+    }
+
+    public bool IsRecording() { lock (lk) return recordPath != null; }
 }
 
 /// <summary>模拟内核的「解码器」：还原 MockDisplayChannel 的原始帧</summary>

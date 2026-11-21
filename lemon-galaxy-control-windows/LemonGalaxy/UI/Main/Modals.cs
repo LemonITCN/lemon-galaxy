@@ -41,7 +41,13 @@ internal static class Modals
             Choice("sparkles", L.T("connect.ai"), app.AiEnabled, () => app.OpenAi(new AgentTarget(AgentTargetKind.Device, deviceId))));
         FrameworkElement? offline = null;
         if (d is { Online: false })
-            offline = K.Row(6, K.StatusDot(K.DotOf(d), 7, Th.Card), K.Text(d.LanSeen ? L.T("device.lanOnly") : L.T("device.offline"), 12, Th.Secondary));
+        {
+            // 离线且能远程开机：状态行右边给一个远程开机
+            var wake = app.CanWake(deviceId)
+                ? K.SecondaryButton(L.T("wake.action"), () => { app.CloseModal(); app.WakeDevice(deviceId); }, icon: "power")
+                : null;
+            offline = K.Row(6, K.StatusDot(K.DotOf(d), 7, Th.Card), K.Grow(K.Text(d.LanSeen ? L.T("device.lanOnly") : L.T("device.offline"), 12, Th.Secondary)), wake);
+        }
         return K.Col(16,
             Header(app, app.DeviceName(deviceId), d == null ? null : $"{d.Hostname} · {d.OsVersion}", K.PlatformGlyph(d?.Platform ?? Platform.Linux, 22, Th.Secondary)),
             choices, offline);

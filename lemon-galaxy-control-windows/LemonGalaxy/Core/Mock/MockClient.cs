@@ -27,6 +27,8 @@ internal sealed class MockClient : ICoreClient
     private readonly Dictionary<string, MockConversation> saved = new();
     private readonly SerialQueue queue = new();
     private Timer? liveTimer;
+    /// <summary>端口映射占用的本机端口（模拟端口冲突）</summary>
+    private readonly HashSet<ushort> forwardPorts = new();
 
     public MockClient(SecureStore store, ClientListener listener, string locale, MockOptions options)
     {
@@ -208,6 +210,40 @@ internal sealed class MockClient : ICoreClient
         queue.Post(listener.OnVaultChanged);
     }
 
+    // ---------- 远程开机 ----------
+
+    public bool CanWake(string deviceId)
+    {
+        var d = Device(deviceId);
+        return d != null && !d.Online && d.Kind != DeviceKind.Mobile && MockData.HasMac(d.Id);
+    }
+
+    public async Task<string[]> WakeDevice(string deviceId)
+    {
+        await Delay(500);
+        var d = Device(deviceId) ?? throw new GalaxyException.Other(Z("找不到这台设备", "Device not found"));
+        if (!MockData.HasMac(d.Id))
+            throw new GalaxyException.Other(Z("这台设备还没有上报网卡地址（升级到新版本并上线一次后才能远程开机）", "This device has not reported its network adapter address yet (update it and bring it online once first)"));
+        // 与前台电脑同一网络的在线设备代发
+        var via = new[] { Device("dev-office")?.Hostname ?? "" };
+        if (Options.LiveSimulation)
+        {
+            // 演示：8 秒后上线
+            Timer? t = null;
+            t = new Timer(_ =>
+            {
+                t?.Dispose();
+                lock (lk)
+                {
+                    var i = devices.FindIndex(x => x.Id == deviceId);
+                    if (i >= 0) devices[i] = devices[i] with { Online = true, LastSeenAt = MockData.Now };
+                }
+                listener.OnDevicesChanged();
+            }, null, 8000, Timeout.Infinite);
+        }
+        return via;
+    }
+
     // ---------- 连接 ----------
 
     public async Task<ICorePeer> Connect(string deviceId)
@@ -257,6 +293,37 @@ internal sealed class MockClient : ICoreClient
         }
         var via = h.JumpDeviceId is { } jd ? "device:" + (Device(jd)?.Hostname ?? jd) : "direct";
         return new MockSsh(this, new SshInfo(hostId, h.Label, h.Host, h.Port, h.Username, via));
+    }
+
+    public async Task<ICorePortForward> StartPortForward(string entryId, SecretPrompt prompt)
+    {
+        await Delay(300);
+        VaultEntry? e;
+        lock (lk) e = vault.FirstOrDefault(v => v.Id == entryId);
+        if (e?.Data is not VaultData.PortForward f) throw new GalaxyException.NotFound(Z("端口映射规则不存在", "Port forwarding rule not found"));
+        if (f.RemoteHost.Trim().Length == 0 || f.RemotePort == 0) throw new GalaxyException.Other(Z("目标地址或端口没填", "The target address or port is missing"));
+        ushort port;
+        if (f.ViaDeviceId is { Length: > 0 } did)
+        {
+            var d = Device(did) ?? throw new GalaxyException.NotFound(Z("设备不存在", "Device not found"));
+            if (!d.Online && !d.LanSeen) throw new GalaxyException.Network(Z("设备离线", "The device is offline"));
+            port = f.LocalPort != 0 ? f.LocalPort : (ushort)(50_000 + f.RemotePort % 1000);
+        }
+        else if (f.ViaSshHostId is { Length: > 0 } hid)
+        {
+            // 与真内核一样：经由 SSH 主机时先登录（可能经 prompt 确认主机密钥、问密码）
+            await ConnectSsh(hid, prompt);
+            port = f.LocalPort != 0 ? f.LocalPort : (ushort)(52_000 + f.RemotePort % 1000);
+        }
+        else throw new GalaxyException.Other(Z("没有指定经由哪台设备或 SSH 主机", "No device or SSH host to go through"));
+        lock (lk)
+        {
+            if (f.LocalPort == 0) while (forwardPorts.Contains(port)) port++;
+            else if (forwardPorts.Contains(port)) throw new GalaxyException.Other(Z($"本机端口 {port} 已被占用", $"Local port {port} is already in use"));
+            forwardPorts.Add(port);
+        }
+        var p = port;
+        return new MockPortForward(p, () => { lock (lk) forwardPorts.Remove(p); });
     }
 
     public async Task<RdpTarget> OpenRdp(string hostId)
@@ -539,9 +606,10 @@ internal sealed class MockSsh : ICoreSsh
 internal sealed class MockPortForward : ICorePortForward
 {
     private readonly ushort port;
-    public MockPortForward(ushort port) { this.port = port; }
+    private Action? release;
+    public MockPortForward(ushort port, Action? release = null) { this.port = port; this.release = release; }
     public ushort LocalPort() => port;
-    public void Stop() { }
+    public void Stop() => Interlocked.Exchange(ref release, null)?.Invoke();
 }
 
 /// <summary>没有文件权限时：每个操作都报权限错误</summary>

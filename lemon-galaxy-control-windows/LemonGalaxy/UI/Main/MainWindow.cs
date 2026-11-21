@@ -86,6 +86,7 @@ internal sealed class MainWindow : Window
                 s.WindowHeight = (int)ActualHeight;
             }
             app.CloseAllTabs();
+            app.Forwards.StopAll();
         };
         // 系统切换深浅色时跟随（外观设为「跟随系统」时）
         Microsoft.Win32.SystemEvents.UserPreferenceChanged += (_, e) =>

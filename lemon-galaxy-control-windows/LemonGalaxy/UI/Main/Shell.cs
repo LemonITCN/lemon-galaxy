@@ -67,6 +67,7 @@ internal static class Shell
         NavSection.Hosts => HostsViews.Middle(app),
         NavSection.Sftp => SftpViews.Middle(app),
         NavSection.Ai => AiViews.Middle(app),
+        NavSection.Forwards => ForwardViews.Middle(app),
         NavSection.Snippets => SnippetViews.Middle(app),
         NavSection.Local => LocalViews.Middle(app),
         _ => SettingsViews.Middle(app),
@@ -122,6 +123,7 @@ internal static class Shell
         NavSection.Hosts => HostsViews.Home(app),
         NavSection.Sftp => SftpViews.Home(app),
         NavSection.Ai => AiViews.Home(app),
+        NavSection.Forwards => ForwardViews.Home(app),
         NavSection.Snippets => SnippetViews.Home(app),
         NavSection.Local => LocalViews.Home(app),
         _ => SettingsViews.Home(app),
@@ -132,6 +134,7 @@ internal static class Shell
         NavSection.Hosts => "server",
         NavSection.Sftp => "folder",
         NavSection.Ai => "sparkles",
+        NavSection.Forwards => "forward",
         NavSection.Snippets => "code",
         NavSection.Local => "display",
         _ => "gear",
@@ -142,6 +145,7 @@ internal static class Shell
         NavSection.Hosts => "hosts",
         NavSection.Sftp => "sftp",
         NavSection.Ai => "ai",
+        NavSection.Forwards => "forwards",
         NavSection.Snippets => "snippets",
         NavSection.Local => "local",
         _ => "settings",
@@ -272,12 +276,19 @@ internal static class Shell
     {
         var t = app.CurrentToast;
         if (t == null) return null;
+        Btn? action = null;
+        if (t.ActionTitle != null && t.Action != null)
+        {
+            var act = t.Action;
+            action = K.LinkButton(t.ActionTitle, () => { app.CurrentToast = null; app.Overlay.Notify(); act(); }, Th.Accent, 13);
+            ((TextBlock)action.Child).FontWeight = FontWeights.SemiBold;
+        }
         var b = new Border
         {
-            Background = Th.Elevated, BorderBrush = Th.Border, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(9), Padding = new Thickness(14, 9, 14, 9),
-            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 22), MaxWidth = 560,
+            Background = Th.Elevated, BorderBrush = Th.Border, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(9), Padding = new Thickness(14, 9, action == null ? 14 : 8, 9),
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 22), MaxWidth = 640,
             Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18, ShadowDepth = 3, Direction = 270, Opacity = 0.2 },
-            Child = K.Row(8, K.Icon(t.IsError ? "warning" : "checkCircle", 15, t.IsError ? Th.Danger : Th.Success), K.Grow(K.Text(t.Text, 13, Th.Text, wrap: true))),
+            Child = K.Row(8, K.Icon(t.IsError ? "warning" : "checkCircle", 15, t.IsError ? Th.Danger : Th.Success), K.Grow(K.Text(t.Text, 13, Th.Text, wrap: true)), action),
             Cursor = Cursors.Hand,
         };
         b.MouseLeftButtonDown += (_, _) => { app.CurrentToast = null; app.Overlay.Notify(); };

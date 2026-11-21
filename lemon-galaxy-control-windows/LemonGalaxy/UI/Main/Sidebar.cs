@@ -4,10 +4,10 @@ using System.Windows.Media;
 
 namespace LemonGalaxy.UI;
 
-/// <summary>左侧导航：标志、六个分区、底部账号</summary>
+/// <summary>左侧导航：标志、七个分区、底部账号</summary>
 internal static class Sidebar
 {
-    private static readonly NavSection[] Sections = { NavSection.Hosts, NavSection.Sftp, NavSection.Ai, NavSection.Snippets, NavSection.Local, NavSection.Settings };
+    private static readonly NavSection[] Sections = { NavSection.Hosts, NavSection.Sftp, NavSection.Ai, NavSection.Forwards, NavSection.Snippets, NavSection.Local, NavSection.Settings };
 
     public static FrameworkElement Build(AppModel app)
     {
@@ -36,7 +36,7 @@ internal static class Sidebar
             {
                 Width = compact ? 58 : 200, Background = Th.Sidebar, Padding = new Thickness(compact ? 7 : 10, 0, compact ? 7 : 10, 10), Child = col,
             };
-        }).On(app.Nav, app.Data, s, app.Worker.Changed);
+        }).On(app.Nav, app.Data, s, app.Worker.Changed, app.Forwards.Changed);
     }
 
     private static FrameworkElement Item(AppModel app, NavSection sec, bool compact)
@@ -69,6 +69,12 @@ internal static class Sidebar
         {
             var n = app.Devices.Count(d => d.Online && !d.IsSelf && d.Kind != DeviceKind.Mobile);
             return n > 0 ? K.Text(n.ToString(), 11.5, Th.Tertiary, FontWeights.Medium) : null;
+        }
+        if (sec == NavSection.Forwards)
+        {
+            // 正在运行的端口映射数
+            var n = app.Forwards.RunningCount;
+            return n > 0 ? K.Text(n.ToString(), 11.5, Th.Success, FontWeights.Medium) : null;
         }
         if (sec == NavSection.Local)
         {

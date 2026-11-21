@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -37,6 +38,11 @@ internal sealed class RemoteTab : TabModel
     public bool AudioOn;
     public bool AudioBusy;
     public bool AudioSupported => Peer?.Info.Capabilities.Contains("audio") == true;
+    /// <summary>正在录像（内核把收到的画面与声音原样封装成 MP4）</summary>
+    public bool Recording;
+    public bool RecordingBusy;
+    /// <summary>开始录像的时刻（Clock 毫秒），工具栏显示已录时长</summary>
+    public long RecordingSinceMs;
     public Window? FullscreenWindow;
 
     /// <summary>画面元素（常驻，视图重建或进入全屏时挂到新父元素上）</summary>
@@ -60,6 +66,10 @@ internal sealed class RemoteTab : TabModel
     private ICoreAudio? audio;
     /// <summary>每次开始或停止声音加一：开到一半被关掉、断线或关闭标签时，迟到的结果直接停掉丢弃</summary>
     private int audioGen;
+    private ICoreDisplay? recordChannel;
+    private string? recordPath;
+    /// <summary>每次开始或停止录像加一（同 audioGen）</summary>
+    private int recordGen;
 
     public RemoteTab(AppModel app, string deviceId, string title) : base(app, TabKind.Remote, title)
     {
@@ -94,8 +104,13 @@ internal sealed class RemoteTab : TabModel
             {
                 var p = await App.Peer(DeviceId!);
                 Peer = p;
-                // 会话断了：声音通道随之失效，停掉本机播放
-                p.Watch(this, () => { if (p.ClosedReason != null && ReferenceEquals(Peer, p)) StopAudio(); });
+                // 会话断了：声音通道随之失效，停掉本机播放；正在录像的结束并提示保存位置
+                p.Watch(this, () =>
+                {
+                    if (p.ClosedReason == null || !ReferenceEquals(Peer, p)) return;
+                    StopAudio();
+                    StopRecording();
+                });
                 Displays = await p.Session.ListDisplays();
                 var first = Displays.FirstOrDefault(d => d.Primary) ?? Displays.FirstOrDefault();
                 if (first == null)
@@ -121,6 +136,7 @@ internal sealed class RemoteTab : TabModel
 
     private void Fail(string reason)
     {
+        StopRecording();
         Phase = RemotePhase.Failed;
         FailReason = reason;
         Live = false;
@@ -131,6 +147,8 @@ internal sealed class RemoteTab : TabModel
     public async Task Open(uint id)
     {
         if (Peer == null) return;
+        // 换屏幕或改帧率要重开画面：正在录的先结束（关画面时内核也会自动结束）
+        StopRecording();
         try { channel?.Stop(); } catch { }
         channel = null;
         DisplayId = id;
@@ -349,6 +367,124 @@ internal sealed class RemoteTab : TabModel
         catch (Exception e) { Log.Error("停止声音失败：" + e.Message); }
     }
 
+    // ---------- 录像 ----------
+
+    /// <summary>工具栏的录像按钮：开始或停止</summary>
+    public void ToggleRecording()
+    {
+        if (Recording) StopRecording();
+        else StartRecording();
+    }
+
+    /// <summary>当前画面通道是否在录（selftest 核对内核状态与界面一致）</summary>
+    public bool ChannelRecording
+    {
+        get
+        {
+            try { return channel?.IsRecording() == true; }
+            catch { return false; }
+        }
+    }
+
+    private void StartRecording()
+    {
+        if (closed || Recording || RecordingBusy || channel == null || Phase != RemotePhase.Streaming) return;
+        var ch = channel;
+        string path;
+        try { path = NewRecordingPath(); }
+        catch (Exception e)
+        {
+            App.ShowToast(L.T("remote.record.startFailed", e.Message), true);
+            return;
+        }
+        var gen = ++recordGen;
+        var withAudio = AudioOn;
+        RecordingBusy = true;
+        Notify();
+        Ui.Run(async () =>
+        {
+            Exception? error = null;
+            try { await ch.StartRecording(path, withAudio); }
+            catch (Exception e) { error = e; }
+            if (gen != recordGen || closed || !ReferenceEquals(ch, channel))
+            {
+                // 等待期间画面关了或换了：这一路不要了（关画面时内核已自动结束录像）
+                if (error == null) { try { ch.StopRecording(); } catch { } }
+                return;
+            }
+            RecordingBusy = false;
+            if (error != null) App.ShowToast(L.T("remote.record.startFailed", Fmt.Error(error)), true);
+            else
+            {
+                Recording = true;
+                recordChannel = ch;
+                recordPath = path;
+                RecordingSinceMs = Clock.NowMs;
+                Log.Info("开始录像：" + path);
+            }
+            Notify();
+        });
+    }
+
+    /// <summary>停止录像并提示保存位置（可「在资源管理器中显示」）。没在录时什么也不做。</summary>
+    private void StopRecording()
+    {
+        if (!Recording && !RecordingBusy) return;
+        recordGen++;
+        var ch = recordChannel;
+        var path = recordPath;
+        var wasRecording = Recording;
+        var since = RecordingSinceMs;
+        Recording = false;
+        RecordingBusy = false;
+        recordChannel = null;
+        recordPath = null;
+        Notify();
+        if (!wasRecording || ch == null || path == null) return;
+        string[] paths;
+        long ms;
+        try
+        {
+            var info = ch.StopRecording();
+            paths = info.Paths;
+            // 内核给出的是媒体时长；没有时用界面计的时长
+            ms = info.DurationMs > 0 ? (long)info.DurationMs : Clock.NowMs - since;
+        }
+        catch (Exception e)
+        {
+            // 会话断了或画面已关：内核已自动结束录像，拿不到汇总，按已知路径提示
+            Log.Info("停止录像：" + Fmt.Error(e));
+            paths = App.SelfTest || File.Exists(path) ? new[] { path } : Array.Empty<string>();
+            ms = Clock.NowMs - since;
+        }
+        if (paths.Length == 0)
+        {
+            App.ShowToast(L.T("remote.record.empty"));
+            return;
+        }
+        var first = paths[0];
+        var text = paths.Length > 1
+            ? L.T("remote.record.savedParts", paths.Length, Fmt.Elapsed(ms))
+            : L.T("remote.record.saved", IOPath.GetFileName(first), Fmt.Elapsed(ms));
+        Log.Info("录像已保存：" + string.Join("，", paths));
+        App.ShowToast(text, false, L.T("remote.record.reveal"), () => App.RevealInExplorer(first));
+    }
+
+    /// <summary>%USERPROFILE%\Videos\LemonGalaxy\LemonGalaxy-设备名-yyyyMMdd-HHmmss.mp4（重名时加序号）</summary>
+    private string NewRecordingPath()
+    {
+        var dir = App.RecordingsDir;
+        if (!App.SelfTest) Directory.CreateDirectory(dir);
+        var raw = DeviceId != null && DeviceId.StartsWith("assist:", StringComparison.Ordinal) ? Peer?.Info.Hostname ?? Title : App.DeviceName(DeviceId ?? "");
+        var invalid = IOPath.GetInvalidFileNameChars();
+        var name = new string(raw.Trim().Select(c => invalid.Contains(c) || char.IsWhiteSpace(c) ? '-' : c).ToArray());
+        if (name.Length == 0) name = "remote";
+        var stamp = Fmt.Local(Clock.NowMs).ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+        var path = IOPath.Combine(dir, $"LemonGalaxy-{name}-{stamp}.mp4");
+        for (var i = 2; File.Exists(path); i++) path = IOPath.Combine(dir, $"LemonGalaxy-{name}-{stamp}-{i}.mp4");
+        return path;
+    }
+
     private void Send(InputEvent e)
     {
         try { channel?.SendInput(e); }
@@ -510,6 +646,8 @@ internal sealed class RemoteTab : TabModel
 
     public override void Close()
     {
+        // 关标签：先结束录像拿到保存位置，再关画面
+        StopRecording();
         closed = true;
         StopAudio();
         try { channel?.Stop(); } catch { }
@@ -610,6 +748,7 @@ internal static class RemoteView
         }, L.T("remote.keys")));
         items.Add(K.IconButton("clipboard", L.T("remote.clipboard"), () => { tab.ClipboardSync = !tab.ClipboardSync; tab.Notify(); }, tab.ClipboardSync));
         if (tab.AudioSupported) items.Add(K.IconButton(tab.AudioOn ? "volume" : "volumeOff", L.T("remote.sound"), tab.ToggleAudio, tab.AudioOn));
+        items.Add(RecordButton(tab));
         if (tab.PrivacySupported) items.Add(K.IconButton("eyeOff", L.T("remote.privacy"), tab.TogglePrivacy, tab.Privacy));
         items.Add(K.Spacer(8));
         var detail = tab.StreamW > 0 ? $"{tab.StreamW}×{tab.StreamH} · H.264" : "";
@@ -623,6 +762,29 @@ internal static class RemoteView
             Height = 40, Padding = new Thickness(10, 0, 10, 0), Background = Th.Content, BorderBrush = Th.Separator, BorderThickness = new Thickness(0, 0, 0, 1),
             Child = K.Row(6, items),
         };
+    }
+
+    /// <summary>录像：没在录时是圆点图标；录制中是红点 + 已录时长的胶囊，点一下停止</summary>
+    private static FrameworkElement RecordButton(RemoteTab tab)
+    {
+        if (!tab.Recording)
+        {
+            var b = K.IconButton("record", L.T("remote.record.start"), tab.ToggleRecording, size: 14);
+            b.IsEnabled = tab.Phase == RemotePhase.Streaming && !tab.RecordingBusy;
+            return b;
+        }
+        var elapsed = Fmt.Elapsed(Math.Max(0, Clock.NowMs - tab.RecordingSinceMs));
+        var pill = new Btn
+        {
+            Height = 26, CornerRadius = new CornerRadius(13), Padding = new Thickness(9, 0, 10, 0),
+            Normal = Th.B(Th.P.Danger, 0.12), HoverBrush = Th.B(Th.P.Danger, 0.2), PressBrush = Th.B(Th.P.Danger, 0.28),
+            Child = K.Row(6, new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, Fill = Th.Danger },
+                K.Text(elapsed, 12.5, Th.Danger, FontWeights.SemiBold, mono: true), K.Icon("stop", 9, Th.Danger)),
+        };
+        pill.UpdateLook();
+        K.Tip(pill, L.T("remote.record.stop"));
+        pill.Click += tab.ToggleRecording;
+        return pill;
     }
 
     private static readonly int[] FpsChoices = { 30, 60, 90, 120, 144 };

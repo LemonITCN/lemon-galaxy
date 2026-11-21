@@ -246,7 +246,7 @@ internal static class HostsViews
         // 编辑面板只在编辑目标变化时重建（输入框要保持焦点与内容）
         var editor = new Region(() =>
         {
-            if (app.Editing is null or EditTarget.NewSnippet) return null;
+            if (app.Editing is null or EditTarget.NewSnippet or EditTarget.Forward) return null;
             var panel = Editors.Panel(app, app.Editing);
             return K.Row(0, K.VLine(), new Border { Width = 360, Background = Th.List, Child = panel });
         }).Keyed(() => app.Editing).On(app.Nav);
@@ -404,11 +404,15 @@ internal static class HostsViews
         if (d.IsSelf) col.Add(K.Text(L.T("device.selfHint.win"), 13, Th.Secondary, wrap: true));
         else if (d.Kind == DeviceKind.Mobile) col.Add(K.Text(L.T("device.mobileHint"), 13, Th.Secondary, wrap: true));
         else
+        {
+            // 离线且能远程开机：连接方式上面放一条远程开机
+            if (app.CanWake(id)) col.Add(WakeCard(app, d));
             col.Add(K.Row(12,
                 ActionTile("display", L.T("connect.desktop"), connectable && gui, () => app.OpenRemoteDesktop(id)),
                 ActionTile("terminal", L.T("connect.terminal"), connectable, () => app.OpenTerminalAsking(id)),
                 ActionTile("folder", L.T("connect.files"), connectable, () => app.OpenSftp(id)),
                 ActionTile("sparkles", L.T("connect.ai"), connectable && app.AiEnabled, () => app.OpenAi(new AgentTarget(AgentTargetKind.Device, id)))));
+        }
         string status;
         if (d.Online) status = d.LanSeen ? L.T("device.onlineLan") : L.T("device.online");
         else if (d.LanSeen) status = L.T("device.lanOnly");
@@ -428,6 +432,18 @@ internal static class HostsViews
                     catch (Exception e) { app.ShowError(e); }
                 })), destructive: true)));
         return K.PageScroll(K.Col(20, col), 900);
+    }
+
+    /// <summary>离线设备的远程开机：状态 + 按钮，网络唤醒的前提放在 i 图标里</summary>
+    private static FrameworkElement WakeCard(AppModel app, DeviceInfo d)
+    {
+        var busy = app.IsWaking(d.Id);
+        var button = K.PrimaryButton(busy ? L.T("wake.sending") : L.T("wake.action"), () => app.WakeDevice(d.Id), icon: "power", enabled: !busy);
+        return K.Card(K.Row(12,
+            new Border { Width = 36, Height = 36, CornerRadius = new CornerRadius(9), Background = Th.Elevated, Child = K.Center(K.Icon("power", 17, Th.Secondary)) },
+            K.Grow(K.Col(3, K.Row(5, K.Text(L.T("device.offline"), 13.5, Th.Text, FontWeights.Medium), K.Info(L.T("wake.info"))),
+                K.Text(L.T("device.lastSeen") + " " + Fmt.Relative(d.LastSeenAt), 12, Th.Secondary))),
+            button), 14);
     }
 
     private static FrameworkElement SshDetail(AppModel app, VaultEntry e)

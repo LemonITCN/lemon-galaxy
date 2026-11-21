@@ -51,6 +51,15 @@ internal static class Fmt
         return new string(s);
     }
 
+    /// <summary>时长：mm:ss，满一小时 h:mm:ss（录像计时）</summary>
+    public static string Elapsed(long ms)
+    {
+        var t = TimeSpan.FromMilliseconds(Math.Max(0, ms));
+        return t.TotalHours >= 1
+            ? ((int)t.TotalHours).ToString(CultureInfo.InvariantCulture) + ":" + t.ToString(@"mm\:ss", CultureInfo.InvariantCulture)
+            : t.ToString(@"mm\:ss", CultureInfo.InvariantCulture);
+    }
+
     public static string Kilo(ulong n) => n >= 1000 ? (n / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + "k" : n.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>内核错误转成界面文字（GalaxyException 的 detail 已本地化）</summary>

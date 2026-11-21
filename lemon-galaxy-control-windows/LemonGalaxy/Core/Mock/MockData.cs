@@ -60,8 +60,17 @@ internal static class MockData
 
             E("k-web1", null, 0, new VaultData.KnownHost("10.0.1.21", 22, "ssh-ed25519", "SHA256:7k3F0Zb3QmH1pRk2nB8xYw9eLqT4cVd5sJ6uG2aN1oE")),
             E("k-vps", null, 1, new VaultData.KnownHost("203.0.113.8", 2222, "ecdsa-sha2-nistp256", "SHA256:Qe2mW8rT5yU7iO9pA1sD3fG5hJ7kL9zX2cV4bN6mQ8w")),
+
+            // 端口映射：经由设备（登录后自动开启）、经由 SSH 主机（自动选端口 / 要问密码）、经由离线设备（自动开启会失败）
+            E("p-db", null, 0, new VaultData.PortForward(Z("生产数据库", "Production database"), "dev-build", null, 15432, "10.0.2.10", 5432, true, "")),
+            E("p-grafana", null, 1, new VaultData.PortForward(Z("监控面板", "Grafana dashboard"), null, "s-web1", 0, "127.0.0.1", 3000, false, "")),
+            E("p-redis", null, 2, new VaultData.PortForward(Z("缓存 Redis", "Redis cache"), null, "s-dbp", 16379, "127.0.0.1", 6379, false, Z("经 db-primary 登录，连接时要输入密码。", "Signs in through db-primary and asks for the password."))),
+            E("p-nas", null, 3, new VaultData.PortForward(Z("家里 NAS 管理页", "Home NAS admin"), "dev-nas", null, 8443, "127.0.0.1", 443, true, "")),
         };
     }
+
+    /// <summary>上报过网卡地址的设备（能远程开机；家里 NAS 没有上报过）</summary>
+    public static bool HasMac(string id) => id is "dev-reception" or "dev-office" or "dev-build" or "dev-gpu" or "dev-imac";
 
     public static string Username(DeviceInfo d) => d.Platform switch
     {

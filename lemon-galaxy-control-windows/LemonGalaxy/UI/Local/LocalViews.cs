@@ -12,7 +12,8 @@ internal enum WorkerState { Unknown, NotInstalled, Stopped, Starting, Running }
 
 /// <summary>
 /// 本机被控：Windows 上由同目录附带的 lemon-galaxy-worker.exe 作为系统服务（LemonGalaxyWorker）负责（spec 3.0），
-/// 不用内核自带的被控服务。这里只查服务状态，并以管理员身份打开控制台执行 login / install-service / uninstall-service。
+/// 不用内核自带的被控服务。这里只查服务状态，并以管理员身份打开控制台执行 login / install-service / uninstall-service；
+/// 「远程结束后自动锁屏」以管理员身份在后台执行 lock-on-end on|off（服务每 2 秒检查 host.json，改完即生效）。
 /// </summary>
 internal sealed class WorkerServiceModel
 {
@@ -33,6 +34,11 @@ internal sealed class WorkerServiceModel
     }
 
     public bool WorkerPresent => File.Exists(AppInfo.WorkerExe);
+
+    /// <summary>远程结束后自动锁屏：执行中显示要改成的值，否则是本机最后一次设置成功的值</summary>
+    public bool LockOnEnd => lockOnEndPending ?? app.Settings.WorkerLockOnEnd;
+    public bool LockOnEndBusy => lockOnEndPending != null;
+    private bool? lockOnEndPending;
 
     /// <summary>selftest 用：指定显示的状态</summary>
     public void Fake(WorkerState s)
@@ -89,6 +95,116 @@ internal sealed class WorkerServiceModel
     {
         if (!WorkerPresent) { app.ShowToast(L.T("local.win.noWorker"), true); return; }
         RunElevated($"title LemonGalaxy & {Q(AppInfo.WorkerExe)} uninstall-service & echo. & pause");
+    }
+
+    /// <summary>以管理员身份在后台执行 lock-on-end on|off（写服务数据目录里的 host.json，服务自动重新读取）</summary>
+    public void SetLockOnEnd(bool on)
+    {
+        if (LockOnEndBusy) return;
+        if (app.SelfTest)
+        {
+            app.Settings.WorkerLockOnEnd = on;
+            Changed.Notify();
+            return;
+        }
+        if (!WorkerPresent)
+        {
+            app.ShowToast(L.T("local.win.noWorker"), true);
+            Changed.Notify();
+            return;
+        }
+        Process? p;
+        try
+        {
+            p = Process.Start(new ProcessStartInfo(AppInfo.WorkerExe, $"--data-dir {Q(ServiceDataDir())} lock-on-end {(on ? "on" : "off")}")
+            {
+                UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = AppInfo.BaseDir,
+            });
+        }
+        catch (Win32Exception e) when (e.NativeErrorCode == 1223)
+        {
+            // UAC 弹窗里点了「否」：开关回到原来的值
+            app.ShowToast(L.T("common.cancelled"));
+            Changed.Notify();
+            return;
+        }
+        catch (Exception e)
+        {
+            app.ShowError(e);
+            Changed.Notify();
+            return;
+        }
+        lockOnEndPending = on;
+        Changed.Notify();
+        Ui.Run(async () =>
+        {
+            var code = await Task.Run(() =>
+            {
+                try
+                {
+                    using (p)
+                    {
+                        if (p == null) return -1;
+                        return p.WaitForExit(20_000) ? p.ExitCode : -2;
+                    }
+                }
+                catch (Exception e)
+                {
+                    Log.Error("等待 lock-on-end 结束失败：" + e.Message);
+                    return -1;
+                }
+            });
+            lockOnEndPending = null;
+            if (code == 0)
+            {
+                app.Settings.WorkerLockOnEnd = on;
+                app.ShowToast(on ? L.T("local.win.lockOnEnd.on") : L.T("local.win.lockOnEnd.off"));
+            }
+            else app.ShowToast(L.T("local.win.lockOnEnd.failed", code), true);
+            Changed.Notify();
+        });
+    }
+
+    /// <summary>服务的数据目录：取服务启动命令里的 --data-dir（install-service 时写入），取不到时用管理员默认目录</summary>
+    private static string ServiceDataDir()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + ServiceName);
+            if (key?.GetValue("ImagePath") is string cmd)
+            {
+                var args = SplitArgs(cmd);
+                var i = args.IndexOf("--data-dir");
+                // 去掉末尾的反斜杠：放进引号后 \" 会被当成转义的引号
+                if (i >= 0 && i + 1 < args.Count && args[i + 1].TrimEnd('\\', '/') is { Length: > 2 } dir) return dir;
+            }
+        }
+        catch (Exception e) { Log.Info("读取被控服务的启动命令失败：" + e.Message); }
+        return IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "LemonGalaxy", "worker");
+    }
+
+    /// <summary>拆命令行：空白分隔，双引号里的空白不算</summary>
+    private static List<string> SplitArgs(string cmd)
+    {
+        var list = new List<string>();
+        var cur = new System.Text.StringBuilder();
+        var quoted = false;
+        var any = false;
+        foreach (var c in cmd)
+        {
+            if (c == '"') { quoted = !quoted; any = true; continue; }
+            if (char.IsWhiteSpace(c) && !quoted)
+            {
+                if (any) list.Add(cur.ToString());
+                cur.Clear();
+                any = false;
+                continue;
+            }
+            cur.Append(c);
+            any = true;
+        }
+        if (any) list.Add(cur.ToString());
+        return list;
     }
 
     private void RunElevated(string command)
@@ -184,6 +300,15 @@ internal static class LocalViews
                 K.Text(installed ? L.T("local.win.enabledHint") : L.T("local.win.enableHint"), 12.5, Th.Secondary, wrap: true))), action),
             K.HLine(),
             Steps(app, installed))));
+        if (installed)
+        {
+            // 被控设置：以管理员身份执行 worker 命令修改
+            var sw = K.Switch(w.LockOnEnd, w.SetLockOnEnd);
+            sw.IsEnabled = !w.LockOnEndBusy;
+            col.Add(K.Col(10, K.SectionLabel(L.T("local.win.settings")),
+                K.Card(K.Row(6, K.Text(L.T("local.win.lockOnEnd"), 13.5), K.Info(L.T("local.win.lockOnEnd.info")), K.Spacer(),
+                    w.LockOnEndBusy ? K.Spinner(14) : null, sw), 14)));
+        }
         col.Add(K.SectionLabel(L.T("local.win.features")));
         var grid = new AdaptiveGrid { MinItem = 220, Spacing = 10 };
         foreach (var (icon, title, key) in new[]
