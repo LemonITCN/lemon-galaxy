@@ -75,6 +75,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AiCmd,
     },
+    /// 升级服务器程序（从 GitHub 取最新发布，验发布签名；只支持 Linux）。升级后重启服务生效
+    SelfUpdate {
+        /// 只检查，不升级
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -142,6 +148,16 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::User { cmd }) => {
             let keys = keys::Keys::load(&cli.data_dir, &settings.public_host, &keys::TlsSource { cert_path: cli.tls_cert.clone(), key_path: cli.tls_key.clone() })?;
             return user_cli(&db, &keys, cmd);
+        }
+        Some(Cmd::SelfUpdate { check }) => {
+            let repo = settings.update_github_repo.clone();
+            let r = tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(update::self_update(&repo, *check))?;
+            match (r, check) {
+                (None, _) => println!("已是最新版本 {}", galaxy_proto::APP_VERSION),
+                (Some(v), true) => println!("有新版本 {v}（当前 {}）。运行 lemon-galaxy-server self-update 升级", galaxy_proto::APP_VERSION),
+                (Some(v), false) => println!("已升级到 {v}。重启服务生效，例如 systemctl restart lemon-galaxy-server"),
+            }
+            return Ok(());
         }
         Some(Cmd::Info) => {
             let keys = keys::Keys::load(&cli.data_dir, &settings.public_host, &keys::TlsSource { cert_path: cli.tls_cert.clone(), key_path: cli.tls_key.clone() })?;

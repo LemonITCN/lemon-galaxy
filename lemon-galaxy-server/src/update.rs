@@ -347,3 +347,51 @@ mod tests {
         assert_eq!(super::version_in_name("nothing"), None);
     }
 }
+
+/// 命令行 `self-update`：服务器自己升级（从 GitHub 取最新发布，验签名与 SHA-256，替换当前程序）。只支持 Linux。
+pub async fn self_update(repo: &str, check_only: bool) -> anyhow::Result<Option<String>> {
+    let http = reqwest::Client::builder().user_agent(format!("LemonGalaxy/{}", galaxy_proto::APP_VERSION)).connect_timeout(Duration::from_secs(15)).build()?;
+    let rel: GhRelease = http.get(format!("https://api.github.com/repos/{repo}/releases/latest")).header("accept", "application/vnd.github+json").send().await?.error_for_status()?.json().await?;
+    let version = rel.tag_name.trim_start_matches('v').to_string();
+    if !version_newer(&version, galaxy_proto::APP_VERSION) {
+        return Ok(None);
+    }
+    if check_only {
+        return Ok(Some(version));
+    }
+    anyhow::ensure!(cfg!(target_os = "linux"), "自动升级只支持 Linux 版服务器，其他系统请手动下载替换");
+    let arch = galaxy_proto::update::this_arch();
+    let name = format!("lemon-galaxy-server-{version}-linux-{arch}.tar.gz");
+    let url_of = |n: &str| rel.assets.iter().find(|a| a.name == n).map(|a| a.browser_download_url.clone());
+    let asset = url_of(&name).ok_or_else(|| anyhow::anyhow!("发布 {version} 里没有 {name}"))?;
+    let sums = http.get(url_of(SUMS_FILE).ok_or_else(|| anyhow::anyhow!("没有 {SUMS_FILE}"))?).send().await?.error_for_status()?.text().await?;
+    let sig_b64 = http.get(url_of(SUMS_SIG_FILE).ok_or_else(|| anyhow::anyhow!("发布 {version} 没有签名，不升级"))?).send().await?.error_for_status()?.text().await?;
+    let sig = base64::engine::general_purpose::STANDARD.decode(sig_b64.trim())?;
+    galaxy_crypto::verify(&RELEASE_SIGN_PUBKEY, RELEASE_SIGN_DOMAIN, sums.as_bytes(), &sig).map_err(|_| anyhow::anyhow!("发布签名无效，已拒绝"))?;
+    let want = parse_sums(&sums).into_iter().find(|(n, _)| n == &name).map(|(_, h)| h).ok_or_else(|| anyhow::anyhow!("{name} 不在清单里"))?;
+    let bytes = http.get(asset).timeout(Duration::from_secs(1800)).send().await?.error_for_status()?.bytes().await?;
+    anyhow::ensure!(hex::encode(Sha256::digest(&bytes)) == want, "下载的文件校验不对");
+    let exe = std::env::current_exe()?;
+    let new = exe.with_extension("new");
+    {
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
+        let mut found = false;
+        for e in ar.entries()? {
+            let mut e = e?;
+            if e.path()?.file_name().map(|n| n == "lemon-galaxy-server").unwrap_or(false) {
+                let mut out = std::fs::File::create(&new)?;
+                std::io::copy(&mut e, &mut out)?;
+                found = true;
+                break;
+            }
+        }
+        anyhow::ensure!(found, "压缩包里没有 lemon-galaxy-server");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::rename(&new, &exe)?;
+    Ok(Some(version))
+}
