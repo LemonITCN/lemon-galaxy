@@ -68,9 +68,8 @@ async fn main() -> anyhow::Result<()> {
         dir = PathBuf::from(args[1].clone());
         args.drain(0..2);
     }
-    std::fs::create_dir_all(&dir)?;
     let cmd = args.first().cloned().unwrap_or_default();
-    let id = Identity::load_or_create(&store(&dir));
+    // 不需要设备身份的命令（不建数据目录）
     match cmd.as_str() {
         "release-sign" => {
             use base64::Engine;
@@ -97,6 +96,11 @@ async fn main() -> anyhow::Result<()> {
             ssh_test(&args[1], args[2].parse()?, &args[3], &std::fs::read_to_string(&args[4])?).await?;
             return Ok(());
         }
+        _ => {}
+    }
+    std::fs::create_dir_all(&dir)?;
+    let id = Identity::load_or_create(&store(&dir));
+    match cmd.as_str() {
         "login" => {
             let server = ServerAddr::parse(&args[1]).map_err(anyhow::Error::msg)?;
             let api = Api::new(server.clone(), "zh-CN")?;
