@@ -161,6 +161,8 @@ pub enum MgmtReq {
     ClipboardSet(ClipboardData),
     WakeOnLan { mac: String },
     HostStatus,
+    /// 不开画面直接注入输入（AI 操作图形界面用）
+    Inject { events: Vec<InputEvent>, origin: Origin },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

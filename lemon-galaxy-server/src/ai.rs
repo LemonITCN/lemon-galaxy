@@ -410,7 +410,12 @@ pub async fn client_models(State(st): State<St>, User(s): User) -> AppResult<Jso
     let ua = user_ai(&st, s.user_id as i64).await?;
     let mut items = vec![];
     if ua.enabled {
-        for p in load_providers(&st).await? {
+        for mut p in load_providers(&st).await? {
+            if p.models_updated_at == 0 && p.enabled {
+                if let Ok(m) = refresh_models(&st, &p).await {
+                    p.models = m;
+                }
+            }
             if !p.enabled {
                 continue;
             }

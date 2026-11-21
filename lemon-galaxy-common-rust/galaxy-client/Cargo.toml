@@ -10,6 +10,7 @@ publish.workspace = true
 galaxy-proto.workspace = true
 galaxy-crypto.workspace = true
 galaxy-net.workspace = true
+galaxy-agent.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

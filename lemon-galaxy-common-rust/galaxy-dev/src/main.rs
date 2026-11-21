@@ -161,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
                     println!("\n下载完成");
                 }
                 "term-test" => term_test(&session).await?,
+                "ai" => ai_run(&dir, &id, session.clone(), &args[2..]).await?,
                 "stat" => println!("{:?}", session.fs_stat(&args[2]).await),
                 "watch" => {
                     let mut p = session.path_watch();
@@ -270,5 +271,73 @@ async fn term_test(session: &Arc<PeerSession>) -> anyhow::Result<()> {
     let snap = t2.snapshot().await?;
     println!("屏幕快照（AI 读屏）行数：{}", snap.lines().count());
     t2.kill().await;
+    Ok(())
+}
+
+
+struct PrintUi {
+    yes: bool,
+    agent: std::sync::Mutex<Option<std::sync::Weak<galaxy_agent::agent::Agent>>>,
+}
+
+impl galaxy_agent::agent::AgentUi for PrintUi {
+    fn event(&self, e: galaxy_agent::agent::AgentEvent) {
+        use galaxy_agent::agent::AgentEvent::*;
+        use std::io::Write;
+        match e {
+            AssistantDelta { text, .. } => {
+                print!("{text}");
+                let _ = std::io::stdout().flush();
+            }
+            AssistantDone { .. } => println!(),
+            Thinking { .. } => {}
+            ToolProposed { call, needs_approval } => {
+                println!("\n[工具] {} @{} 风险={:?} {}  {}", call.tool, call.target_name, call.risk, call.summary, if needs_approval { if self.yes { "（自动允许）" } else { "（自动拒绝）" } } else { "" });
+                if needs_approval {
+                    if let Some(a) = self.agent.lock().unwrap().as_ref().and_then(|w| w.upgrade()) {
+                        let d = if self.yes { galaxy_agent::agent::ApprovalDecision::AllowOnce } else { galaxy_agent::agent::ApprovalDecision::Deny { reason: Some("测试中自动拒绝".into()) } };
+                        let id = call.call_id.clone();
+                        tokio::spawn(async move { a.decide(&id, d) });
+                    }
+                }
+            }
+            ToolFinished { result, .. } => println!("[结果] {} {}", if result.ok { "成功" } else { "失败" }, result.summary),
+            Usage { prompt_tokens, completion_tokens } => println!("[用量] 输入 {prompt_tokens} 输出 {completion_tokens}"),
+            Error { message } => println!("[错误] {message}"),
+            AskUser { question, .. } => println!("[提问] {question}"),
+            _ => {}
+        }
+    }
+}
+
+async fn ai_run(dir: &Path, id: &Identity, session: Arc<PeerSession>, rest: &[String]) -> anyhow::Result<()> {
+    let (api, _s, _) = load(dir, id)?;
+    let models: galaxy_proto::api::AiModelsResp = api.get("/ai/models").await?;
+    anyhow::ensure!(models.enabled && !models.items.is_empty(), "账号未开通 AI 或没有可用模型");
+    let want = std::env::var("LG_MODEL").unwrap_or_else(|_| "mimo-v2.6-flash".into());
+    let m = models.items.iter().find(|m| m.id == want).or(models.items.iter().find(|m| m.tools)).unwrap().clone();
+    println!("模型：{}（{}）看图={} 管理员上限={:?}", m.name, m.id, m.vision, models.max_mode);
+    let yes = rest.iter().any(|a| a == "--yes");
+    let mode = rest.iter().position(|a| a == "--mode").and_then(|i| rest.get(i + 1)).and_then(|s| galaxy_proto::AiMode::parse(s)).unwrap_or(galaxy_proto::AiMode::ConfirmDangerous);
+    let prompt: String = rest.iter().filter(|a| !a.starts_with("--") && galaxy_proto::AiMode::parse(a).is_none()).cloned().collect::<Vec<_>>().join(" ");
+    let exec = galaxy_client::ai::SessionExecutor::new();
+    exec.add("dev1".into(), session.clone(), session.ack.host.hostname.clone());
+    let ui = Arc::new(PrintUi { yes, agent: std::sync::Mutex::new(None) });
+    let cfg = galaxy_agent::agent::AgentConfig {
+        conversation_id: format!("dev-{}", galaxy_proto::now_ms()),
+        provider_id: m.provider_id,
+        model_id: m.id.clone(),
+        vision: m.vision,
+        context_length: m.context_length,
+        mode,
+        admin_cap: models.max_mode,
+        plan_first: false,
+        max_steps: 20,
+        locale: "zh-CN".into(),
+        trust_minutes: None,
+    };
+    let agent = galaxy_agent::agent::Agent::new(cfg, Arc::new(galaxy_client::ai::GatewayLlm { api }), exec, ui.clone());
+    *ui.agent.lock().unwrap() = Some(Arc::downgrade(&agent));
+    agent.send(prompt).await;
     Ok(())
 }

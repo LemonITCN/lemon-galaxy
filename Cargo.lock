@@ -855,6 +855,7 @@ name = "galaxy-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "futures",
  "galaxy-proto",
  "parking_lot 0.12.5",
@@ -874,6 +875,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "futures",
+ "galaxy-agent",
  "galaxy-crypto",
  "galaxy-net",
  "galaxy-proto",

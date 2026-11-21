@@ -18,3 +18,4 @@ tracing.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
 regex = "1"
+bytes.workspace = true

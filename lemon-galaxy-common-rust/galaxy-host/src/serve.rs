@@ -389,6 +389,26 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             }
         }
         MgmtReq::HostStatus => MgmtResp::Text(serde_json::to_string(&host.status()).unwrap_or_default()),
+        MgmtReq::Inject { events, origin } => {
+            if !p.control {
+                return MgmtResp::Error(denied("没有控制键鼠的权限"));
+            }
+            let a = risk::Assessment { level: risk::Risk::Normal, reasons: vec![], commands: vec![] };
+            if let Err(e) = ai_gate(host, sess, &origin, &a, &format!("图形界面操作 {} 步", events.len())) {
+                return MgmtResp::Error(e);
+            }
+            let n = events.len();
+            tokio::task::spawn_blocking(move || {
+                for ev in events {
+                    platform.inject(ev);
+                    std::thread::sleep(std::time::Duration::from_millis(8));
+                }
+            })
+            .await
+            .ok();
+            let _ = n;
+            MgmtResp::Ok
+        }
     }
 }
 

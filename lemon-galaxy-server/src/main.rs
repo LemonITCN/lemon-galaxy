@@ -69,6 +69,33 @@ enum Cmd {
         #[command(subcommand)]
         cmd: UserCmd,
     },
+    /// 大模型供应商（通常在 Web 后台管理）
+    Ai {
+        #[command(subcommand)]
+        cmd: AiCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AiCmd {
+    /// 添加供应商，API Key 从文件读取（避免出现在命令历史里）
+    AddProvider {
+        #[arg(long, default_value = "opencode_go")]
+        kind: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        base_url: Option<String>,
+        #[arg(long)]
+        key_file: PathBuf,
+    },
+    /// 给用户开通某供应商的模型（--models 默认 *，表示全部）
+    Grant {
+        username: String,
+        provider_id: i64,
+        #[arg(long, default_value = "*")]
+        models: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -107,6 +134,10 @@ fn main() -> anyhow::Result<()> {
 
     match &cli.cmd {
         Some(Cmd::Admin { cmd }) => return admin_cli(&db, cmd),
+        Some(Cmd::Ai { cmd }) => {
+            let keys = keys::Keys::load(&cli.data_dir, &settings.public_host, &keys::TlsSource { cert_path: cli.tls_cert.clone(), key_path: cli.tls_key.clone() })?;
+            return ai_cli(&db, &keys, cmd);
+        }
         Some(Cmd::User { cmd }) => {
             let keys = keys::Keys::load(&cli.data_dir, &settings.public_host, &keys::TlsSource { cert_path: cli.tls_cert.clone(), key_path: cli.tls_key.clone() })?;
             return user_cli(&db, &keys, cmd);
@@ -168,6 +199,34 @@ fn user_cli(db: &db::Db, keys: &keys::Keys, cmd: &UserCmd) -> anyhow::Result<()>
             for (id, u, d, dis) in rows {
                 println!("{id}\t{u}\t{d}{}", if dis != 0 { "\t(已禁用)" } else { "" });
             }
+        }
+    }
+    Ok(())
+}
+
+fn ai_cli(db: &db::Db, keys: &keys::Keys, cmd: &AiCmd) -> anyhow::Result<()> {
+    match cmd {
+        AiCmd::AddProvider { kind, name, base_url, key_file } => {
+            anyhow::ensure!(kind == "opencode_go" || kind == "openai_compatible", "kind 只能是 opencode_go 或 openai_compatible");
+            let key = std::fs::read_to_string(key_file)?.trim().to_string();
+            let enc = keys.seal(key.as_bytes(), "ai-key");
+            let base = base_url.clone().unwrap_or_else(|| ai::OPENCODE_GO_MODELS.to_string());
+            let name = name.clone().unwrap_or_else(|| if kind == "opencode_go" { "OpenCode Go".into() } else { "OpenAI Compatible".into() });
+            let now = galaxy_proto::now_ms();
+            let id = db.call_sync(|c| {
+                c.execute("INSERT INTO ai_providers(name, kind, base_url, api_key_enc, created_at) VALUES(?1,?2,?3,?4,?5)", params![name, kind, base, enc, now])?;
+                Ok(c.last_insert_rowid())
+            })?;
+            println!("已添加供应商 {id}（{name}）。在后台或客户端首次请求时会拉取模型列表。");
+        }
+        AiCmd::Grant { username, provider_id, models } => {
+            let list: Vec<String> = models.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let j = serde_json::to_string(&list)?;
+            let n = db.call_sync(|c| {
+                let uid: i64 = c.query_row("SELECT id FROM users WHERE username = ?1", params![username], |r| r.get(0))?;
+                c.execute("INSERT INTO ai_grants(user_id, provider_id, models_json) VALUES(?1,?2,?3) ON CONFLICT(user_id, provider_id) DO UPDATE SET models_json = excluded.models_json", params![uid, provider_id, j])
+            })?;
+            println!("已为 {username} 开通供应商 {provider_id} 的模型 {models}（{n}）");
         }
     }
     Ok(())
