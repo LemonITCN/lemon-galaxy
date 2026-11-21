@@ -259,13 +259,15 @@ jobs:
       - name: 编译
         run: |
           cargo +nightly build -Z build-std=std,panic_abort --release --target x86_64-win7-windows-msvc -p lemon-galaxy-worker-windows
-          mkdir -p dist && cp target/x86_64-win7-windows-msvc/release/lemon-galaxy-worker.exe dist/
+          # 主控端内核库也出一份 Win7 版（发布时换进主控端压缩包，另出兼容版）
+          cargo +nightly build -Z build-std=std,panic_abort --release --target x86_64-win7-windows-msvc -p galaxy-ffi --features decoder --lib
+          mkdir -p dist && cp target/x86_64-win7-windows-msvc/release/lemon-galaxy-worker.exe target/x86_64-win7-windows-msvc/release/galaxy_ffi.dll dist/
           ls -l dist
       - name: 检查没有导入 Windows 8 / 10 才有的函数
         run: |
           DUMPBIN="$(ls /c/Program\ Files/Microsoft\ Visual\ Studio/*/*/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe 2>/dev/null | tail -1)"
           [ -n "$DUMPBIN" ] || { echo "找不到 dumpbin"; exit 1; }
-          "$DUMPBIN" -nologo -imports dist/lemon-galaxy-worker.exe > imports.txt
+          "$DUMPBIN" -nologo -imports dist/lemon-galaxy-worker.exe dist/galaxy_ffi.dll > imports.txt
           grep -E "\.dll$" imports.txt | sort -u
           BAD="ProcessPrng|WaitOnAddress|WakeByAddress|GetSystemTimePreciseAsFileTime|SetThreadDescription|GetDpiForMonitor|SetProcessDpiAwarenessContext|CreatePseudoConsole|ResizePseudoConsole|ClosePseudoConsole|api-ms-win-core-synch-l1-2-0|bcryptprimitives"
           if grep -E "$BAD" imports.txt; then echo "导入了 Windows 7 没有的函数"; exit 1; fi
@@ -277,7 +279,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: windows7-x86_64
-          path: dist/lemon-galaxy-worker.exe
+          path: |
+            dist/lemon-galaxy-worker.exe
+            dist/galaxy_ffi.dll
           if-no-files-found: error
 
   macos:
@@ -483,6 +487,15 @@ jobs:
           if [ -f art/windows7-x86_64/lemon-galaxy-worker.exe ]; then
             cp art/windows7-x86_64/lemon-galaxy-worker.exe "out/lemon-galaxy-worker-$V-windows7-x86_64.exe"
           fi
+          # Windows 主控端兼容版：同一个界面程序，换上 Win7 目标编的内核库与被控端
+          if [ -f art/windows-control/LemonGalaxy-Windows-x64.zip ] && [ -f art/windows7-x86_64/galaxy_ffi.dll ]; then
+            W7="$RUNNER_TEMP/win7ctl" && rm -rf "$W7" && mkdir -p "$W7" && unzip -q art/windows-control/LemonGalaxy-Windows-x64.zip -d "$W7"
+            SRC="$(ls -d "$W7"/*/ | head -1)"
+            DST="$W7/LemonGalaxy-$V-windows7-x64"
+            mv "$SRC" "$DST"
+            cp art/windows7-x86_64/galaxy_ffi.dll art/windows7-x86_64/lemon-galaxy-worker.exe "$DST/"
+            (cd "$W7" && zip -qr "$GITHUB_WORKSPACE/out/LemonGalaxy-$V-windows7-x64.zip" "LemonGalaxy-$V-windows7-x64")
+          fi
           WINS=()
           for a in x86_64 aarch64; do
             if [ -f "art/windows-$a/lemon-galaxy-worker.exe" ]; then
@@ -511,6 +524,7 @@ jobs:
             echo "| Mac 客户端（主控 + 被控） | macOS 13 及以上（Apple 芯片、Intel 通用） | [LemonGalaxy-$V-macOS.dmg]($DL/LemonGalaxy-$V-macOS.dmg) |"
             [ -f "out/LemonGalaxyWorker-$V-macOS.dmg" ] && echo "| Mac 被控端（纯被控，可登录多个账号） | macOS 13 及以上（Apple 芯片、Intel 通用） | [LemonGalaxyWorker-$V-macOS.dmg]($DL/LemonGalaxyWorker-$V-macOS.dmg) |"
             [ -f "out/LemonGalaxy-$V-windows-x64.zip" ] && echo "| Windows 客户端（主控） | Windows 10 / 11，x64（ARM64 电脑可用） | [LemonGalaxy-$V-windows-x64.zip]($DL/LemonGalaxy-$V-windows-x64.zip) |"
+            [ -f "out/LemonGalaxy-$V-windows7-x64.zip" ] && echo "| Windows 客户端（主控，兼容版） | Windows 7 SP1 / 8 / 8.1，x64（需要 .NET Framework 4.8） | [LemonGalaxy-$V-windows7-x64.zip]($DL/LemonGalaxy-$V-windows7-x64.zip) |"
             echo "| 安卓客户端（主控） | Android 8.0 及以上 | [LemonGalaxy-$V-Android.apk]($DL/LemonGalaxy-$V-Android.apk) |"
             echo "| Linux 被控端 | x86_64，任意发行版 | [lemon-galaxy-worker-$V-linux-x86_64]($DL/lemon-galaxy-worker-$V-linux-x86_64) |"
             echo "| Linux 被控端 | ARM64，任意发行版 | [lemon-galaxy-worker-$V-linux-aarch64]($DL/lemon-galaxy-worker-$V-linux-aarch64) |"

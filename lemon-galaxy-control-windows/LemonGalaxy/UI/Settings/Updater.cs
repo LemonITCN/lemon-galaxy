@@ -36,7 +36,9 @@ internal sealed class Updater : Observable
         {
             try
             {
-                Info = await app.Client.CheckUpdate("control", "windows", "x86_64", AppInfo.Version);
+                // Windows 10 以前的系统用兼容版（Win7 目标编的内核库）
+                var platform = Environment.OSVersion.Version.Major < 10 ? "windows7" : "windows";
+                Info = await app.Client.CheckUpdate("control", platform, "x86_64", AppInfo.Version);
                 State = Info == null ? UpdateState.UpToDate : UpdateState.Available;
             }
             catch (Exception e)
