@@ -152,6 +152,7 @@ set_listener(HostListener)
 accounts() -> [HostAccount{user_id, username, display_name, status, policy: HostPolicy}]
 update_account_policy(user_id, HostPolicy{system_user, view, control, files, terminal, clipboard, audio, ai_cap, notify})
 set_remote_enabled(Bool) / disconnect_all() / stop_ai()
+set_lock_on_end(Bool) / lock_on_end()   远程看过桌面的会话都结束 10 秒后自动锁屏（默认关；断线重连不算结束）
 async start_assist() -> AssistInfo{device_code, code}
 stop_assist() / set_assist_code(code?) / respond_assist(request_id, allow)
 recent_events(limit) -> [HostEvent]

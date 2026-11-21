@@ -294,6 +294,7 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
             match started {
                 Ok(s) => {
                     host.log(&sid, &sess.from_user_name, "display", &format!("查看屏幕 {}", req.display_id), false);
+                    sess.used_display.store(true, Ordering::Relaxed);
                     fio::write(&mut send, &DisplayOut::Started { width: s.width, height: s.height, codec: s.codec, channel }).await?;
                 }
                 Err(e) => {

@@ -165,6 +165,15 @@ impl HostService {
         self.inner.set_platform(Arc::new(PlatformBridge(platform)));
     }
 
+    /// 远程看过桌面的会话都结束后自动锁屏（默认关）。
+    pub fn set_lock_on_end(&self, on: bool) {
+        self.inner.set_lock_on_end(on);
+    }
+
+    pub fn lock_on_end(&self) -> bool {
+        self.inner.lock_on_end()
+    }
+
     pub fn set_listener(&self, listener: Arc<dyn HostListener>) {
         self.inner.set_events(Arc::new(EventsBridge { listener, pending: self.pending.clone(), host: Arc::downgrade(&self.inner) }));
     }

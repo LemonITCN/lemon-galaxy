@@ -74,6 +74,9 @@ pub struct HostState {
     /// 服务模式下自动安装新版本（签名校验通过才装）
     #[serde(default = "yes")]
     pub auto_update: bool,
+    /// 远程看过桌面的会话都结束后自动锁屏
+    #[serde(default)]
+    pub lock_on_end: bool,
 }
 
 impl HostState {

@@ -200,6 +200,7 @@ pub fn main(os: Arc<dyn WorkerOs>) -> ! {
             "events" => events(&dir, &a.rest),
             "update" => update_cmd(os.as_ref(), &dir, &a.rest).await,
             "auto-update" => auto_update_cmd(&dir, &a.rest),
+            "lock-on-end" => lock_on_end_cmd(&dir, &a.rest),
             "install-service" => os.install_service(&dir),
             "uninstall-service" => os.uninstall_service(),
             "version" | "--version" | "-V" => {
@@ -239,6 +240,7 @@ fn help(os: &dyn WorkerOs) {
         println!("  events [-n 50]      查看本机远程操作日志");
         println!("  update [--check]    检查并安装新版本（发布签名校验通过才装）");
         println!("  auto-update on|off  服务模式下是否自动更新（默认开）");
+        println!("  lock-on-end on|off  远程看过桌面的会话都结束后自动锁屏（默认关）");
         for (c, z, _) in os.extra_help() {
             println!("  {c:<19} {z}");
         }
@@ -258,6 +260,7 @@ fn help(os: &dyn WorkerOs) {
         println!("  events [-n 50]      Show local remote-operation log");
         println!("  update [--check]    Check for and install a new version (signature verified)");
         println!("  auto-update on|off  Auto-update when running as a service (default on)");
+        println!("  lock-on-end on|off  Lock the screen after remote desktop sessions end (default off)");
         for (c, _, e) in os.extra_help() {
             println!("  {c:<19} {e}");
         }
@@ -832,6 +835,22 @@ async fn update_cmd(os: &dyn WorkerOs, dir: &Path, rest: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn lock_on_end_cmd(dir: &Path, rest: &[String]) -> i32 {
+    let path = dir.join("host.json");
+    let mut st = HostState::load(&path);
+    match rest.first().map(|s| s.as_str()) {
+        Some("on") => st.lock_on_end = true,
+        Some("off") => st.lock_on_end = false,
+        _ => {
+            println!("{}: {}", t!("远程结束后自动锁屏", "Lock when remote session ends"), onoff(st.lock_on_end));
+            return 0;
+        }
+    }
+    let _ = st.save(&path);
+    println!("{}: {}", t!("远程结束后自动锁屏", "Lock when remote session ends"), onoff(st.lock_on_end));
+    0
 }
 
 fn auto_update_cmd(dir: &Path, rest: &[String]) -> i32 {

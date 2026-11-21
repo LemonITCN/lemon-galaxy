@@ -98,6 +98,8 @@ pub struct ActiveSession {
     pub conn: quinn::Connection,
     pub user: crate::sysuser::SysUser,
     pub from_user_name: String,
+    /// 看过远程桌面（结束时决定要不要自动锁屏）
+    pub used_display: std::sync::atomic::AtomicBool,
 }
 
 pub struct HostService {
@@ -363,6 +365,7 @@ impl HostService {
             serde_json::to_string(&cur.accounts).ok() != serde_json::to_string(&disk.accounts).ok()
                 || cur.remote_enabled != disk.remote_enabled
                 || cur.assist_code != disk.assist_code
+                || cur.lock_on_end != disk.lock_on_end
         };
         if !changed {
             return false;
@@ -373,6 +376,7 @@ impl HostService {
             st.accounts = disk.accounts;
             st.remote_enabled = disk.remote_enabled;
             st.assist_code = disk.assist_code;
+            st.lock_on_end = disk.lock_on_end;
         }
         self.refresh_lan_keys();
         let has_active = self.state.read().active().count() > 0;
@@ -396,6 +400,38 @@ impl HostService {
                 let _ = std::fs::rename(tmp, p);
             }
         }
+    }
+
+    /// 远程看过桌面的会话都结束后自动锁屏。
+    pub fn set_lock_on_end(&self, on: bool) {
+        self.state.write().lock_on_end = on;
+        self.save();
+    }
+
+    pub fn lock_on_end(&self) -> bool {
+        self.state.read().lock_on_end
+    }
+
+    /// 会话结束后：开着自动锁屏、这个会话看过桌面、10 秒内没有别的会话在看桌面（断线重连不算结束），就锁屏。
+    fn maybe_lock_after(self: &Arc<Self>, ended: &ActiveSession) {
+        if !ended.used_display.load(std::sync::atomic::Ordering::Relaxed) || !self.state.read().lock_on_end {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let watching = me.sessions.lock().values().any(|s| s.used_display.load(std::sync::atomic::Ordering::Relaxed));
+            if watching || !me.state.read().lock_on_end {
+                return;
+            }
+            let platform = me.platform.read().clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let display = platform.list_displays().first().map(|d| d.id).unwrap_or(0);
+                platform.inject(display, galaxy_proto::peer::InputEvent::SpecialCombo(galaxy_proto::peer::SpecialCombo::LockScreen));
+            })
+            .await;
+            tracing::info!("远程会话结束，已自动锁屏");
+        });
     }
 
     pub fn set_remote_enabled(&self, on: bool) {
@@ -842,7 +878,15 @@ impl HostService {
             started_at: galaxy_proto::now_ms(),
             ai_active: false,
         };
-        let sess = Arc::new(ActiveSession { info: RwLock::new(info.clone()), account, policy, conn: conn.clone(), user, from_user_name: from_name.clone() });
+        let sess = Arc::new(ActiveSession {
+            info: RwLock::new(info.clone()),
+            account,
+            policy,
+            conn: conn.clone(),
+            user,
+            from_user_name: from_name.clone(),
+            used_display: std::sync::atomic::AtomicBool::new(false),
+        });
         self.sessions.lock().insert(id.clone(), sess.clone());
         self.log(&id, &from_name, "connect", &format!("{} 连接（{:?}）", from_name, info.mode), false);
         self.events.read().on_session_started(&info);
@@ -892,6 +936,7 @@ impl HostService {
             });
         }
         self.log(&id, &from_name, "disconnect", "会话结束", false);
+        self.maybe_lock_after(&sess);
         self.events.read().on_session_ended(&id);
         self.emit_status();
         Ok(())
