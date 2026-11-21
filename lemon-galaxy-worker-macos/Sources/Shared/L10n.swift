@@ -1,0 +1,1 @@
+../../../lemon-galaxy-control-macos/Sources/LemonGalaxy/I18n/L10n.swift

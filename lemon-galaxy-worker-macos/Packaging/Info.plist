@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleDisplayName</key><string>LemonGalaxyWorker</string>
+  <key>CFBundleExecutable</key><string>LemonGalaxyWorker</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIdentifier</key><string>cn.lemonit.galaxy.worker</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
+  <key>CFBundleName</key><string>LemonGalaxyWorker</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+  <key>CFBundleVersion</key><string>__BUILD__</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <!-- 菜单栏应用：没有 Dock 图标；设置窗口打开时临时切成普通应用 -->
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <!-- 被控：别人查看本机屏幕、AI 截图 -->
+  <key>NSScreenCaptureUsageDescription</key><string>LemonGalaxyWorker shares this Mac's screen with people you allow to control it.</string>
+  <!-- 局域网发现（UDP 7444 组播 / 广播）与局域网直连 -->
+  <key>NSLocalNetworkUsageDescription</key><string>LemonGalaxyWorker lets your devices on the local network connect to this Mac directly.</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 LemonIT.CN. MIT License.</string>
+</dict>
+</plist>

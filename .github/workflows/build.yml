@@ -329,13 +329,16 @@ jobs:
           BASE="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           if [ -n "$LEMONGALAXY_BUILD_VERSION" ]; then V="${LEMONGALAXY_BUILD_VERSION#v}"; else V="$BASE.$GITHUB_RUN_NUMBER"; fi
           LEMONGALAXY_VERSION="$V" LEMONGALAXY_BUILD="$GITHUB_RUN_NUMBER" LEMONGALAXY_SIGN_IDENTITY="${LEMONGALAXY_SIGN_IDENTITY:--}" lemon-galaxy-control-macos/scripts/build.sh --dmg
+          # 纯被控端（菜单栏常驻，可登录多个账号）
+          LEMONGALAXY_VERSION="$V" LEMONGALAXY_BUILD="$GITHUB_RUN_NUMBER" LEMONGALAXY_SIGN_IDENTITY="${LEMONGALAXY_SIGN_IDENTITY:--}" lemon-galaxy-worker-macos/scripts/build.sh --dmg
       - name: 公证
         if: env.APPLE_NOTARY_KEY_P8 != '' && env.MACOS_SIGN_IDENTITY != ''
         run: |
           echo "$APPLE_NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
-          DMG="$(ls lemon-galaxy-control-macos/build/dist.noindex/*.dmg)"
-          xcrun notarytool submit "$DMG" --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID" --wait
-          xcrun stapler staple "$DMG"
+          for DMG in lemon-galaxy-control-macos/build/dist.noindex/*.dmg lemon-galaxy-worker-macos/build/dist.noindex/*.dmg; do
+            xcrun notarytool submit "$DMG" --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID" --wait
+            xcrun stapler staple "$DMG"
+          done
           rm -f "$RUNNER_TEMP/notary.p8"
       - name: 自测
         run: |
@@ -348,11 +351,23 @@ jobs:
           if kill -0 $PID 2>/dev/null; then kill $PID; echo "自测超时"; exit 1; fi
           wait $PID
           ls selftest | head
+          W="lemon-galaxy-worker-macos/build/LemonGalaxyWorker.noindex/LemonGalaxyWorker.app"
+          lipo -info "$W/Contents/MacOS/LemonGalaxyWorker"
+          mkdir -p selftest-worker
+          "$W/Contents/MacOS/LemonGalaxyWorker" --selftest "$PWD/selftest-worker" --only first-run &
+          PID=$!
+          for i in $(seq 1 180); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          if kill -0 $PID 2>/dev/null; then kill $PID; echo "被控端自测超时"; exit 1; fi
+          wait $PID
+          ls selftest-worker | head
           mkdir -p out && cp lemon-galaxy-control-macos/build/dist.noindex/*.dmg out/LemonGalaxy-macOS.dmg
+          cp lemon-galaxy-worker-macos/build/dist.noindex/*.dmg out/LemonGalaxyWorker-macOS.dmg
       - uses: actions/upload-artifact@v7
         with:
           name: macos
-          path: out/LemonGalaxy-macOS.dmg
+          path: |
+            out/LemonGalaxy-macOS.dmg
+            out/LemonGalaxyWorker-macOS.dmg
           if-no-files-found: error
 
   ios:
@@ -452,6 +467,7 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then TAG="$GITHUB_REF_NAME"; V="${TAG#v}"; else V="$VERSION.$GITHUB_RUN_NUMBER"; TAG="v$V"; fi
           mkdir -p out
           cp art/macos/LemonGalaxy-macOS.dmg "out/LemonGalaxy-$V-macOS.dmg"
+          [ -f art/macos/LemonGalaxyWorker-macOS.dmg ] && cp art/macos/LemonGalaxyWorker-macOS.dmg "out/LemonGalaxyWorker-$V-macOS.dmg"
           cp art/android/LemonGalaxy-Android.apk "out/LemonGalaxy-$V-Android.apk"
           for a in x86_64 aarch64; do
             cp "art/linux-$a/lemon-galaxy-worker" "out/lemon-galaxy-worker-$V-linux-$a"
@@ -490,6 +506,7 @@ jobs:
             echo "| 用途 | 系统 | 文件 |"
             echo "|---|---|---|"
             echo "| Mac 客户端（主控 + 被控） | macOS 13 及以上（Apple 芯片、Intel 通用） | [LemonGalaxy-$V-macOS.dmg]($DL/LemonGalaxy-$V-macOS.dmg) |"
+            [ -f "out/LemonGalaxyWorker-$V-macOS.dmg" ] && echo "| Mac 被控端（纯被控，可登录多个账号） | macOS 13 及以上（Apple 芯片、Intel 通用） | [LemonGalaxyWorker-$V-macOS.dmg]($DL/LemonGalaxyWorker-$V-macOS.dmg) |"
             [ -f "out/LemonGalaxy-$V-windows-x64.zip" ] && echo "| Windows 客户端（主控） | Windows 10 / 11，x64（ARM64 电脑可用） | [LemonGalaxy-$V-windows-x64.zip]($DL/LemonGalaxy-$V-windows-x64.zip) |"
             echo "| 安卓客户端（主控） | Android 8.0 及以上 | [LemonGalaxy-$V-Android.apk]($DL/LemonGalaxy-$V-Android.apk) |"
             echo "| Linux 被控端 | x86_64，任意发行版 | [lemon-galaxy-worker-$V-linux-x86_64]($DL/lemon-galaxy-worker-$V-linux-x86_64) |"

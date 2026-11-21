@@ -902,6 +902,9 @@ pub struct HostSessionInfo {
     pub path: PathKind,
     pub started_at: i64,
     pub ai_active: bool,
+    /// 连进来的账号（临时协助时为空）
+    #[uniffi(default = None)]
+    pub account_id: Option<u64>,
 }
 
 impl From<galaxy_host::service::SessionInfo> for HostSessionInfo {
@@ -917,6 +920,7 @@ impl From<galaxy_host::service::SessionInfo> for HostSessionInfo {
             path: x.path.into(),
             started_at: x.started_at,
             ai_active: x.ai_active,
+            account_id: x.account,
         }
     }
 }

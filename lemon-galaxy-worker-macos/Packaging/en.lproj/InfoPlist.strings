@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "LemonGalaxyWorker";
+"NSScreenCaptureUsageDescription" = "LemonGalaxyWorker shares this Mac's screen with people you allow to control it.";
+"NSLocalNetworkUsageDescription" = "LemonGalaxyWorker lets your devices on the local network connect to this Mac directly.";

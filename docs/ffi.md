@@ -169,6 +169,9 @@ recent_events(limit) -> [HostEvent]
 - `device_id()`、`server()`、`start() -> Option<HostService>`（有账号时启动被控服务，应用启动时调一次）、`service()`。
 - `login(server, username, password, totp, new_password, system_user) -> WorkerLoginResult`：`Success{user_id, username}` / `NeedTotp` / `MustChangePassword`（带上相应参数再调一次）。可以登录多个账号，但必须在同一台服务器上。
 - `logout(user_id)`。账号权限、事件、临时协助等用返回的 `HostService`（与 control 的本机被控相同）。
+- `set_server(server) -> Option<HostService>`：还没登录账号时先设服务器（全新安装也能开临时协助）。
+- `check_update(platform, current)` / `download_update(info, dest, listener)`：用任一有效账号的令牌查询与下载被控端新版本（验签同 5.0）。
+- HostService 另有 `disconnect_session(id)` 断开单个会话；`HostSessionInfo.account_id` 是连进来的账号（临时协助为空）；`on_status` 推来的状态里带账号列表。
 
 ## 6. 构建
 

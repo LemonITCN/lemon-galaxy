@@ -1,0 +1,4 @@
+/* 系统授权弹窗里的说明文字 */
+"CFBundleDisplayName" = "LemonGalaxyWorker";
+"NSScreenCaptureUsageDescription" = "LemonGalaxyWorker 会把本机屏幕共享给你允许的人查看和控制。";
+"NSLocalNetworkUsageDescription" = "LemonGalaxyWorker 让局域网内你的设备直接连接这台 Mac。";

@@ -1,0 +1,7 @@
+.build/
+build/
+.swiftpm/
+.DS_Store
+scripts/.sign-identity
+Vendor/
+Sources/Generated/galaxy_ffi.swift

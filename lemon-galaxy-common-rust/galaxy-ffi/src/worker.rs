@@ -37,6 +37,15 @@ fn meta() -> DeviceMeta {
 }
 
 impl WorkerHost {
+    fn api(&self) -> Result<Api> {
+        let st = HostState::load(&self.state_path());
+        let server = ServerAddr::parse(&st.server).map_err(|_| GalaxyError::Other { detail: "还没有登录".into() })?;
+        let acct = st.accounts.iter().find(|a| a.status == galaxy_host::AccountStatus::Active).ok_or_else(|| GalaxyError::Other { detail: "没有可用的账号".into() })?;
+        let api = Api::new(server, &locale()).map_err(|e| GalaxyError::Network { detail: e.to_string() })?;
+        api.set_token(Some(acct.token.clone()));
+        Ok(api)
+    }
+
     fn state_path(&self) -> PathBuf {
         self.dir.join("host.json")
     }
@@ -125,6 +134,46 @@ impl WorkerHost {
             Ok(WorkerLoginResult::Success { user_id: logged.user.id, username: logged.user.username })
         })
         .await
+    }
+
+    /// 还没登录账号时先设服务器地址（全新安装也能开临时协助）。已有账号时只能是同一台服务器。
+    pub async fn set_server(self: Arc<Self>, server: String) -> Result<Option<Arc<HostService>>> {
+        run(async move {
+            let addr = ServerAddr::parse(&server).map_err(|e| GalaxyError::Auth { code: "bad_server".into(), detail: e })?;
+            let mut st = HostState::load(&self.state_path());
+            if !st.accounts.is_empty() && st.server != addr.to_string_full() {
+                return Err(GalaxyError::Other { detail: "已登录的账号在另一台服务器上，更换服务器前请先退出这些账号".into() });
+            }
+            if self.host.lock().is_none() {
+                st.server = addr.to_string_full();
+                st.save(&self.state_path()).map_err(|e| GalaxyError::Other { detail: e.to_string() })?;
+            }
+            self.ensure_started().await
+        })
+        .await
+    }
+
+    /// 检查被控端新版本（用任一有效账号的登录令牌访问服务器）。返回前已验发布签名。
+    pub async fn check_update(self: Arc<Self>, platform: String, current: String) -> Result<Option<crate::types::UpdateInfo>> {
+        run(async move {
+            let api = self.api()?;
+            Ok(galaxy_client::update::check(&api, "worker", &platform, "", &current).await?.map(Into::into))
+        })
+        .await
+    }
+
+    /// 下载新版本到本地文件并核对 SHA-256，进度与结果经 listener。
+    pub fn download_update(self: Arc<Self>, info: crate::types::UpdateInfo, dest: String, listener: Arc<dyn crate::callbacks::TransferListener>) {
+        crate::rt().spawn(async move {
+            let r = async {
+                let api = self.api()?;
+                let i = galaxy_client::update::UpdateInfo { version: info.version, file_name: info.file_name, size: info.size, sha256: info.sha256, url: info.url, notes: info.notes };
+                let l = listener.clone();
+                galaxy_client::update::download(&api, &i, std::path::Path::new(&dest), &move |d, t| l.on_progress(d, t)).await.map_err(GalaxyError::from)
+            }
+            .await;
+            listener.on_finished(r.err().map(|e| e.to_string()));
+        });
     }
 
     /// 退出某个账号（服务器上也作废这台设备的登录）。

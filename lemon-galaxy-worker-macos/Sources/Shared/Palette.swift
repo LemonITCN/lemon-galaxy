@@ -1,0 +1,1 @@
+../../../lemon-galaxy-control-macos/Sources/LemonGalaxy/Theme/Palette.swift

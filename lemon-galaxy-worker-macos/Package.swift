@@ -1,0 +1,76 @@
+// swift-tools-version:5.9
+// LemonGalaxyWorker：macOS 纯被控端（菜单栏常驻 + 设置窗口，可同时登录多个账号）。
+// 开发：swift build；打包成通用二进制 .app：scripts/build.sh [--debug] [--dmg]。
+//
+// 源码布局（target 根目录是 Sources/）：
+//   Sources/LemonGalaxyWorker/   被控端自己的代码
+//   Sources/Shared/              指向 Mac 主控端（lemon-galaxy-control-macos）源码的符号链接：
+//                                截屏编码与键鼠注入（MacHostPlatform / VideoEncoder / HIDKeyMap）、钥匙串（KeychainStore）、
+//                                NSLock 小工具（Util）、配色（Palette）、语言包底座（L10n）、通用小组件（Components）、
+//                                无内核时的类型镜像（BridgeMirror）。两端共用同一份实现，不另起分叉。
+//   Sources/Generated/           uniffi 生成的 galaxy_ffi.swift（仓库根 scripts/build-ffi-apple.sh 生成，不进仓库）
+//
+// Rust 内核：Vendor/LemonGalaxyCore.xcframework 与 Sources/Generated/galaxy_ffi.swift 都在时接入，定义 LEMONGALAXY_REAL_CORE，
+// 默认用真内核（--mock、LEMONGALAXY_MOCK=1、--selftest 用模拟内核）。
+// 没有内核产物（或环境变量 LEMONGALAXY_NO_CORE=1）时只编译模拟内核，类型来自 Shared/BridgeMirror.swift。
+import PackageDescription
+import Foundation
+
+let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
+let env = ProcessInfo.processInfo.environment
+let generatedPath = packageDir + "/Sources/Generated/galaxy_ffi.swift"
+let hasGenerated = FileManager.default.fileExists(atPath: generatedPath)
+let hasRealCore = env["LEMONGALAXY_NO_CORE"] != "1"
+    && FileManager.default.fileExists(atPath: packageDir + "/Vendor/LemonGalaxyCore.xcframework")
+    && hasGenerated
+
+var appDependencies: [Target.Dependency] = []
+var appSwiftSettings: [SwiftSetting] = [
+    .unsafeFlags(["-Osize"], .when(configuration: .release)),
+]
+var appExcludes: [String] = []
+var extraTargets: [Target] = []
+if hasRealCore {
+    extraTargets.append(.binaryTarget(name: "LemonGalaxyCore", path: "Vendor/LemonGalaxyCore.xcframework"))
+    appDependencies.append("LemonGalaxyCore")
+    appSwiftSettings.append(.define("LEMONGALAXY_REAL_CORE"))
+} else if hasGenerated {
+    appExcludes.append("Generated/galaxy_ffi.swift")
+}
+
+let package = Package(
+    name: "LemonGalaxyWorker",
+    platforms: [.macOS(.v13)],
+    products: [
+        .executable(name: "LemonGalaxyWorker", targets: ["LemonGalaxyWorker"]),
+    ],
+    targets: [
+        .executableTarget(
+            name: "LemonGalaxyWorker",
+            dependencies: appDependencies,
+            path: "Sources",
+            exclude: appExcludes,
+            swiftSettings: appSwiftSettings,
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("SwiftUI"),
+                .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("VideoToolbox"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("ApplicationServices"),
+                .linkedFramework("Security"),
+                .linkedFramework("Carbon"),
+                .linkedFramework("ServiceManagement"),
+                .linkedFramework("UserNotifications"),
+                // Rust 静态库（galaxy-ffi）用到的系统框架与库
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("SystemConfiguration"),
+                .linkedFramework("IOKit"),
+                .linkedLibrary("resolv"),
+                .linkedLibrary("iconv"),
+            ]
+        ),
+    ] + extraTargets,
+    swiftLanguageVersions: [.v5]
+)

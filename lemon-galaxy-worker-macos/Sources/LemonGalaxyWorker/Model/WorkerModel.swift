@@ -1,0 +1,444 @@
+import SwiftUI
+import AppKit
+
+enum WorkerPage: String, CaseIterable {
+    case status, accounts, assist, events, permissions, general, about
+
+    var icon: String {
+        switch self {
+        case .status: return "dot.radiowaves.left.and.right"
+        case .accounts: return "person.2"
+        case .assist: return "person.line.dotted.person"
+        case .events: return "list.bullet.rectangle"
+        case .permissions: return "lock.shield"
+        case .general: return "gearshape"
+        case .about: return "info.circle"
+        }
+    }
+}
+
+/// 被控端的界面状态：WorkerHost（登录多个账号）+ HostService（被控服务）。
+/// 内核回调在任意线程触发，经 WorkerListener 切回主线程。
+@MainActor
+final class WorkerModel: ObservableObject {
+    let core: WorkerCore.Context
+    let settings: WorkerSettings
+    let selfTest: Bool
+    var worker: WorkerHost { core.worker }
+
+    @Published var page: WorkerPage = .status
+    @Published var status = HostStatus(online: false, remoteEnabled: true, deviceId: "", publicIp: "", accounts: [], sessions: [], assist: nil)
+    @Published var accounts: [HostAccount] = []
+    @Published var events: [HostEvent] = []
+    @Published var aiActivity: [String: String] = [:]          // session_id → 正在做什么
+    @Published var pendingRequest: AssistRequest?
+    @Published var screenGranted = false
+    @Published var accessibilityGranted = false
+    @Published var customCode = ""
+    @Published var eventFilter = "all"
+    @Published var serviceStarting = true
+    @Published var startError: String?
+    @Published var loginForm: LoginForm?
+    @Published var confirmLogout: HostAccount?
+    @Published var loggingOut: Set<UInt64> = []
+    @Published var assistBusy = false
+    @Published var notice: String?
+    @Published var loginItem = LoginItem.State.notRegistered
+    private(set) var service: HostService?
+    private var listener: WorkerListener?
+    private var platform: MacHostPlatform?
+    private var permTimer: Timer?
+    private var refreshTimer: Timer?
+    private var noticeTask: Task<Void, Never>?
+
+    struct AssistRequest: Identifiable, Equatable {
+        let id: String
+        let user: String
+        let device: String
+    }
+
+    init(settings: WorkerSettings, selfTest: Bool, forceMock: Bool = false, mockOptions: MockWorkerOptions = MockWorkerOptions()) {
+        self.settings = settings
+        self.selfTest = selfTest
+        core = WorkerCore.make(locale: Localization.shared.strings.pack.coreLocale, forceMock: forceMock, mockOptions: mockOptions)
+        refreshPermissions()
+        loginItem = selfTest ? .notRegistered : LoginItem.state
+    }
+
+    var deviceId: String { status.deviceId.isEmpty ? worker.deviceId() : status.deviceId }
+    var serverAddress: String? { worker.server() }
+    var hasAccounts: Bool { !accounts.isEmpty }
+    var needsPermissions: Bool { !screenGranted || !accessibilityGranted }
+    var aiActive: Bool { status.sessions.contains { $0.aiActive } }
+    var needsRelogin: Bool { accounts.contains { $0.status == .needsRelogin } }
+
+    /// 总状态（菜单栏图标与状态页标题用）
+    enum Overall { case starting, noAccount, offline, online, controlled, ai, disabled }
+    var overall: Overall {
+        if serviceStarting && service == nil { return .starting }
+        if !hasAccounts && status.assist == nil { return .noAccount }
+        if !status.remoteEnabled { return .disabled }
+        if aiActive { return .ai }
+        if !status.sessions.isEmpty { return .controlled }
+        return status.online ? .online : .offline
+    }
+
+    // MARK: 启动
+
+    /// 应用启动时调一次：有账号就启动被控服务
+    func boot() {
+        serviceStarting = true
+        Task {
+            do {
+                if let s = try await worker.start() { attach(s) }
+                startError = nil
+            } catch {
+                startError = describeError(error)
+            }
+            serviceStarting = false
+            refresh()
+        }
+    }
+
+    func attach(_ s: HostService) {
+        if let cur = service, cur === s { return }
+        service = s
+        let l = WorkerListener()
+        l.owner = self
+        listener = l
+        s.setListener(listener: l)
+        if !selfTest {
+            let p = platform ?? MacHostPlatform()
+            platform = p
+            s.setPlatform(platform: p)
+        }
+        refresh()
+    }
+
+    /// 登录后内核可能刚启动了被控服务：接上回调与平台层
+    private func attachIfNeeded() {
+        if service == nil, let s = worker.service() { attach(s) }
+    }
+
+    func refresh() {
+        guard let s = service else {
+            UIHooks.update(self)
+            return
+        }
+        status = s.status()
+        accounts = s.accounts()
+        events = s.recentEvents(limit: 300)
+        let live = Set(status.sessions.map(\.id))
+        aiActivity = aiActivity.filter { live.contains($0.key) }
+        UIHooks.update(self)
+    }
+
+    func refreshPermissions() {
+        screenGranted = SystemPermissions.screenRecordingGranted
+        accessibilityGranted = SystemPermissions.accessibilityGranted
+    }
+
+    /// 设置窗口打开期间定时刷新（授权状态、公网 IP、事件）
+    func setWindowVisible(_ on: Bool) {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        guard on, !selfTest else { return }
+        refresh()
+        refreshPermissions()
+        loginItem = LoginItem.state
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refresh()
+                self?.refreshPermissions()
+            }
+        }
+    }
+
+    /// 授权页打开时每 1 秒刷新授权状态（用户在系统设置里勾选后自动变绿）
+    func watchPermissions(_ on: Bool) {
+        permTimer?.invalidate()
+        permTimer = nil
+        guard on, !selfTest else { return }
+        permTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshPermissions() }
+        }
+    }
+
+    func show(notice text: String) {
+        notice = text
+        noticeTask?.cancel()
+        guard !selfTest else { return }
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if !Task.isCancelled { self?.notice = nil }
+        }
+    }
+
+    // MARK: 会话与账号的对应
+
+    /// 内核给的 from_user 是「显示名（用户名）」或用户名
+    func account(for s: HostSessionInfo) -> HostAccount? {
+        accounts.first { a in s.fromUser == a.username || s.fromUser.hasSuffix("（\(a.username)）") || s.fromUser.hasSuffix("(\(a.username))") }
+    }
+
+    /// 需要提示的会话：临时协助、认不出账号的、账号开了「被控时提示」的
+    var noticeSessions: [HostSessionInfo] {
+        status.sessions.filter { s in s.mode == .assist || (account(for: s)?.policy.notify ?? true) }
+    }
+
+    // MARK: 操作
+
+    func setRemoteEnabled(_ on: Bool) {
+        service?.setRemoteEnabled(enabled: on)
+        refresh()
+    }
+
+    func disconnectAll() { service?.disconnectAll(); aiActivity = [:]; refresh() }
+    func stopAi() { service?.stopAi(); aiActivity = [:]; refresh() }
+
+    func startAssist() {
+        guard let service, !assistBusy else { return }
+        assistBusy = true
+        Task {
+            do { _ = try await service.startAssist() } catch { show(notice: describeError(error)) }
+            assistBusy = false
+            refresh()
+        }
+    }
+
+    func stopAssist() { service?.stopAssist(); refresh() }
+    func refreshCode() { service?.setAssistCode(code: nil); refresh() }
+
+    var customCodeValid: Bool {
+        let c = customCode.trimmingCharacters(in: .whitespaces)
+        return (8...16).contains(c.count) && c.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
+    }
+
+    func applyCustomCode() {
+        guard customCodeValid else { return }
+        service?.setAssistCode(code: customCode.trimmingCharacters(in: .whitespaces))
+        customCode = ""
+        refresh()
+    }
+
+    func respond(_ allow: Bool) {
+        guard let r = pendingRequest else { return }
+        service?.respondAssist(requestId: r.id, allow: allow)
+        pendingRequest = nil
+        AssistRequestPanel.shared.close()
+        refresh()
+    }
+
+    func updatePolicy(_ account: HostAccount, _ change: (inout HostPolicy) -> Void) {
+        var p = account.policy
+        change(&p)
+        guard p != account.policy else { return }
+        service?.updateAccountPolicy(userId: account.userId, policy: p)
+        refresh()
+    }
+
+    func openLogin(username: String? = nil) {
+        let f = LoginForm()
+        if let server = serverAddress {
+            f.server = server
+            f.serverLocked = hasAccounts
+        } else {
+            f.server = settings.lastServer
+        }
+        f.username = username ?? (hasAccounts ? "" : settings.lastUsername)
+        if core.isMock && f.server.isEmpty && !selfTest {
+            // 模拟内核：预填演示地址（任意密码可登录，用户名含 totp / new 可演示两步验证与首次改密码）
+            f.server = MockWorkerHost.demoServer
+        }
+        loginForm = f
+        page = .accounts
+    }
+
+    func submitLogin(_ f: LoginForm) {
+        guard !f.busy else { return }
+        f.error = nil
+        let server = f.server.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard LoginForm.looksLikeServer(server) else { f.error = L("login.server.invalid"); return }
+        if f.step == .changePassword {
+            guard f.newPassword.count >= 8 else { f.error = L("login.change.tooShort"); return }
+            guard f.newPassword == f.confirmPassword else { f.error = L("login.change.mismatch"); return }
+        }
+        f.busy = true
+        let user = f.username.trimmingCharacters(in: .whitespaces)
+        let totp = f.totp.isEmpty ? nil : f.totp
+        let newPassword = f.step == .changePassword ? f.newPassword : nil
+        Task {
+            defer { f.busy = false }
+            do {
+                let r = try await worker.login(server: server, username: user, password: f.password, totp: totp, newPassword: newPassword, systemUser: nil)
+                switch r {
+                case .success(_, let name):
+                    settings.lastServer = server
+                    settings.lastUsername = name
+                    loginForm = nil
+                    attachIfNeeded()
+                    refresh()
+                    show(notice: L("accounts.signedIn", name))
+                case .needTotp:
+                    if f.step == .totp { f.error = L("login.totp.wrong") }
+                    f.step = .totp
+                case .mustChangePassword:
+                    f.step = .changePassword
+                }
+            } catch {
+                f.error = describeError(error)
+            }
+        }
+    }
+
+    func logout(_ a: HostAccount) {
+        confirmLogout = nil
+        loggingOut.insert(a.userId)
+        Task {
+            do {
+                try await worker.logout(userId: a.userId)
+                show(notice: L("accounts.signedOut", a.username))
+            } catch {
+                show(notice: describeError(error))
+            }
+            loggingOut.remove(a.userId)
+            refresh()
+        }
+    }
+
+    func setLoginItem(_ on: Bool) {
+        guard !selfTest else { return }
+        if let err = LoginItem.set(on) { show(notice: err) }
+        loginItem = LoginItem.state
+    }
+
+    func setSystemNotifications(_ on: Bool) {
+        settings.systemNotifications = on
+        if on && !selfTest { Notifier.requestAuthorization() }
+    }
+
+    // MARK: 回调（主线程）
+
+    func received(status s: HostStatus) {
+        // 内核经 on_status 推来的 HostStatus 不带账号列表（accounts 为空），账号要另外向 HostService 取
+        var st = s
+        let accs = service?.accounts() ?? accounts
+        st.accounts = accs
+        status = st
+        accounts = accs
+        events = service?.recentEvents(limit: 300) ?? events
+        let live = Set(s.sessions.map(\.id))
+        aiActivity = aiActivity.filter { live.contains($0.key) }
+        UIHooks.update(self)
+    }
+
+    func assistRequested(id: String, user: String, device: String) {
+        pendingRequest = AssistRequest(id: id, user: user, device: device)
+        // 内核最多等 2 分钟，超时按拒绝处理；到时收起弹窗
+        if !selfTest {
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 121_000_000_000)
+                guard let self, self.pendingRequest?.id == id else { return }
+                self.pendingRequest = nil
+                AssistRequestPanel.shared.close()
+                self.refresh()
+            }
+        }
+        if !selfTest {
+            AssistRequestPanel.shared.show(self)
+            if settings.systemNotifications { Notifier.post(title: L("assist.request.title"), body: L("assist.request.body", user, Self.shortDevice(device))) }
+        }
+    }
+
+    func sessionStarted(_ info: HostSessionInfo) {
+        refresh()
+        guard !selfTest, settings.systemNotifications else { return }
+        if info.mode == .assist || (account(for: info)?.policy.notify ?? true) {
+            Notifier.post(title: L("notify.connected.title"), body: L("notify.connected.body", info.fromUser, Self.shortDevice(info.fromDevice)))
+        }
+    }
+
+    func sessionEnded(_ id: String) {
+        aiActivity[id] = nil
+        refresh()
+    }
+
+    func aiActivity(_ id: String, _ text: String) {
+        aiActivity[id] = text
+        UIHooks.update(self)
+    }
+
+    static func shortDevice(_ d: String) -> String {
+        d.count > 12 ? String(d.prefix(8)) + "…" : d
+    }
+
+    var filteredEvents: [HostEvent] {
+        switch eventFilter {
+        case "ai": return events.filter(\.ai)
+        case "warning": return events.filter { $0.level == .warning }
+        case "connect": return events.filter { ["connect", "disconnect", "reject", "auth_failed"].contains($0.kind) }
+        case "all": return events
+        default: return events.filter { $0.kind == eventFilter }
+        }
+    }
+}
+
+/// 登录表单（服务器地址、用户名密码 → 两步验证 → 首次改密码）
+@MainActor
+final class LoginForm: ObservableObject, Identifiable {
+    enum Step { case credentials, totp, changePassword }
+    nonisolated let id = UUID()
+    @Published var step: Step = .credentials
+    @Published var server = ""
+    @Published var serverLocked = false
+    @Published var username = ""
+    @Published var password = ""
+    @Published var totp = ""
+    @Published var newPassword = ""
+    @Published var confirmPassword = ""
+    @Published var busy = false
+    @Published var error: String?
+
+    /// 粗查格式：主机:端口#sha256-指纹（详细校验由内核做，错误文字由内核给）
+    static func looksLikeServer(_ s: String) -> Bool {
+        guard let hash = s.firstIndex(of: "#") else { return false }
+        let hostPort = s[..<hash], fp = s[s.index(after: hash)...]
+        guard fp.hasPrefix("sha256-"), fp.count > 20, let colon = hostPort.lastIndex(of: ":") else { return false }
+        guard let port = Int(hostPort[hostPort.index(after: colon)...]), (1...65535).contains(port) else { return false }
+        return colon > hostPort.startIndex
+    }
+
+    var canSubmit: Bool {
+        switch step {
+        case .credentials: return !server.isEmpty && !username.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty
+        case .totp: return totp.count >= 6
+        case .changePassword: return !newPassword.isEmpty && !confirmPassword.isEmpty
+        }
+    }
+}
+
+/// 内核回调 → 主线程
+final class WorkerListener: HostListener, @unchecked Sendable {
+    weak var owner: WorkerModel?
+    private func main(_ f: @escaping @MainActor (WorkerModel) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let o = self?.owner else { return }
+            MainActor.assumeIsolated { f(o) }
+        }
+    }
+    func onStatus(status: HostStatus) { main { $0.received(status: status) } }
+    func onAssistRequest(requestId: String, fromUser: String, fromDevice: String) { main { $0.assistRequested(id: requestId, user: fromUser, device: fromDevice) } }
+    func onSessionStarted(info: HostSessionInfo) { main { $0.sessionStarted(info) } }
+    func onSessionEnded(sessionId: String) { main { $0.sessionEnded(sessionId) } }
+    func onAiActivity(sessionId: String, description: String) { main { $0.aiActivity(sessionId, description) } }
+}
+
+/// 模型变化后刷新菜单栏图标与被控提示条（selftest 下不碰）
+@MainActor
+enum UIHooks {
+    static func update(_ m: WorkerModel) {
+        guard !m.selfTest else { return }
+        StatusMenu.shared.update(m)
+        ControlBanner.shared.update(m)
+    }
+}

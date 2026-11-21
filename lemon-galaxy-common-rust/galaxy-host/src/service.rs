@@ -394,6 +394,18 @@ impl HostService {
         self.emit_status();
     }
 
+    /// 断开一个会话。返回是否找到。
+    pub fn disconnect_session(&self, id: &str) -> bool {
+        let s = self.sessions.lock().get(id).cloned();
+        match s {
+            Some(s) => {
+                s.conn.close(3u32.into(), b"disconnected by host");
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn disconnect_all(&self) {
         let all: Vec<_> = self.sessions.lock().values().cloned().collect();
         for s in all {

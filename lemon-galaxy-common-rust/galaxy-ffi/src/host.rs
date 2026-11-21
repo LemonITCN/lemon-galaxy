@@ -72,11 +72,16 @@ impl hp::HostPlatform for PlatformBridge {
 struct EventsBridge {
     listener: Arc<dyn HostListener>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    host: std::sync::Weak<galaxy_host::HostService>,
 }
 
 impl galaxy_host::HostEvents for EventsBridge {
     fn on_status(&self, s: &galaxy_host::HostStatus) {
-        self.listener.on_status(convert_status(s));
+        let mut st = convert_status(s);
+        if let Some(h) = self.host.upgrade() {
+            st.accounts = accounts_of(&h);
+        }
+        self.listener.on_status(st);
     }
     fn ask_assist(&self, from_user: String, from_device: String) -> futures::future::BoxFuture<'static, bool> {
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -133,25 +138,16 @@ impl HostService {
     }
 
     pub fn set_listener(&self, listener: Arc<dyn HostListener>) {
-        self.inner.set_events(Arc::new(EventsBridge { listener, pending: self.pending.clone() }));
+        self.inner.set_events(Arc::new(EventsBridge { listener, pending: self.pending.clone(), host: Arc::downgrade(&self.inner) }));
     }
 
     pub fn accounts(&self) -> Vec<HostAccount> {
-        self.inner
-            .state()
-            .accounts
-            .into_iter()
-            .map(|a| HostAccount {
-                user_id: a.user_id,
-                username: a.username,
-                display_name: a.display_name,
-                status: match a.status {
-                    galaxy_host::AccountStatus::Active => AccountStatus::Active,
-                    galaxy_host::AccountStatus::NeedsRelogin => AccountStatus::NeedsRelogin,
-                },
-                policy: a.policy.into(),
-            })
-            .collect()
+        accounts_of(&self.inner)
+    }
+
+    /// 断开一个会话（status().sessions 里的 id）。
+    pub fn disconnect_session(&self, id: String) -> bool {
+        self.inner.disconnect_session(&id)
     }
 
     /// 修改某账号在本机的权限（只能在本机修改）。
@@ -207,4 +203,21 @@ impl HostService {
     pub fn recent_events(&self, limit: u32) -> Vec<HostEvent> {
         self.inner.recent_events(limit as usize).into_iter().map(Into::into).collect()
     }
+}
+
+fn accounts_of(h: &galaxy_host::HostService) -> Vec<HostAccount> {
+    h.state()
+        .accounts
+        .into_iter()
+        .map(|a| HostAccount {
+            user_id: a.user_id,
+            username: a.username,
+            display_name: a.display_name,
+            status: match a.status {
+                galaxy_host::AccountStatus::Active => AccountStatus::Active,
+                galaxy_host::AccountStatus::NeedsRelogin => AccountStatus::NeedsRelogin,
+            },
+            policy: a.policy.into(),
+        })
+        .collect()
 }
