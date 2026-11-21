@@ -868,9 +868,58 @@ impl GalaxyClient {
             }
             let (host, port) = (remote_host.trim().to_string(), *remote_port);
             if let Some(d) = via_device_id.clone().filter(|d| !d.is_empty()) {
-                let s = inner.session_for(parse_dev(&d)?).await?;
-                let (p, h) = s.forward_port(*local_port, host, port).await?;
-                return Ok(Arc::new(crate::session::PortForward { port: p, handle: parking_lot::Mutex::new(Some(h)) }));
+                let dev = parse_dev(&d)?;
+                // 先连一次，设备不在线时立即报错
+                let first = inner.session_for(dev).await?;
+                let l = tokio::net::TcpListener::bind(("127.0.0.1", *local_port)).await.map_err(|e| other(&format!("本机端口 {local_port} 用不了：{e}")))?;
+                let bound = l.local_addr().map(|a| a.port()).unwrap_or(*local_port);
+                // 每来一个连接都用当前可用的会话；断线后下一个连接自动重连，映射一直有效
+                let cur = Arc::new(tokio::sync::Mutex::new(Some(first)));
+                let h = tokio::spawn(async move {
+                    while let Ok((tcp, _)) = l.accept().await {
+                        let (inner, cur, host) = (inner.clone(), cur.clone(), host.clone());
+                        tokio::spawn(async move {
+                            let s = {
+                                let mut g = cur.lock().await;
+                                match g.as_ref().filter(|s| !s.is_closed()) {
+                                    Some(s) => s.clone(),
+                                    None => match inner.session_for(dev).await {
+                                        Ok(s) => {
+                                            *g = Some(s.clone());
+                                            s
+                                        }
+                                        Err(_) => return,
+                                    },
+                                }
+                            };
+                            let (mut ws, mut wr) = match s.open_tcp(&host, port).await {
+                                Ok(x) => x,
+                                Err(_) => {
+                                    // 可能是被控端重启了而旧连接还没超时：探一下，确实失联就丢掉旧会话，下一个连接重连
+                                    let alive = tokio::time::timeout(std::time::Duration::from_secs(5), s.mgmt(galaxy_proto::peer::MgmtReq::HostStatus)).await.map(|r| r.is_ok()).unwrap_or(false);
+                                    if !alive {
+                                        s.close();
+                                        let mut g = cur.lock().await;
+                                        if g.as_ref().map(|x| Arc::ptr_eq(x, &s)).unwrap_or(false) {
+                                            *g = None;
+                                        }
+                                    }
+                                    return;
+                                }
+                            };
+                            let (mut tr, mut tw) = tokio::io::split(tcp);
+                            let a = async {
+                                let _ = tokio::io::copy(&mut tr, &mut ws).await;
+                                let _ = ws.finish();
+                            };
+                            let b = async {
+                                let _ = tokio::io::copy(&mut wr, &mut tw).await;
+                            };
+                            tokio::join!(a, b);
+                        });
+                    }
+                });
+                return Ok(Arc::new(crate::session::PortForward { port: bound, handle: parking_lot::Mutex::new(Some(h)) }));
             }
             if let Some(hid) = via_ssh_host_id.clone().filter(|d| !d.is_empty()) {
                 let (s, _) = inner.connect_ssh_inner(hid, prompt, 0).await?;
