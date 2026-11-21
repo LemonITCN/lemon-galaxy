@@ -1,0 +1,75 @@
+# LemonGalaxy
+
+自建的远程控制与主机管理：像 UU 远程一样不开端口就能远程桌面、远程终端和传文件，像 Termius 一样管理一堆服务器，再加一个能直接操作远程电脑的 AI 智能体。服务器、账号、数据都在你自己手里。
+
+[下载最新版](https://github.com/LemonITCN/lemon-galaxy/releases/latest)
+
+- 能打洞就点对点直连，打不通才经自己的服务器中转；同一局域网自动直连，服务器连不上时局域网内照样能用。
+- 端到端加密：账号密钥只在你的设备上，服务器和管理员都看不到你的会话内容和加密库（SSH/RDP 主机、凭据）。
+- 远程桌面（多显示器、隐私屏、剪贴板）、远程终端（断线不丢会话）、文件管理（像 SFTP 一样，断点续传）、端口转发。
+- SSH 直连（可经某台设备或另一台 SSH 主机跳转）、RDP 主机（经设备转发，目标不用开放端口）。
+- AI 智能体：在主控端对话，让大模型在远程设备上执行命令、读改文件、看屏幕点鼠标；分档权限，危险操作要你确认，被控端机主还能设上限。
+- 自带 Web 管理后台：账号只能由管理员创建，管理设备、连接、审计日志、大模型供应商与用量、自动更新。
+
+## 三类客户端
+
+| 类型 | 作用 | 平台 |
+|---|---|---|
+| 主控端（control） | 控制别的设备，同时自己也能被控；只能登录一个账号 | macOS、Windows |
+| 被控端（worker） | 只被控制，体积小；可以同时登录多个账号，出现在每个账号的设备列表里 | Linux（命令行）、Windows（系统服务）、macOS |
+| 手机端（mobile） | 只控制，也能用 AI | 安卓、iOS |
+
+## 支持的系统
+
+| 组件 | 系统 | 架构 |
+|---|---|---|
+| 服务器 | Linux（静态单文件，内嵌管理后台）；另有 Windows 版便于试用 | x86_64、ARM64 |
+| Linux 被控端 | 任意发行版（静态单文件），root 或普通用户都能跑 | x86_64、ARM64 |
+| Windows 被控端 | Windows 10 / 11 / Server 2016 起；另有 Windows 7 SP1 兼容版 | x64、ARM64 |
+| Mac 客户端 | macOS 13 起 | Apple 芯片、Intel（通用包） |
+| 安卓 | 8.0 起 | arm64、armv7、x86_64 |
+
+## 快速开始
+
+1. 服务器：解压后运行 `./lemon-galaxy-server --public-host <你的域名或公网 IP>`，日志里会打印初始化网址和「客户端填写的服务器地址」（带证书指纹）。放行 TCP 与 UDP 7443 端口。
+2. 打开初始化网址创建管理员、绑定两步验证，在后台「用户」里创建账号。
+3. Linux 被控端：`./lemon-galaxy-worker login`，再 `sudo ./lemon-galaxy-worker install-service` 装成开机自启服务。
+4. Windows 被控端：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service`。服务以 SYSTEM 运行，锁屏和 UAC 界面也能远程操作。
+5. 在 Mac、Windows 或手机上用同一个服务器地址和账号登录。
+
+被控端命令一览：`lemon-galaxy-worker help`。
+
+## 目录
+
+| 目录 | 内容 |
+|---|---|
+| `docs/` | 契约：`spec.md` 总体方案、`protocol.md` 协议、`security.md` 安全设计、`ai-agent.md` AI 智能体、`api.md` 服务器接口、`ffi.md` 内核导出接口 |
+| `lemon-galaxy-common-rust/` | 各端共用的 Rust 内核：协议、加密、网络（打洞 / 中转 / 局域网）、客户端、被控端、AI 智能体、SSH、导出给 Swift / Kotlin / C# 的接口 |
+| `lemon-galaxy-server/` | 服务器（Rust）与 Web 管理后台（Vue 3，打进同一个可执行文件） |
+| `lemon-galaxy-worker-linux/`、`lemon-galaxy-worker-windows/` | 被控端 |
+| `lemon-galaxy-control-macos/`、`lemon-galaxy-control-windows/` | 主控端（SwiftUI、WPF） |
+| `lemon-galaxy-mobile-android/`、`lemon-galaxy-mobile-ios/` | 手机端（Kotlin + Compose、SwiftUI） |
+| `scripts/` | 构建与测试脚本 |
+| `tools/` | 生成 C# 绑定的工具 |
+
+## 构建与测试
+
+```bash
+cargo test --workspace --exclude galaxy-ffi
+```
+
+```bash
+cargo build -p lemon-galaxy-server -p lemon-galaxy-worker-linux -p galaxy-dev && scripts/e2e.sh target/debug
+```
+
+端到端测试在本机起服务器、被控端和命令行主控端，验证登录、直连与强制 UDP / TCP 中转、命令执行、终端断线继承和文件传输。
+
+- Mac：`scripts/build-ffi-apple.sh` 编内核，再 `lemon-galaxy-control-macos/scripts/build.sh [--dmg]`。
+- 安卓：`cd lemon-galaxy-mobile-android && ./gradlew assembleRelease`（会自动编内核并生成绑定）。
+- Windows：在 Mac 上可用 `scripts/check-windows.sh` 交叉检查；正式包由 GitHub Actions 在 Windows 上用 MSVC 编译。
+
+每次推送到 main，GitHub Actions 构建并测试全部工程，通过后自动发布 Release。发布文件附 SHA-256 清单与发布签名，客户端自动更新只安装签名有效的版本。
+
+## 许可
+
+MIT
