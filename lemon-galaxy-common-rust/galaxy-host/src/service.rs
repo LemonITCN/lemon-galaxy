@@ -713,6 +713,27 @@ impl HostService {
         }
     }
 
+    /// 临时协助的权限。普通权限运行时按当前用户；以 SYSTEM / root 运行（系统服务）时按屏幕前登录的用户，
+    /// 取不到登录用户就只给画面、键鼠、剪贴板与声音，不给终端与文件——否则对方会拿到最高权限。
+    fn assist_policy(&self) -> HostPolicy {
+        use crate::sysuser::{is_root, SysUser};
+        if !is_root() {
+            return HostPolicy::default_for(&SysUser::current().name);
+        }
+        // 最高权限账号（root、SYSTEM）不算登录用户
+        let privileged = |s: &SysUser| if cfg!(windows) { s.sid == "S-1-5-18" || s.name.eq_ignore_ascii_case("SYSTEM") } else { s.uid == 0 };
+        let user = self.platform.read().interactive_user().filter(|u| SysUser::lookup(u).is_some_and(|s| !privileged(&s)));
+        match user {
+            Some(u) => HostPolicy::default_for(&u),
+            None => {
+                let mut p = HostPolicy::default_for("");
+                p.terminal = false;
+                p.files = false;
+                p
+            }
+        }
+    }
+
     fn host_info(&self, policy: Option<&HostPolicy>) -> (HostInfo, crate::sysuser::SysUser) {
         let user = policy
             .and_then(|p| crate::sysuser::SysUser::lookup(&p.system_user))
@@ -817,7 +838,7 @@ impl HostService {
             let dc = self.status().assist.map(|a| a.0);
             match (code, dc, pending.as_ref().map(|p| p.mode)) {
                 (Some(code), Some(dc), Some(ConnMode::Assist)) => {
-                    let policy = HostPolicy::default_for(&crate::sysuser::SysUser::current().name);
+                    let policy = self.assist_policy();
                     (HostVerdict::Assist { secret: AssistSecret { code, device_code: dc } }, None, policy, from_user.clone())
                 }
                 _ => (HostVerdict::Reject { code: "assist_off".into(), message: "对方未开启临时协助".into() }, None, HostPolicy::default_for("nobody"), None),

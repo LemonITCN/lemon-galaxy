@@ -339,6 +339,10 @@ impl HostPlatform for WinPlatform {
         }
     }
 
+    fn interactive_user(&self) -> Option<String> {
+        console_user()
+    }
+
     fn capabilities(&self) -> Vec<String> {
         let mut c: Vec<String> = vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into()];
         // 有没有声音输出设备：最多 30 秒查一次（服务器、虚拟机常常没有）
@@ -354,4 +358,29 @@ impl HostPlatform for WinPlatform {
         }
         c
     }
+}
+
+/// 控制台会话里登录的用户（域\用户名）；没人登录（登录界面）时为空。
+fn console_user() -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::RemoteDesktop::{WTSDomainName, WTSFreeMemory, WTSQuerySessionInformationW, WTSUserName, WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS};
+    let session = unsafe { WTSGetActiveConsoleSessionId() };
+    if session == 0xFFFF_FFFF {
+        return None;
+    }
+    let query = |class: WTS_INFO_CLASS| -> Option<String> {
+        unsafe {
+            let mut buf = PWSTR::null();
+            let mut len = 0u32;
+            WTSQuerySessionInformationW(Some(WTS_CURRENT_SERVER_HANDLE), session, class, &mut buf, &mut len).ok()?;
+            let s = buf.to_string().ok();
+            WTSFreeMemory(buf.0 as _);
+            s.filter(|s| !s.is_empty())
+        }
+    };
+    let user = query(WTSUserName)?;
+    Some(match query(WTSDomainName) {
+        Some(d) => format!("{d}\\{user}"),
+        None => user,
+    })
 }

@@ -46,6 +46,10 @@ pub trait HostPlatform: Send + Sync {
         Err("此设备不支持传声音".into())
     }
     fn stop_audio(&self) {}
+    /// 屏幕前登录的系统用户（被控服务以 SYSTEM / root 运行时，临时协助按这个用户执行终端与文件）。
+    fn interactive_user(&self) -> Option<String> {
+        None
+    }
     fn capabilities(&self) -> Vec<String> {
         vec![]
     }
