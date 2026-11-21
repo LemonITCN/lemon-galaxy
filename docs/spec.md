@@ -133,7 +133,15 @@
 | iOS / iPadOS | 否 | 是（mobile，后续期） | TestFlight 分发 |
 | HarmonyOS NEXT | 否 | 是（mobile，后续期） | |
 
-服务器：Linux x86_64 / ARM64 静态单文件（另提供 macOS / Windows 版便于试用）。
+服务器：
+
+| 平台 | 形态 | 备注 |
+|---|---|---|
+| Linux（x86_64 / ARM64，任意发行版） | 静态单文件 | `install-service` 装成 systemd 服务（root 运行，程序 `/usr/local/bin`，数据 `/var/lib/lemon-galaxy-server`） |
+| Windows 10 / 11 / Server 2016+（x64 / ARM64） | 单个 exe（zip） | `install-service` 装成 LocalSystem 服务（开机自启、失败自动重启，程序 `%ProgramFiles%\LemonGalaxy\Server`，数据 `%ProgramData%\LemonGalaxy\server` 只给 SYSTEM 与管理员），自动加 Windows 防火墙入站规则；日志写数据目录 `logs/server.log` |
+| macOS | 单文件 | 只用于开发试用，不装系统服务、不自动升级 |
+
+两个平台用法相同：`install-service` 的端口、对外地址、监听地址、证书参数写进服务，再次运行可修改（没写的沿用上次）；`uninstall-service` 删服务、防火墙规则与程序，保留数据目录；`status` 显示服务状态、客户端地址与初始化网址；`self-update` 从 GitHub 取最新发布、验发布签名后替换程序并重启服务（Windows 上运行中的程序先改名为 `.old`，下次启动时删掉）。前台运行（含 Windows 双击）时数据目录默认为当前目录下的 `lemon-galaxy-data`。
 
 ## 6. 发布
 

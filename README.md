@@ -24,7 +24,7 @@
 
 | 组件 | 系统 | 架构 |
 |---|---|---|
-| 服务器 | Linux（静态单文件，内嵌管理后台）；另有 Windows 版便于试用 | x86_64、ARM64 |
+| 服务器 | Linux 任意发行版（静态单文件）；Windows 10 / 11 / Server 2016 起。都内嵌管理后台，可装成系统服务 | x86_64、ARM64 |
 | Linux 被控端 | 任意发行版（静态单文件），root 或普通用户都能跑 | x86_64、ARM64 |
 | Windows 被控端 | Windows 10 / 11 / Server 2016 起；另有 Windows 7 SP1 兼容版 | x64、ARM64 |
 | Mac 客户端 | macOS 13 起 | Apple 芯片、Intel（通用包） |
@@ -32,7 +32,13 @@
 
 ## 快速开始
 
-1. 服务器：解压后运行 `./lemon-galaxy-server --public-host <你的域名或公网 IP>`，日志里会打印初始化网址和「客户端填写的服务器地址」（带证书指纹）。放行 TCP 与 UDP 7443 端口。
+1. 服务器，任选一种：
+   - Linux：解压后运行 `sudo ./lemon-galaxy-server install-service --public-host <你的域名或公网 IP>`，装成开机自启的 systemd 服务（程序在 `/usr/local/bin`，数据在 `/var/lib/lemon-galaxy-server`）。
+   - Windows：解压 `lemon-galaxy-server-<版本>-windows-x86_64.zip`（ARM64 电脑用 aarch64），以管理员身份打开 PowerShell，在解压目录运行 `.\lemon-galaxy-server.exe install-service --public-host <你的域名或公网 IP>`。装成系统服务（开机自启、出错自动重启），程序在 `C:\Program Files\LemonGalaxy\Server`，数据在 `C:\ProgramData\LemonGalaxy\server`，并在 Windows 防火墙放行端口。
+   - 临时试用：直接运行 `./lemon-galaxy-server --public-host <...>`（Windows 上可双击），数据在当前目录的 `lemon-galaxy-data`。
+
+   安装后会打印初始化网址和「客户端填写的服务器地址」（带证书指纹），之后随时可用 `lemon-galaxy-server status` 再看。云服务器的安全组要放行 TCP 与 UDP 7443 端口。
+   改端口、对外地址或证书：带上新参数再运行一次 `install-service`（没写的参数沿用上次）；卸载：`uninstall-service`（数据目录保留）；升级：`self-update`（验发布签名，装了服务会自动重启）。
 2. 打开初始化网址创建管理员、绑定两步验证，在后台「用户」里创建账号。
 3. Linux 被控端：`./lemon-galaxy-worker login`，再 `sudo ./lemon-galaxy-worker install-service` 装成开机自启服务。
 4. Windows 被控端：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service`。服务以 SYSTEM 运行，锁屏和 UAC 界面也能远程操作。
@@ -64,6 +70,7 @@ cargo build -p lemon-galaxy-server -p lemon-galaxy-worker-linux -p galaxy-dev &&
 ```
 
 端到端测试在本机起服务器、被控端和命令行主控端，验证登录、直连与强制 UDP / TCP 中转、命令执行、终端断线继承、远端声音（测试音）、文件传输和远程开机。
+`scripts/server-service-test.sh <二进制目录>` 会真的把服务器装成系统服务再卸载（Linux 要免密 sudo，Windows 要管理员），只在 CI 的一次性机器上跑。
 
 - Mac：`scripts/build-ffi-apple.sh` 编内核，再 `lemon-galaxy-control-macos/scripts/build.sh [--dmg]`。
 - 安卓：`cd lemon-galaxy-mobile-android && ./gradlew assembleRelease`（会自动编内核并生成绑定）。

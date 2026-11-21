@@ -1,7 +1,8 @@
 //! LemonGalaxy 服务器。
 //!
 //! 一个端口号（默认 7443）：TCP 上是 HTTPS（管理后台、客户端接口、信令、TCP 中转），UDP 上是探测与中转。
-//! 数据全部在 --data-dir 下：server.db（SQLite）与 keys/（密钥，权限 0600）。
+//! 数据全部在数据目录下：server.db（SQLite）与 keys/（密钥，权限 0600）。
+//! 前台运行时数据目录默认是当前目录下的 lemon-galaxy-data；install-service 装成系统服务（Windows / Linux），见 service 模块。
 
 mod admin;
 mod ai;
@@ -11,6 +12,8 @@ mod client;
 mod db;
 mod error;
 mod keys;
+mod logfile;
+mod service;
 mod state;
 mod tls;
 mod udp;
@@ -18,30 +21,36 @@ mod update;
 mod web;
 mod ws;
 
+use anyhow::Context;
 use axum::http::{header, HeaderValue};
 use axum::routing::{get, post};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use parking_lot::{Mutex, RwLock};
 use r2d2_sqlite::rusqlite::{params, OptionalExtension};
+use std::future::{Future, IntoFuture};
 use std::net::{SocketAddr, SocketAddrV6};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+/// 前台运行时的默认数据目录（相对当前目录）。
+pub(crate) const LOCAL_DATA_DIR: &str = "./lemon-galaxy-data";
+
 #[derive(Parser)]
 #[command(name = "lemon-galaxy-server", version, about = "LemonGalaxy 服务器")]
 struct Cli {
-    /// 数据目录（数据库与密钥）
-    #[arg(long, env = "LEMON_GALAXY_DATA", default_value = "./lemon-galaxy-data", global = true)]
-    data_dir: PathBuf,
-    /// 端口（TCP 与 UDP 同号）
-    #[arg(long, env = "LEMON_GALAXY_PORT", default_value_t = galaxy_proto::DEFAULT_PORT, global = true)]
-    port: u16,
-    /// 监听地址，默认同时监听 IPv4 与 IPv6
-    #[arg(long, env = "LEMON_GALAXY_BIND", default_value = "::", global = true)]
-    bind: String,
+    /// 数据目录（数据库与密钥）。前台运行默认为当前目录下的 lemon-galaxy-data；
+    /// 系统服务默认为 %ProgramData%\LemonGalaxy\server（Windows）或 /var/lib/lemon-galaxy-server（Linux）
+    #[arg(long, env = "LEMON_GALAXY_DATA", global = true)]
+    data_dir: Option<PathBuf>,
+    /// 端口（TCP 与 UDP 同号），默认 7443
+    #[arg(long, env = "LEMON_GALAXY_PORT", global = true)]
+    port: Option<u16>,
+    /// 监听地址，默认 :: （同时监听 IPv4 与 IPv6）
+    #[arg(long, env = "LEMON_GALAXY_BIND", global = true)]
+    bind: Option<String>,
     /// 对外的主机名或 IP（写进客户端地址与自签证书）
     #[arg(long, env = "LEMON_GALAXY_PUBLIC_HOST", global = true)]
     public_host: Option<String>,
@@ -50,16 +59,29 @@ struct Cli {
     tls_cert: Option<PathBuf>,
     #[arg(long, env = "LEMON_GALAXY_TLS_KEY", global = true)]
     tls_key: Option<PathBuf>,
+    /// 日志同时写到这个文件（超过 10 MB 轮换，保留 3 份）。系统服务固定写数据目录下的 logs/server.log
+    #[arg(long, env = "LEMON_GALAXY_LOG_FILE", global = true)]
+    log_file: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 运行服务器（默认）
+    /// 前台运行服务器（默认）
     Run,
     /// 显示客户端地址与指纹
     Info,
+    /// 安装为系统服务：开机自启、出错自动重启（Windows 需管理员，Linux 需 root）。
+    /// --port、--public-host、--bind、--tls-cert/--tls-key 写进服务；再次运行可修改，没写的沿用上次，写空值表示清除
+    InstallService,
+    /// 卸载系统服务（数据目录保留）
+    UninstallService,
+    /// 显示系统服务状态、客户端地址与初始化网址
+    Status,
+    /// 由 Windows 服务管理器启动（内部使用）
+    #[command(hide = true)]
+    Service,
     /// 管理员账号
     Admin {
         #[command(subcommand)]
@@ -75,7 +97,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AiCmd,
     },
-    /// 升级服务器程序（从 GitHub 取最新发布，验发布签名；只支持 Linux）。升级后重启服务生效
+    /// 升级服务器程序（从 GitHub 取最新发布，验发布签名；Linux 与 Windows）。装了系统服务会自动重启它
     SelfUpdate {
         /// 只检查，不升级
         #[arg(long)]
@@ -121,54 +143,257 @@ enum AdminCmd {
     ResetPassword { username: String, password: String },
 }
 
-fn main() -> anyhow::Result<()> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,hyper=warn,rustls=warn".into()))
-        .init();
-    let cli = Cli::parse();
-    std::fs::create_dir_all(&cli.data_dir)?;
-    let db_path = cli.data_dir.join("server.db");
-    let db = db::Db::open(&db_path)?;
+/// 运行服务器所需的参数。
+#[derive(Clone)]
+pub(crate) struct ServeCtx {
+    data_dir: PathBuf,
+    port: u16,
+    bind: String,
+    public_host: Option<String>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+}
 
+impl ServeCtx {
+    fn tls_source(&self) -> keys::TlsSource {
+        keys::TlsSource { cert_path: self.tls_cert.clone(), key_path: self.tls_key.clone() }
+    }
+}
+
+fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    // Windows 上从资源管理器双击打开：控制台窗口是专门开的，出错时停住让人看清
+    #[cfg(windows)]
+    let double_click = std::env::args_os().len() <= 1 && service::windows::launched_from_explorer();
+    #[cfg(not(windows))]
+    let double_click = false;
+    let code = match real_main(double_click) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("错误：{e:#}");
+            1
+        }
+    };
+    if double_click && code != 0 {
+        eprintln!();
+        eprintln!("按回车键退出");
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
+    std::process::exit(code);
+}
+
+fn init_logging(console: bool, file: Option<&Path>) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    use tracing_subscriber::prelude::*;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,hyper=warn,rustls=warn".into());
+    // Windows 控制台默认不认 ANSI 颜色码，只在类 Unix 终端上用颜色
+    let console_layer = console.then(|| tracing_subscriber::fmt::layer().with_ansi(cfg!(unix) && std::io::stdout().is_terminal()));
+    let file_layer = match file {
+        Some(p) => {
+            let f = logfile::RotatingFile::open(p).with_context(|| format!("无法打开日志文件 {}", p.display()))?;
+            Some(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f)))
+        }
+        None => None,
+    };
+    tracing_subscriber::registry().with(filter).with(console_layer).with(file_layer).init();
+    Ok(())
+}
+
+/// 打开数据库、读设置（命令行的 --public-host 覆盖设置里的）。
+fn open_data(data_dir: &Path, public_host: Option<&str>) -> anyhow::Result<(db::Db, PathBuf, state::Settings)> {
+    std::fs::create_dir_all(data_dir).with_context(|| format!("无法创建数据目录 {}", data_dir.display()))?;
+    let db_path = data_dir.join("server.db");
+    let db = db::Db::open(&db_path).with_context(|| format!("无法打开数据库 {}（系统服务的数据目录只有管理员 / root 能访问）", db_path.display()))?;
     let mut settings: state::Settings = db
         .call_sync(|c| c.query_row("SELECT value FROM settings WHERE key = 'settings'", [], |r| r.get::<_, String>(0)).optional())?
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    if let Some(h) = &cli.public_host {
-        settings.public_host = h.clone();
+    if let Some(h) = public_host {
+        settings.public_host = h.to_string();
+    }
+    Ok((db, db_path, settings))
+}
+
+/// 管理命令（admin / user / ai / info / status / self-update）用的数据目录与参数：
+/// 命令行给了就用命令行的；当前目录下有 lemon-galaxy-data 就用它（与以前一致）；否则装了系统服务就用服务的数据目录和参数。
+fn manage_ctx(cli: &Cli) -> ServeCtx {
+    let svc = service::load_config();
+    let (data_dir, svc) = match &cli.data_dir {
+        Some(d) => {
+            let same = svc.filter(|c| std::path::absolute(d).map(|a| a == c.data_dir).unwrap_or(false));
+            (d.clone(), same)
+        }
+        None if Path::new(LOCAL_DATA_DIR).exists() => (PathBuf::from(LOCAL_DATA_DIR), None),
+        None => match svc {
+            Some(c) => {
+                eprintln!("（使用系统服务的数据目录 {}）", c.data_dir.display());
+                (c.data_dir.clone(), Some(c))
+            }
+            None => (PathBuf::from(LOCAL_DATA_DIR), None),
+        },
+    };
+    let svc = svc.as_ref();
+    ServeCtx {
+        data_dir,
+        port: cli.port.or(svc.map(|c| c.port)).unwrap_or(galaxy_proto::DEFAULT_PORT),
+        bind: cli.bind.clone().or(svc.and_then(|c| c.bind.clone())).unwrap_or_else(|| "::".into()),
+        public_host: cli.public_host.clone().or(svc.and_then(|c| c.public_host.clone())),
+        tls_cert: cli.tls_cert.clone().or(svc.and_then(|c| c.tls_cert.clone())),
+        tls_key: cli.tls_key.clone().or(svc.and_then(|c| c.tls_key.clone())),
+    }
+}
+
+/// 前台运行与服务运行用的参数：只看命令行（服务的参数写在启动命令里）。
+fn serve_ctx(cli: &Cli, default_dir: PathBuf) -> ServeCtx {
+    ServeCtx {
+        data_dir: cli.data_dir.clone().unwrap_or(default_dir),
+        port: cli.port.unwrap_or(galaxy_proto::DEFAULT_PORT),
+        bind: cli.bind.clone().unwrap_or_else(|| "::".into()),
+        public_host: cli.public_host.clone(),
+        tls_cert: cli.tls_cert.clone(),
+        tls_key: cli.tls_key.clone(),
+    }
+}
+
+fn real_main(double_click: bool) -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    // 上次自动升级留下的旧程序（Windows 上运行中的程序只能改名，不能覆盖）
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(exe.with_extension("old"));
     }
 
     match &cli.cmd {
-        Some(Cmd::Admin { cmd }) => return admin_cli(&db, cmd),
-        Some(Cmd::Ai { cmd }) => {
-            let keys = keys::Keys::load(&cli.data_dir, &settings.public_host, &keys::TlsSource { cert_path: cli.tls_cert.clone(), key_path: cli.tls_key.clone() })?;
-            return ai_cli(&db, &keys, cmd);
+        None | Some(Cmd::Run) => {
+            init_logging(true, cli.log_file.as_deref())?;
+            if double_click {
+                println!("LemonGalaxy 服务器 {}，在这个窗口里前台运行，关闭窗口服务器就会停止。", galaxy_proto::APP_VERSION);
+                println!("要装成开机自启的系统服务，请以管理员身份打开 PowerShell，在本目录运行：");
+                println!("  .\\lemon-galaxy-server.exe install-service --public-host <你的域名或 IP>");
+                println!();
+            }
+            return serve_blocking(serve_ctx(&cli, PathBuf::from(LOCAL_DATA_DIR)), shutdown_signal());
         }
-        Some(Cmd::User { cmd }) => {
-            let keys = keys::Keys::load(&cli.data_dir, &settings.public_host, &keys::TlsSource { cert_path: cli.tls_cert.clone(), key_path: cli.tls_key.clone() })?;
-            return user_cli(&db, &keys, cmd);
+        Some(Cmd::Service) => {
+            #[cfg(not(windows))]
+            anyhow::bail!("service 命令只给 Windows 服务管理器用，前台运行请用 lemon-galaxy-server run");
+            #[cfg(windows)]
+            {
+                let default_dir = service::default_data_dir().unwrap_or_else(|| PathBuf::from(LOCAL_DATA_DIR));
+                let ctx = serve_ctx(&cli, default_dir);
+                // 服务没有控制台，日志只写文件
+                let log = cli.log_file.clone().unwrap_or_else(|| service::log_file_in(&ctx.data_dir));
+                init_logging(false, Some(&log))?;
+                return service::windows::run_dispatcher(ctx);
+            }
         }
+        Some(Cmd::InstallService) => {
+            let o = service::Overrides {
+                data_dir: cli.data_dir.clone(),
+                port: cli.port,
+                bind: cli.bind.clone(),
+                public_host: cli.public_host.clone(),
+                tls_cert: cli.tls_cert.clone(),
+                tls_key: cli.tls_key.clone(),
+            };
+            return service::install(&o);
+        }
+        Some(Cmd::UninstallService) => return service::uninstall(),
+        _ => {}
+    }
+
+    init_logging(true, None)?;
+    let ctx = manage_ctx(&cli);
+    // 这两个命令不要凭空建数据目录
+    let has_db = ctx.data_dir.join("server.db").exists();
+    match &cli.cmd {
         Some(Cmd::SelfUpdate { check }) => {
-            let repo = settings.update_github_repo.clone();
+            let repo = if has_db { open_data(&ctx.data_dir, None)?.2.update_github_repo } else { state::Settings::default().update_github_repo };
             let r = tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(update::self_update(&repo, *check))?;
-            match (r, check) {
-                (None, _) => println!("已是最新版本 {}", galaxy_proto::APP_VERSION),
-                (Some(v), true) => println!("有新版本 {v}（当前 {}）。运行 lemon-galaxy-server self-update 升级", galaxy_proto::APP_VERSION),
-                (Some(v), false) => println!("已升级到 {v}。重启服务生效，例如 systemctl restart lemon-galaxy-server"),
+            match r {
+                None => println!("已是最新版本 {}", galaxy_proto::APP_VERSION),
+                Some(u) if *check => println!("有新版本 {}（当前 {}）。运行 lemon-galaxy-server self-update 升级", u.version, galaxy_proto::APP_VERSION),
+                Some(u) => {
+                    println!("已升级到 {}：{}", u.version, u.path.display());
+                    match service::restart_if_installed() {
+                        Ok(true) => println!("已重启系统服务，新版本已生效。"),
+                        Ok(false) => println!("请重启服务器让新版本生效。"),
+                        Err(e) => println!("重启系统服务失败（{e:#}），请手动重启。"),
+                    }
+                }
             }
             return Ok(());
         }
-        Some(Cmd::Info) => {
-            let keys = keys::Keys::load(&cli.data_dir, &settings.public_host, &keys::TlsSource { cert_path: cli.tls_cert.clone(), key_path: cli.tls_key.clone() })?;
-            let host = if settings.public_host.is_empty() { "127.0.0.1".into() } else { settings.public_host.clone() };
-            println!("客户端地址: {}:{}#{}", host, cli.port, keys.fingerprint);
+        Some(Cmd::Status) => {
+            let admins = if has_db { open_data(&ctx.data_dir, None).ok().and_then(|(db, _, _)| db.call_sync(|c| c.query_row("SELECT COUNT(*) FROM admins", [], |r| r.get::<_, i64>(0))).ok()) } else { None };
+            let fallback = match std::fs::metadata(ctx.data_dir.join("keys")) {
+                Ok(_) => open_data(&ctx.data_dir, ctx.public_host.as_deref())
+                    .and_then(|(_, _, s)| Ok(state::client_address(&s.public_host, ctx.port, &keys::Keys::load(&ctx.data_dir, &s.public_host, &ctx.tls_source())?.fingerprint)))
+                    .unwrap_or_else(|e| format!("（{e:#}）")),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => "（没有权限读数据目录，请以管理员 / root 身份运行）".to_string(),
+                Err(_) => "（服务器还没有运行过）".to_string(),
+            };
+            service::print_status(&ctx.data_dir, &fallback, admins);
             return Ok(());
         }
         _ => {}
     }
 
-    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(cli, db, db_path, settings))
+    let (db, _db_path, settings) = open_data(&ctx.data_dir, ctx.public_host.as_deref())?;
+    match &cli.cmd {
+        Some(Cmd::Admin { cmd }) => admin_cli(&db, cmd),
+        Some(Cmd::Ai { cmd }) => {
+            let keys = keys::Keys::load(&ctx.data_dir, &settings.public_host, &ctx.tls_source())?;
+            ai_cli(&db, &keys, cmd)
+        }
+        Some(Cmd::User { cmd }) => {
+            let keys = keys::Keys::load(&ctx.data_dir, &settings.public_host, &ctx.tls_source())?;
+            user_cli(&db, &keys, cmd)
+        }
+        Some(Cmd::Info) => {
+            let keys = keys::Keys::load(&ctx.data_dir, &settings.public_host, &ctx.tls_source())?;
+            println!("客户端地址: {}", state::client_address(&settings.public_host, ctx.port, &keys.fingerprint));
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 前台运行时的停止信号：Ctrl+C，Unix 上还有 SIGTERM（systemd stop、kill）。
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    r = tokio::signal::ctrl_c() => if r.is_err() { term.recv().await; },
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                if tokio::signal::ctrl_c().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+    tracing::info!("收到停止信号，正在停止");
+}
+
+/// 运行服务器，直到 shutdown 完成（前台运行与系统服务共用）。
+pub(crate) fn serve_blocking(ctx: ServeCtx, shutdown: impl Future<Output = ()> + Send + 'static) -> anyhow::Result<()> {
+    let (db, db_path, settings) = open_data(&ctx.data_dir, ctx.public_host.as_deref())?;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let r = rt.block_on(run(ctx, db, db_path, settings, shutdown));
+    rt.shutdown_timeout(Duration::from_secs(3));
+    r
 }
 
 fn admin_cli(db: &db::Db, cmd: &AdminCmd) -> anyhow::Result<()> {
@@ -275,12 +500,14 @@ fn bind_dual(bind: &str, port: u16) -> anyhow::Result<(std::net::TcpListener, st
     Ok((tcp.into(), udp.into()))
 }
 
-async fn run(cli: Cli, db: db::Db, db_path: PathBuf, settings: state::Settings) -> anyhow::Result<()> {
-    let keys = keys::Keys::load(&cli.data_dir, &settings.public_host, &keys::TlsSource { cert_path: cli.tls_cert.clone(), key_path: cli.tls_key.clone() })?;
-    let (tcp_std, udp_std) = bind_dual(&cli.bind, cli.port).or_else(|e| {
-        tracing::warn!("双栈监听失败（{e}），改为只监听 IPv4");
-        bind_dual("0.0.0.0", cli.port)
-    })?;
+async fn run(ctx: ServeCtx, db: db::Db, db_path: PathBuf, settings: state::Settings, shutdown: impl Future<Output = ()> + Send + 'static) -> anyhow::Result<()> {
+    let keys = keys::Keys::load(&ctx.data_dir, &settings.public_host, &ctx.tls_source())?;
+    let (tcp_std, udp_std) = bind_dual(&ctx.bind, ctx.port)
+        .or_else(|e| {
+            tracing::warn!("双栈监听失败（{e}），改为只监听 IPv4");
+            bind_dual("0.0.0.0", ctx.port)
+        })
+        .with_context(|| format!("无法监听端口 {}（是不是已经有服务器在运行？）", ctx.port))?;
     let tcp = tokio::net::TcpListener::from_std(tcp_std)?;
     let udp = Arc::new(tokio::net::UdpSocket::from_std(udp_std)?);
 
@@ -296,7 +523,7 @@ async fn run(cli: Cli, db: db::Db, db_path: PathBuf, settings: state::Settings) 
     let st: state::St = Arc::new(state::AppState {
         db,
         db_path,
-        data_dir: cli.data_dir.clone(),
+        data_dir: ctx.data_dir.clone(),
         keys,
         settings: RwLock::new(settings),
         hub: Default::default(),
@@ -305,7 +532,7 @@ async fn run(cli: Cli, db: db::Db, db_path: PathBuf, settings: state::Settings) 
         logins: Mutex::new(Default::default()),
         rate: Default::default(),
         started_at: galaxy_proto::now_ms(),
-        port: cli.port,
+        port: ctx.port,
         udp,
         http,
         setup_token: Mutex::new(setup_token.clone()),
@@ -333,12 +560,34 @@ async fn run(cli: Cli, db: db::Db, db_path: PathBuf, settings: state::Settings) 
         .with_state(st.clone());
 
     let listener = tls::TlsListener::new(tcp, st.keys.tls.clone())?;
-    tracing::info!("LemonGalaxy 服务器 {} 已启动，端口 {}（TCP + UDP）", galaxy_proto::APP_VERSION, cli.port);
+    let setup_url = setup_token.map(|t| format!("https://{}:{}/setup?token={}", state::bracket_host(&st.public_host()), ctx.port, t));
+    tracing::info!("LemonGalaxy 服务器 {} 已启动，端口 {}（TCP + UDP），数据目录 {}", galaxy_proto::APP_VERSION, ctx.port, ctx.data_dir.display());
     tracing::info!("客户端填写的服务器地址：{}", st.client_address());
-    if let Some(t) = setup_token {
-        tracing::info!("尚未创建管理员。请打开 https://{}:{}/setup?token={} 完成初始化（浏览器会提示自签证书，确认指纹 {} 后继续）", st.public_host(), cli.port, t, st.keys.fingerprint);
+    if let Some(u) = &setup_url {
+        tracing::info!("尚未创建管理员。请打开 {u} 完成初始化（浏览器会提示自签证书，确认指纹 {} 后继续）", st.keys.fingerprint);
     }
-    axum::serve(listener, app.into_make_service_with_connect_info::<tls::PeerAddr>()).await?;
+    let run_info = service::RunInfo { pid: std::process::id(), version: galaxy_proto::APP_VERSION.into(), started_at: galaxy_proto::now_ms(), address: st.client_address(), setup_url };
+    if let Err(e) = service::write_run_info(&ctx.data_dir, &run_info) {
+        tracing::warn!("写运行信息失败：{e}");
+    }
+
+    // 收到停止信号后不再接新连接，等现有请求结束；长连接（WebSocket）最多再等 5 秒
+    let stop = tokio_util::sync::CancellationToken::new();
+    let stop2 = stop.clone();
+    tokio::spawn(async move {
+        shutdown.await;
+        stop2.cancel();
+    });
+    let stop3 = stop.clone();
+    let serve = axum::serve(listener, app.into_make_service_with_connect_info::<tls::PeerAddr>()).with_graceful_shutdown(async move { stop3.cancelled().await });
+    tokio::select! {
+        r = serve.into_future() => r?,
+        _ = async {
+            stop.cancelled().await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        } => {}
+    }
+    tracing::info!("服务器已停止");
     Ok(())
 }
 

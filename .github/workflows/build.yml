@@ -2,7 +2,7 @@
 # 发布：推送到 main 且全部通过后，自动发布 Release「LemonGalaxy <版本>.<构建序号>」并标为最新版；推送 v* 标签时按标签版本发布。
 #
 # 产物
-#   服务器         lemon-galaxy-server  Linux x86_64 / ARM64 静态单文件（内嵌 Web 管理后台）
+#   服务器         lemon-galaxy-server  Linux x86_64 / ARM64 静态单文件、Windows 10 / Server 2016 起 x64 / ARM64（内嵌 Web 管理后台，可装成系统服务）
 #   Linux 被控端   lemon-galaxy-worker  Linux x86_64 / ARM64 静态单文件
 #   Windows 被控端 lemon-galaxy-worker.exe  Windows 10 / Server 2016 起，x64 / ARM64 单文件（系统服务 + 画面代理）
 #   Mac 客户端     LemonGalaxy.dmg      macOS 13 起，Apple 芯片 + Intel 通用（主控 + 被控）
@@ -121,6 +121,8 @@ jobs:
           ls -l dist
       - name: 端到端测试（服务器 + Linux 被控端 + 主控）
         run: scripts/e2e.sh dist
+      - name: 服务器装成 systemd 服务（安装、改参数、卸载）
+        run: scripts/server-service-test.sh dist
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
@@ -180,6 +182,8 @@ jobs:
         run: dist/lemon-galaxy-worker.exe selftest-capture
       - name: 端到端测试（服务器 + Windows 被控端 + 主控，含系统服务）
         run: scripts/e2e.sh dist
+      - name: 服务器装成 Windows 服务（安装、防火墙规则、改参数、卸载）
+        run: scripts/server-service-test.sh dist
       - uses: actions/upload-artifact@v7
         with:
           name: windows-${{ matrix.arch }}
@@ -546,7 +550,7 @@ jobs:
             [ -f "out/lemon-galaxy-worker-$V-windows7-x86_64.exe" ] && echo "| Windows 被控端（兼容版） | Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2，x64 | [lemon-galaxy-worker-$V-windows7-x86_64.exe]($DL/lemon-galaxy-worker-$V-windows7-x86_64.exe) |"
             for a in "${WINS[@]}"; do
               case $a in x86_64) W="x64" ;; *) W="ARM64" ;; esac
-              [ -f "out/lemon-galaxy-server-$V-windows-$a.zip" ] && echo "| 服务器（试用） | Windows，$W | [lemon-galaxy-server-$V-windows-$a.zip]($DL/lemon-galaxy-server-$V-windows-$a.zip) |"
+              [ -f "out/lemon-galaxy-server-$V-windows-$a.zip" ] && echo "| 服务器（内嵌管理后台） | Windows 10 / 11 / Server 2016 及以上，$W | [lemon-galaxy-server-$V-windows-$a.zip]($DL/lemon-galaxy-server-$V-windows-$a.zip) |"
             done
             echo "| 服务器（内嵌管理后台） | Linux x86_64 | [lemon-galaxy-server-$V-linux-x86_64.tar.gz]($DL/lemon-galaxy-server-$V-linux-x86_64.tar.gz) |"
             echo "| 服务器（内嵌管理后台） | Linux ARM64 | [lemon-galaxy-server-$V-linux-aarch64.tar.gz]($DL/lemon-galaxy-server-$V-linux-aarch64.tar.gz) |"
@@ -559,7 +563,8 @@ jobs:
             echo
             echo "### 快速开始"
             echo
-            echo '1. 服务器：解压后运行 `./lemon-galaxy-server --public-host <你的域名或公网 IP>`，日志里会打印初始化网址和「客户端填写的服务器地址」。放行 TCP 与 UDP 7443 端口。'
+            echo '1. 服务器（Linux）：解压后运行 `sudo ./lemon-galaxy-server install-service --public-host <你的域名或公网 IP>` 装成开机自启的服务，会打印初始化网址和「客户端填写的服务器地址」；也可以直接 `./lemon-galaxy-server --public-host <...>` 前台运行。放行 TCP 与 UDP 7443 端口。'
+            echo '   服务器（Windows）：解压后以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-server.exe install-service --public-host <你的域名或公网 IP>`，会装成系统服务并在 Windows 防火墙放行端口。'
             echo '2. 打开初始化网址创建管理员、绑定两步验证，在后台「用户」里创建账号。'
             echo '3. Linux 被控端：`chmod +x lemon-galaxy-worker && ./lemon-galaxy-worker login`，再 `sudo ./lemon-galaxy-worker install-service` 安装开机自启。'
             echo '   Windows 被控端：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service` 安装为系统服务。'

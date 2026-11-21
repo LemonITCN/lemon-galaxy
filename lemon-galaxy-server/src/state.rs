@@ -271,9 +271,7 @@ impl AppState {
 
     /// 客户端填写的完整服务器地址。
     pub fn client_address(&self) -> String {
-        let host = self.public_host();
-        let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host };
-        format!("{}:{}#{}", host, self.port, self.keys.fingerprint)
+        client_address(&self.public_host(), self.port, &self.keys.fingerprint)
     }
 
     pub async fn save_settings(&self) -> anyhow::Result<()> {
@@ -311,3 +309,18 @@ macro_rules! galaxy_params {
     };
 }
 pub use galaxy_params;
+
+/// IPv6 地址放进网址或「主机:端口」时要加方括号。
+pub fn bracket_host(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+/// 客户端填写的完整服务器地址：主机:端口#证书指纹（没设对外地址时为 127.0.0.1）。
+pub fn client_address(public_host: &str, port: u16, fingerprint: &str) -> String {
+    let host = if public_host.is_empty() { "127.0.0.1" } else { public_host };
+    format!("{}:{}#{}", bracket_host(host), port, fingerprint)
+}

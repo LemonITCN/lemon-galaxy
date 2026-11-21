@@ -338,18 +338,24 @@ pub async fn upload(State(st): State<St>, crate::auth::Admin(s): crate::auth::Ad
     })))
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn version_from_name() {
-        assert_eq!(super::version_in_name("lemon-galaxy-worker-0.1.0.5-linux-x86_64").as_deref(), Some("0.1.0.5"));
-        assert_eq!(super::version_in_name("LemonGalaxy-0.2.0-macOS.dmg").as_deref(), Some("0.2.0"));
-        assert_eq!(super::version_in_name("nothing"), None);
+/// 本机服务器的发布文件名，以及包里的程序名（只发布 Linux 与 Windows 版）。
+pub fn server_asset(version: &str, os: &str, arch: &str) -> Option<(String, &'static str)> {
+    match os {
+        "linux" => Some((format!("lemon-galaxy-server-{version}-linux-{arch}.tar.gz"), "lemon-galaxy-server")),
+        "windows" => Some((format!("lemon-galaxy-server-{version}-windows-{arch}.zip"), "lemon-galaxy-server.exe")),
+        _ => None,
     }
 }
 
-/// 命令行 `self-update`：服务器自己升级（从 GitHub 取最新发布，验签名与 SHA-256，替换当前程序）。只支持 Linux。
-pub async fn self_update(repo: &str, check_only: bool) -> anyhow::Result<Option<String>> {
+pub struct SelfUpdated {
+    pub version: String,
+    /// 被替换的程序（只检查时为空）
+    pub path: PathBuf,
+}
+
+/// 命令行 `self-update`：服务器自己升级（从 GitHub 取最新发布，验发布签名与 SHA-256，替换程序）。
+/// 装了系统服务就替换服务用的那一份，之后由调用方重启服务。
+pub async fn self_update(repo: &str, check_only: bool) -> anyhow::Result<Option<SelfUpdated>> {
     let http = reqwest::Client::builder().user_agent(format!("LemonGalaxy/{}", galaxy_proto::APP_VERSION)).connect_timeout(Duration::from_secs(15)).build()?;
     let rel: GhRelease = http.get(format!("https://api.github.com/repos/{repo}/releases/latest")).header("accept", "application/vnd.github+json").send().await?.error_for_status()?.json().await?;
     let version = rel.tag_name.trim_start_matches('v').to_string();
@@ -357,11 +363,9 @@ pub async fn self_update(repo: &str, check_only: bool) -> anyhow::Result<Option<
         return Ok(None);
     }
     if check_only {
-        return Ok(Some(version));
+        return Ok(Some(SelfUpdated { version, path: PathBuf::new() }));
     }
-    anyhow::ensure!(cfg!(target_os = "linux"), "自动升级只支持 Linux 版服务器，其他系统请手动下载替换");
-    let arch = galaxy_proto::update::this_arch();
-    let name = format!("lemon-galaxy-server-{version}-linux-{arch}.tar.gz");
+    let (name, program) = server_asset(&version, std::env::consts::OS, galaxy_proto::update::this_arch()).ok_or_else(|| anyhow::anyhow!("自动升级只支持 Linux 与 Windows 版服务器，其他系统请手动下载替换"))?;
     let url_of = |n: &str| rel.assets.iter().find(|a| a.name == n).map(|a| a.browser_download_url.clone());
     let asset = url_of(&name).ok_or_else(|| anyhow::anyhow!("发布 {version} 里没有 {name}"))?;
     let sums = http.get(url_of(SUMS_FILE).ok_or_else(|| anyhow::anyhow!("没有 {SUMS_FILE}"))?).send().await?.error_for_status()?.text().await?;
@@ -371,27 +375,219 @@ pub async fn self_update(repo: &str, check_only: bool) -> anyhow::Result<Option<
     let want = parse_sums(&sums).into_iter().find(|(n, _)| n == &name).map(|(_, h)| h).ok_or_else(|| anyhow::anyhow!("{name} 不在清单里"))?;
     let bytes = http.get(asset).timeout(Duration::from_secs(1800)).send().await?.error_for_status()?.bytes().await?;
     anyhow::ensure!(hex::encode(Sha256::digest(&bytes)) == want, "下载的文件校验不对");
-    let exe = std::env::current_exe()?;
-    let new = exe.with_extension("new");
-    {
-        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
-        let mut found = false;
-        for e in ar.entries()? {
-            let mut e = e?;
-            if e.path()?.file_name().map(|n| n == "lemon-galaxy-server").unwrap_or(false) {
-                let mut out = std::fs::File::create(&new)?;
-                std::io::copy(&mut e, &mut out)?;
-                found = true;
-                break;
-            }
-        }
-        anyhow::ensure!(found, "压缩包里没有 lemon-galaxy-server");
+    let bin = extract_program(&name, &bytes, program)?;
+    let target = match crate::service::update_target() {
+        Some(p) => p,
+        None => std::env::current_exe()?,
+    };
+    replace_program(&target, &bin).map_err(|e| {
+        let hint = if e.kind() == std::io::ErrorKind::PermissionDenied { "（需要管理员 / root 权限）" } else { "" };
+        anyhow::anyhow!("替换 {} 失败：{e}{hint}", target.display())
+    })?;
+    Ok(Some(SelfUpdated { version, path: target }))
+}
+
+/// 从发布包（.tar.gz 或 .zip）里取出程序。
+fn extract_program(asset: &str, bytes: &[u8], program: &str) -> anyhow::Result<Vec<u8>> {
+    if asset.ends_with(".zip") {
+        return zip_extract(bytes, program);
     }
+    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    for e in ar.entries()? {
+        let mut e = e?;
+        if e.path()?.file_name().map(|n| n == program).unwrap_or(false) {
+            let mut v = Vec::new();
+            std::io::Read::read_to_end(&mut e, &mut v)?;
+            return Ok(v);
+        }
+    }
+    anyhow::bail!("压缩包里没有 {program}")
+}
+
+/// 替换程序：先写 .new 再换上。Windows 上运行中的程序不能覆盖但能改名，旧的改成 .old，下次启动时删掉。
+fn replace_program(target: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    let new = target.with_extension("new");
+    std::fs::write(&new, data)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))?;
     }
-    std::fs::rename(&new, &exe)?;
-    Ok(Some(version))
+    #[cfg(windows)]
+    {
+        let old = target.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        if target.exists() {
+            if let Err(e) = std::fs::rename(target, &old) {
+                let _ = std::fs::remove_file(&new);
+                return Err(e);
+            }
+        }
+        if let Err(e) = std::fs::rename(&new, target) {
+            let _ = std::fs::rename(&old, target);
+            return Err(e);
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    std::fs::rename(&new, target)
+}
+
+fn le16(b: &[u8], at: usize) -> Option<usize> {
+    b.get(at..at.checked_add(2)?).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize)
+}
+
+fn le32(b: &[u8], at: usize) -> Option<usize> {
+    b.get(at..at.checked_add(4)?).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize)
+}
+
+/// 从 zip 里取出一个文件（按文件名，忽略目录）。只支持发布包用到的格式：存储或 deflate，不含 zip64。
+pub fn zip_extract(data: &[u8], want: &str) -> anyhow::Result<Vec<u8>> {
+    let bad = || anyhow::anyhow!("压缩包格式不对");
+    // 中央目录结束记录在末尾，后面最多跟 64 KB 注释
+    let last = data.len().checked_sub(22).ok_or_else(bad)?;
+    let first = last.saturating_sub(65535);
+    let eocd = (first..=last).rev().find(|&i| le32(data, i) == Some(0x0605_4b50)).ok_or_else(bad)?;
+    let count = le16(data, eocd + 10).ok_or_else(bad)?;
+    let mut p = le32(data, eocd + 16).ok_or_else(bad)?;
+    for _ in 0..count {
+        anyhow::ensure!(le32(data, p) == Some(0x0201_4b50), "压缩包格式不对");
+        let method = le16(data, p + 10).ok_or_else(bad)?;
+        let crc = le32(data, p + 16).ok_or_else(bad)? as u32;
+        let packed = le32(data, p + 20).ok_or_else(bad)?;
+        let size = le32(data, p + 24).ok_or_else(bad)?;
+        let name_len = le16(data, p + 28).ok_or_else(bad)?;
+        let extra_len = le16(data, p + 30).ok_or_else(bad)?;
+        let comment_len = le16(data, p + 32).ok_or_else(bad)?;
+        let local = le32(data, p + 42).ok_or_else(bad)?;
+        let name = String::from_utf8_lossy(data.get(p + 46..p + 46 + name_len).ok_or_else(bad)?).into_owned();
+        p += 46 + name_len + extra_len + comment_len;
+        if name.rsplit(['/', '\\']).next() != Some(want) {
+            continue;
+        }
+        anyhow::ensure!(le32(data, local) == Some(0x0403_4b50), "压缩包格式不对");
+        let start = local + 30 + le16(data, local + 26).ok_or_else(bad)? + le16(data, local + 28).ok_or_else(bad)?;
+        let raw = data.get(start..start + packed).ok_or_else(bad)?;
+        let out = match method {
+            0 => raw.to_vec(),
+            8 => {
+                let mut v = Vec::with_capacity(size);
+                std::io::Read::read_to_end(&mut flate2::read::DeflateDecoder::new(raw), &mut v)?;
+                v
+            }
+            m => anyhow::bail!("{want} 用了不支持的压缩方式 {m}"),
+        };
+        let mut c = flate2::Crc::new();
+        c.update(&out);
+        anyhow::ensure!(out.len() == size && c.sum() == crc, "压缩包里的 {want} 校验不对");
+        return Ok(out);
+    }
+    anyhow::bail!("压缩包里没有 {want}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn version_from_name() {
+        assert_eq!(version_in_name("lemon-galaxy-worker-0.1.0.5-linux-x86_64").as_deref(), Some("0.1.0.5"));
+        assert_eq!(version_in_name("LemonGalaxy-0.2.0-macOS.dmg").as_deref(), Some("0.2.0"));
+        assert_eq!(version_in_name("nothing"), None);
+    }
+
+    #[test]
+    fn server_assets_are_classified() {
+        for (os, arch) in [("linux", "x86_64"), ("linux", "aarch64"), ("windows", "x86_64"), ("windows", "aarch64")] {
+            let (name, _) = server_asset("0.1.0.42", os, arch).unwrap();
+            assert_eq!(classify_asset(&name), Some(("server", os, arch.to_string())), "{name}");
+            assert_eq!(version_in_name(&name).as_deref(), Some("0.1.0.42"));
+        }
+        assert_eq!(server_asset("0.1.0", "macos", "aarch64"), None);
+    }
+
+    /// 写一个最简单的 zip（每项可选存储或 deflate），与 Info-ZIP 的布局一致。
+    fn make_zip(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
+        let (mut out, mut cd) = (Vec::new(), Vec::new());
+        for (name, data, deflate) in entries {
+            let packed = if *deflate {
+                let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+                e.write_all(data).unwrap();
+                e.finish().unwrap()
+            } else {
+                data.to_vec()
+            };
+            let mut crc = flate2::Crc::new();
+            crc.update(data);
+            let method: u16 = if *deflate { 8 } else { 0 };
+            let off = out.len() as u32;
+            out.extend(0x0403_4b50u32.to_le_bytes());
+            out.extend([20u16, 0, method, 0, 0].iter().flat_map(|v| v.to_le_bytes()));
+            out.extend([crc.sum(), packed.len() as u32, data.len() as u32].iter().flat_map(|v| v.to_le_bytes()));
+            out.extend([name.len() as u16, 0].iter().flat_map(|v| v.to_le_bytes()));
+            out.extend(name.as_bytes());
+            out.extend(&packed);
+            cd.extend(0x0201_4b50u32.to_le_bytes());
+            cd.extend([20u16, 20, 0, method, 0, 0].iter().flat_map(|v| v.to_le_bytes()));
+            cd.extend([crc.sum(), packed.len() as u32, data.len() as u32].iter().flat_map(|v| v.to_le_bytes()));
+            cd.extend([name.len() as u16, 0, 0, 0, 0].iter().flat_map(|v| v.to_le_bytes()));
+            cd.extend([0u32, off].iter().flat_map(|v| v.to_le_bytes()));
+            cd.extend(name.as_bytes());
+        }
+        let cd_off = out.len() as u32;
+        out.extend(&cd);
+        out.extend(0x0605_4b50u32.to_le_bytes());
+        out.extend([0u16, 0, entries.len() as u16, entries.len() as u16].iter().flat_map(|v| v.to_le_bytes()));
+        out.extend([cd.len() as u32, cd_off].iter().flat_map(|v| v.to_le_bytes()));
+        out.extend(0u16.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn zip_roundtrip() {
+        let exe: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let z = make_zip(&[("readme.txt", b"hello", false), ("dir/lemon-galaxy-server.exe", &exe, true)]);
+        assert_eq!(zip_extract(&z, "lemon-galaxy-server.exe").unwrap(), exe);
+        assert_eq!(zip_extract(&z, "readme.txt").unwrap(), b"hello");
+        assert!(zip_extract(&z, "other.exe").is_err());
+        assert_eq!(extract_program("x.zip", &z, "lemon-galaxy-server.exe").unwrap(), exe);
+        // 内容被改过：CRC 对不上
+        let mut broken = z.clone();
+        let i = broken.len() / 2;
+        broken[i] ^= 0xff;
+        assert!(zip_extract(&broken, "lemon-galaxy-server.exe").is_err());
+        // 截断、垃圾数据不崩
+        assert!(zip_extract(&z[..z.len() - 30], "readme.txt").is_err());
+        assert!(zip_extract(b"not a zip", "readme.txt").is_err());
+        assert!(zip_extract(&[], "readme.txt").is_err());
+    }
+
+    #[test]
+    fn tar_gz_extract() {
+        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default()));
+        let mut h = tar::Header::new_gnu();
+        h.set_size(4);
+        h.set_mode(0o755);
+        h.set_cksum();
+        b.append_data(&mut h, "lemon-galaxy-server", &b"ELF!"[..]).unwrap();
+        let gz = b.into_inner().unwrap().finish().unwrap();
+        assert_eq!(extract_program("a.tar.gz", &gz, "lemon-galaxy-server").unwrap(), b"ELF!");
+        assert!(extract_program("a.tar.gz", &gz, "other").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_program_swaps_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lg-replace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = dir.join("lemon-galaxy-server");
+        std::fs::write(&t, b"old").unwrap();
+        replace_program(&t, b"new").unwrap();
+        assert_eq!(std::fs::read(&t).unwrap(), b"new");
+        assert_eq!(std::fs::metadata(&t).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(!t.with_extension("new").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

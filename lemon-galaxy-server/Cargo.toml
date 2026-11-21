@@ -48,3 +48,6 @@ ipnet = "2.12.2"
 clap = { version = "4.6.9", features = ["derive", "env"] }
 tower-http = { version = "0.7.1", features = ["set-header", "compression-gzip"] }
 socket2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"

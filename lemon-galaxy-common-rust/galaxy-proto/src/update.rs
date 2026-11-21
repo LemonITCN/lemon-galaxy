@@ -49,6 +49,9 @@ pub fn classify_asset(name: &str) -> Option<(&'static str, &'static str, String)
     if lower.starts_with("lemon-galaxy-server-") && lower.contains("-linux-") && lower.ends_with(".tar.gz") {
         return Some(("server", "linux", arch_of(lower.trim_end_matches(".tar.gz"))));
     }
+    if lower.starts_with("lemon-galaxy-server-") && lower.contains("-windows-") && lower.ends_with(".zip") {
+        return Some(("server", "windows", arch_of(&lower)));
+    }
     None
 }
 
@@ -102,6 +105,11 @@ mod tests {
         assert_eq!(classify_asset("lemon-galaxy-worker-0.1.0.5-windows7-x86_64.exe"), Some(("worker", "windows7", "x86_64".into())));
         assert_eq!(classify_asset("LemonGalaxy-0.1.0.12-windows7-x64.zip"), Some(("control", "windows7", "x86_64".into())));
         assert_eq!(classify_asset("LemonGalaxy-0.1.0.12-windows-x64.zip"), Some(("control", "windows", "x86_64".into())));
+        assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-linux-aarch64.tar.gz"), Some(("server", "linux", "aarch64".into())));
+        assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-windows-x86_64.zip"), Some(("server", "windows", "x86_64".into())));
+        assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-windows-aarch64.zip"), Some(("server", "windows", "aarch64".into())));
+        // 服务器的 Windows 包只认 zip
+        assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-windows-x86_64.exe"), None);
         assert_eq!(classify_asset("SHA256SUMS.txt"), None);
     }
 
