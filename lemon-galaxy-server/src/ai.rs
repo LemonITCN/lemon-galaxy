@@ -22,7 +22,7 @@ pub const OPENCODE_GO_MODELS: &str = "https://opencode.ai/zen/go/v1";
 pub const OPENCODE_GO_INFERENCE: &str = "https://opencode.ai/inference/go/openai/v1";
 
 fn user_agent() -> String {
-    format!("LemonGalaxy/{}", env!("CARGO_PKG_VERSION"))
+    format!("LemonGalaxy/{}", galaxy_proto::APP_VERSION)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

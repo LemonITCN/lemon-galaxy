@@ -23,7 +23,7 @@ impl Api {
         let mut b = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
-            .user_agent(format!("LemonGalaxy/{}", env!("CARGO_PKG_VERSION")));
+            .user_agent(format!("LemonGalaxy/{}", galaxy_proto::APP_VERSION));
         if server.fingerprint.is_some() {
             let cfg = galaxy_net::tls::server_client_config(server.fingerprint, &[b"h2", b"http/1.1"]);
             b = b.use_preconfigured_tls(cfg);
@@ -87,6 +87,17 @@ impl Api {
 
     pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::parse(self.req(reqwest::Method::DELETE, path).send().await?).await
+    }
+
+    /// 流式 GET（下载文件）。`path` 可以是 /api/v1 下的相对路径，也可以是以 /api/ 开头的完整路径。
+    pub async fn get_stream(&self, path: &str) -> Result<reqwest::Response> {
+        let p = path.strip_prefix("/api/v1").unwrap_or(path);
+        let resp = self.req(reqwest::Method::GET, p).timeout(Duration::from_secs(3600)).send().await?;
+        if resp.status().is_success() {
+            Ok(resp)
+        } else {
+            Err(Self::parse::<serde_json::Value>(resp).await.err().unwrap_or(ClientError::Other("请求失败".into())))
+        }
     }
 
     /// 流式 POST（AI 网关 SSE）。返回原始响应，由调用方逐块读取。

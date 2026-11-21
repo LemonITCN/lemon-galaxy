@@ -15,6 +15,7 @@ pub mod frame;
 pub mod ids;
 pub mod model;
 pub mod peer;
+pub mod update;
 pub mod wire;
 pub mod ws;
 
@@ -22,6 +23,9 @@ pub use ids::{ConnId, DeviceId};
 pub use model::*;
 
 /// 两端会话协议版本。
+/// 完整版本号（CI 构建带构建序号，见 build.rs）。
+pub const APP_VERSION: &str = env!("LEMONGALAXY_APP_VERSION");
+
 pub const PROTOCOL_VERSION: u32 = 1;
 /// QUIC ALPN。
 pub const ALPN: &[u8] = b"lemon-galaxy/1";

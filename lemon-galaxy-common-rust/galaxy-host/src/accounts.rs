@@ -71,11 +71,14 @@ pub struct HostState {
     /// 自定义的临时协助验证码（为空则每次随机）
     #[serde(default)]
     pub assist_code: Option<String>,
+    /// 服务模式下自动安装新版本（签名校验通过才装）
+    #[serde(default = "yes")]
+    pub auto_update: bool,
 }
 
 impl HostState {
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| Self { remote_enabled: true, ..Default::default() })
+        std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| Self { remote_enabled: true, auto_update: true, ..Default::default() })
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {

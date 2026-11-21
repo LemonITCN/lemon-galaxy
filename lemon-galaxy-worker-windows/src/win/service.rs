@@ -127,6 +127,19 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// 重启服务（更新后用）。
+pub fn restart() -> bool {
+    let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else { return false };
+    if manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS).is_err() {
+        return false;
+    }
+    stop_existing(&manager);
+    match manager.open_service(SERVICE_NAME, ServiceAccess::START) {
+        Ok(s) => s.start::<&str>(&[]).is_ok(),
+        Err(_) => false,
+    }
+}
+
 pub fn uninstall() -> i32 {
     if !galaxy_host::sysuser::is_admin() {
         eprintln!("{}", t!("需要以管理员身份运行。", "Please run as administrator."));
@@ -189,6 +202,8 @@ fn service_main(_args: Vec<OsString>) {
         });
     };
     set(ServiceState::Running, 0);
+    // 让自动更新知道有服务管理器负责拉起
+    std::env::set_var("LEMON_GALAXY_SUPERVISED", "1");
     let dir = DATA_DIR.get().cloned().unwrap_or_else(|| WindowsOs.default_dir(true));
     let code = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt.block_on(galaxy_worker::run_host(Arc::new(WindowsOs), &dir, async move {

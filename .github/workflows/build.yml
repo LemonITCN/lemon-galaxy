@@ -12,6 +12,7 @@
 #   MACOS_CERTIFICATE_P12 / MACOS_CERTIFICATE_PASSWORD / MACOS_SIGN_IDENTITY   Developer ID 证书
 #   APPLE_NOTARY_KEY_P8 / APPLE_NOTARY_KEY_ID / APPLE_NOTARY_ISSUER_ID         公证
 #   LEMONGALAXY_KEYSTORE_BASE64 / LEMONGALAXY_KEYSTORE_PASSWORD / LEMONGALAXY_KEY_ALIAS / LEMONGALAXY_KEY_PASSWORD   安卓正式签名
+#   LEMONGALAXY_RELEASE_SIGNING_KEY   发布签名私钥（Ed25519 种子 base64）。有它才给 SHA256SUMS 签名；客户端只装签过名的更新
 name: Build
 
 on:
@@ -31,6 +32,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
+  # 编进程序的完整版本号：标签发布用标签，否则「Cargo 版本.构建序号」（见 galaxy-proto/build.rs），自动更新靠它比较新旧
+  LEMONGALAXY_BUILD_NUMBER: ${{ github.run_number }}
+  LEMONGALAXY_BUILD_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
 
 jobs:
   rust-tests:
@@ -123,6 +127,7 @@ jobs:
           path: |
             dist/lemon-galaxy-server
             dist/lemon-galaxy-worker
+            dist/galaxy-dev
           if-no-files-found: error
 
   windows:
@@ -227,7 +232,9 @@ jobs:
       - name: 构建通用包与 DMG
         run: |
           [ -n "${LEMONGALAXY_SIGN_IDENTITY:-}" ] || echo "LEMONGALAXY_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
-          LEMONGALAXY_SIGN_IDENTITY="${LEMONGALAXY_SIGN_IDENTITY:--}" lemon-galaxy-control-macos/scripts/build.sh --dmg
+          BASE="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -n "$LEMONGALAXY_BUILD_VERSION" ]; then V="${LEMONGALAXY_BUILD_VERSION#v}"; else V="$BASE.$GITHUB_RUN_NUMBER"; fi
+          LEMONGALAXY_VERSION="$V" LEMONGALAXY_BUILD="$GITHUB_RUN_NUMBER" LEMONGALAXY_SIGN_IDENTITY="${LEMONGALAXY_SIGN_IDENTITY:--}" lemon-galaxy-control-macos/scripts/build.sh --dmg
       - name: 公证
         if: env.APPLE_NOTARY_KEY_P8 != '' && env.MACOS_SIGN_IDENTITY != ''
         run: |
@@ -284,6 +291,9 @@ jobs:
       - name: 构建与测试
         working-directory: lemon-galaxy-mobile-android
         run: |
+          BASE="$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)"
+          if [ -n "$LEMONGALAXY_BUILD_VERSION" ]; then V="${LEMONGALAXY_BUILD_VERSION#v}"; else V="$BASE.$GITHUB_RUN_NUMBER"; fi
+          export LEMONGALAXY_VERSION_NAME="$V" LEMONGALAXY_VERSION_CODE="$GITHUB_RUN_NUMBER"
           ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
           APK="$(ls app/build/outputs/apk/release/*.apk | head -1)"
           unzip -l "$APK" | grep libgalaxy_ffi.so
@@ -313,6 +323,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MAC_NOTARIZED: ${{ secrets.MACOS_SIGN_IDENTITY != '' && secrets.APPLE_NOTARY_KEY_P8 != '' }}
+          RELEASE_SIGNING_KEY: ${{ secrets.LEMONGALAXY_RELEASE_SIGNING_KEY }}
         run: |
           VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           if [ "$GITHUB_REF_TYPE" = tag ]; then TAG="$GITHUB_REF_NAME"; V="${TAG#v}"; else V="$VERSION.$GITHUB_RUN_NUMBER"; TAG="v$V"; fi
@@ -332,6 +343,13 @@ jobs:
             fi
           done
           (cd out && sha256sum * > SHA256SUMS.txt)
+          SIGNED=false
+          if [ -n "${RELEASE_SIGNING_KEY:-}" ]; then
+            chmod +x art/linux-x86_64/galaxy-dev
+            GD="$PWD/art/linux-x86_64/galaxy-dev --data $RUNNER_TEMP/galaxy-dev"
+            (cd out && LEMONGALAXY_RELEASE_SIGNING_KEY="$RELEASE_SIGNING_KEY" $GD release-sign SHA256SUMS.txt && $GD release-verify SHA256SUMS.txt)
+            SIGNED=true
+          fi
           DL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
           PREV="$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)"
           {
@@ -350,7 +368,11 @@ jobs:
             echo "| 服务器（内嵌管理后台） | Linux x86_64 | [lemon-galaxy-server-$V-linux-x86_64.tar.gz]($DL/lemon-galaxy-server-$V-linux-x86_64.tar.gz) |"
             echo "| 服务器（内嵌管理后台） | Linux ARM64 | [lemon-galaxy-server-$V-linux-aarch64.tar.gz]($DL/lemon-galaxy-server-$V-linux-aarch64.tar.gz) |"
             echo
-            echo "校验：[SHA256SUMS.txt]($DL/SHA256SUMS.txt)"
+            if [ "$SIGNED" = true ]; then
+              echo "校验：[SHA256SUMS.txt]($DL/SHA256SUMS.txt)，发布签名 [SHA256SUMS.txt.sig]($DL/SHA256SUMS.txt.sig)（客户端自动更新只装签名有效的版本）"
+            else
+              echo "校验：[SHA256SUMS.txt]($DL/SHA256SUMS.txt)（这一版没有发布签名，客户端不会自动安装）"
+            fi
             echo
             echo "### 快速开始"
             echo

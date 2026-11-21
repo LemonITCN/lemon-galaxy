@@ -37,13 +37,14 @@ pub fn routes() -> Router<St> {
         .route("/devices/{id}", delete(remove_device))
         .route("/vault", get(vault_list))
         .route("/vault/{id}", put(vault_put).delete(vault_delete))
-        .route("/updates/latest", get(update_latest))
+        .route("/updates/latest", get(crate::update::latest))
+        .route("/updates/files/{id}", get(crate::update::file))
 }
 
 async fn info(State(st): State<St>) -> Json<ServerInfoResp> {
     Json(ServerInfoResp {
         server_name: st.settings.read().server_name.clone(),
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: galaxy_proto::APP_VERSION.into(),
         server_sign_pubkey: st.keys.sign.public().to_vec(),
         min_client_version: "0.1.0".into(),
         features: vec!["ai".into(), "relay".into(), "assist".into()],
@@ -638,6 +639,3 @@ async fn vault_delete(State(st): State<St>, User(s): User, Path(id): Path<String
     Ok(Json(VersionResp { version: v }))
 }
 
-async fn update_latest(User(_s): User) -> Json<UpdateLatestResp> {
-    Json(UpdateLatestResp { available: false, version: String::new(), url: String::new(), size: 0, sha256: String::new(), signature: String::new() })
-}

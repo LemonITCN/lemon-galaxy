@@ -14,6 +14,7 @@ mod keys;
 mod state;
 mod tls;
 mod udp;
+mod update;
 mod web;
 mod ws;
 
@@ -272,7 +273,7 @@ async fn run(cli: Cli, db: db::Db, db_path: PathBuf, settings: state::Settings) 
 
     let http = reqwest::Client::builder()
         .use_rustls_tls()
-        .user_agent(format!("LemonGalaxy/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("LemonGalaxy/{}", galaxy_proto::APP_VERSION))
         .connect_timeout(Duration::from_secs(15))
         .build()?;
 
@@ -292,10 +293,12 @@ async fn run(cli: Cli, db: db::Db, db_path: PathBuf, settings: state::Settings) 
         udp,
         http,
         setup_token: Mutex::new(setup_token.clone()),
+        updates: Default::default(),
     });
 
     tokio::spawn(udp::run(st.clone()));
     tokio::spawn(housekeeping(st.clone()));
+    tokio::spawn(update::run(st.clone()));
 
     let csp = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
     let app = Router::new()
@@ -314,7 +317,7 @@ async fn run(cli: Cli, db: db::Db, db_path: PathBuf, settings: state::Settings) 
         .with_state(st.clone());
 
     let listener = tls::TlsListener::new(tcp, st.keys.tls.clone())?;
-    tracing::info!("LemonGalaxy 服务器 {} 已启动，端口 {}（TCP + UDP）", env!("CARGO_PKG_VERSION"), cli.port);
+    tracing::info!("LemonGalaxy 服务器 {} 已启动，端口 {}（TCP + UDP）", galaxy_proto::APP_VERSION, cli.port);
     tracing::info!("客户端填写的服务器地址：{}", st.client_address());
     if let Some(t) = setup_token {
         tracing::info!("尚未创建管理员。请打开 https://{}:{}/setup?token={} 完成初始化（浏览器会提示自签证书，确认指纹 {} 后继续）", st.public_host(), cli.port, t, st.keys.fingerprint);

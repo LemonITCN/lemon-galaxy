@@ -235,12 +235,20 @@ pub struct UpdateLatestResp {
     pub available: bool,
     #[serde(default)]
     pub version: String,
+    /// 服务器上的下载地址（相对路径，带登录令牌访问）
     #[serde(default)]
     pub url: String,
+    #[serde(default)]
+    pub file_name: String,
     #[serde(default)]
     pub size: u64,
     #[serde(default)]
     pub sha256: String,
+    /// 这次发布的 SHA256SUMS.txt 全文与签名（base64），客户端自己验
+    #[serde(default)]
+    pub sums: String,
     #[serde(default)]
     pub signature: String,
+    #[serde(default)]
+    pub notes: String,
 }

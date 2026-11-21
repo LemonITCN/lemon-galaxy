@@ -462,7 +462,7 @@ async fn server_info(State(st): State<St>, Admin(_s): Admin) -> AppResult<Json<V
         })
         .await?;
     Ok(Json(json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": galaxy_proto::APP_VERSION,
         "started_at": st.started_at,
         "address": st.client_address(),
         "fingerprint": st.keys.fingerprint,
@@ -1161,12 +1161,16 @@ async fn list_updates(State(st): State<St>, Admin(_s): Admin) -> AppResult<Json<
             Ok(v)
         })
         .await?;
-    Ok(Json(json!({ "items": items, "last_check_at": 0, "last_error": "" })))
+    let last_check_at = st.updates.last_check_at.load(std::sync::atomic::Ordering::Relaxed);
+    let last_error = st.updates.last_error.lock().clone();
+    let latest_version = st.updates.latest_version.lock().clone();
+    Ok(Json(json!({ "items": items, "last_check_at": last_check_at, "last_error": last_error, "latest_version": latest_version, "server_version": galaxy_proto::APP_VERSION })))
 }
 
 async fn check_updates(State(st): State<St>, Admin(s): Admin) -> AppResult<Json<Value>> {
-    let _ = &st;
-    Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "not_implemented").lang(s.lang))
+    // 失败原因记在 last_error 里，照常返回列表
+    let _ = crate::update::check(&st).await;
+    list_updates(State(st), Admin(s)).await
 }
 
 async fn upload_update(Admin(s): Admin, _h: HeaderMap) -> AppResult<Json<Value>> {

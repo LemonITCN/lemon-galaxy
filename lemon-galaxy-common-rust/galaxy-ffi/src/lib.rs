@@ -53,7 +53,7 @@ pub(crate) fn config() -> CoreConfig {
         log_level: "info".into(),
         platform: galaxy_proto::Platform::current().into(),
         device_kind: DeviceKind::Mobile,
-        app_version: env!("CARGO_PKG_VERSION").into(),
+        app_version: galaxy_proto::APP_VERSION.into(),
         os_version: String::new(),
         hostname: "device".into(),
         locale: "zh-CN".into(),
@@ -111,7 +111,7 @@ pub(crate) fn other(m: impl Into<String>) -> GalaxyError {
 
 #[uniffi::export]
 pub fn core_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    galaxy_proto::APP_VERSION.to_string()
 }
 
 /// 内核日志文件（界面「导出日志」用）。安卓上日志在 logcat，返回空字符串。

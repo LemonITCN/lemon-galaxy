@@ -10,6 +10,8 @@
 //! galaxy-dev --data <目录> term-test <设备>     打开终端、执行命令、断开、接续，验证断线继承
 //! galaxy-dev --data <目录> assist <设备码> <验证码> <命令>
 //! galaxy-dev --data <目录> vault-test
+//! galaxy-dev release-sign <文件>            用环境变量 LEMONGALAXY_RELEASE_SIGNING_KEY（base64 私钥种子）签名，写出 <文件>.sig
+//! galaxy-dev release-verify <文件> [签名文件]  用内置发布公钥验签
 //! galaxy-dev ssh-test <主机> <端口> <用户名> <私钥文件>   SSH 直连：终端、命令、SFTP、端口转发
 //! ```
 
@@ -48,7 +50,7 @@ fn meta() -> DeviceMeta {
         os_version: "dev".into(),
         arch: std::env::consts::ARCH.into(),
         hostname: "galaxy-dev".into(),
-        app_version: env!("CARGO_PKG_VERSION").into(),
+        app_version: galaxy_proto::APP_VERSION.into(),
     }
 }
 
@@ -70,6 +72,27 @@ async fn main() -> anyhow::Result<()> {
     let cmd = args.first().cloned().unwrap_or_default();
     let id = Identity::load_or_create(&store(&dir));
     match cmd.as_str() {
+        "release-sign" => {
+            use base64::Engine;
+            let seed = std::env::var("LEMONGALAXY_RELEASE_SIGNING_KEY").map_err(|_| anyhow::anyhow!("缺少环境变量 LEMONGALAXY_RELEASE_SIGNING_KEY"))?;
+            let seed = base64::engine::general_purpose::STANDARD.decode(seed.trim())?;
+            let key = galaxy_crypto::SignKey::from_bytes(&seed)?;
+            anyhow::ensure!(key.public() == galaxy_proto::update::RELEASE_SIGN_PUBKEY, "签名私钥与内置发布公钥不匹配");
+            let data = std::fs::read(&args[1])?;
+            let sig = key.sign(galaxy_proto::update::RELEASE_SIGN_DOMAIN, &data);
+            std::fs::write(format!("{}.sig", args[1]), base64::engine::general_purpose::STANDARD.encode(sig) + "\n")?;
+            println!("已签名 {}", args[1]);
+            return Ok(());
+        }
+        "release-verify" => {
+            use base64::Engine;
+            let data = std::fs::read(&args[1])?;
+            let sig_path = args.get(2).cloned().unwrap_or_else(|| format!("{}.sig", args[1]));
+            let sig = base64::engine::general_purpose::STANDARD.decode(std::fs::read_to_string(sig_path)?.trim())?;
+            galaxy_crypto::verify(&galaxy_proto::update::RELEASE_SIGN_PUBKEY, galaxy_proto::update::RELEASE_SIGN_DOMAIN, &data, &sig).map_err(|_| anyhow::anyhow!("签名无效"))?;
+            println!("签名有效");
+            return Ok(());
+        }
         "ssh-test" => {
             ssh_test(&args[1], args[2].parse()?, &args[3], &std::fs::read_to_string(&args[4])?).await?;
             return Ok(());

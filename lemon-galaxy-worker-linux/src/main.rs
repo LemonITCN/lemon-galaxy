@@ -65,6 +65,21 @@ impl WorkerOs for LinuxOs {
     fn uninstall_service(&self) -> i32 {
         uninstall_service()
     }
+
+    fn update_target(&self) -> Option<PathBuf> {
+        let installed = PathBuf::from("/usr/local/bin/lemon-galaxy-worker");
+        (is_root() && installed.exists()).then_some(installed)
+    }
+
+    fn restart_service(&self) -> bool {
+        let user = !is_root();
+        let mut args = vec![];
+        if user {
+            args.push("--user");
+        }
+        args.extend(["restart", "lemon-galaxy-worker"]);
+        std::process::Command::new("systemctl").args(&args).status().map(|s| s.success()).unwrap_or(false)
+    }
 }
 
 fn main() {
@@ -99,7 +114,7 @@ fn install_service(dir: &Path) -> i32 {
             }
         }
         let unit = format!(
-            "[Unit]\nDescription=LemonGalaxy worker\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nExecStart={target} run --data-dir {}\nRestart=always\nRestartSec=3\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n",
+            "[Unit]\nDescription=LemonGalaxy worker\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nExecStart={target} run --data-dir {}\nEnvironment=LEMON_GALAXY_SUPERVISED=1\nRestart=always\nRestartSec=3\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n",
             dir.display()
         );
         if let Err(e) = std::fs::write("/etc/systemd/system/lemon-galaxy-worker.service", unit) {
@@ -119,7 +134,7 @@ fn install_service(dir: &Path) -> i32 {
         let unit_dir = PathBuf::from(&home).join(".config/systemd/user");
         let _ = std::fs::create_dir_all(&unit_dir);
         let unit = format!(
-            "[Unit]\nDescription=LemonGalaxy worker (user)\nAfter=network-online.target\n\n[Service]\nExecStart={exe} run --data-dir {}\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription=LemonGalaxy worker (user)\nAfter=network-online.target\n\n[Service]\nExecStart={exe} run --data-dir {}\nEnvironment=LEMON_GALAXY_SUPERVISED=1\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n",
             dir.display()
         );
         if let Err(e) = std::fs::write(unit_dir.join("lemon-galaxy-worker.service"), unit) {

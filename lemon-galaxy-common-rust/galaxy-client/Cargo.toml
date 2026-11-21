@@ -30,3 +30,6 @@ tokio-tungstenite.workspace = true
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
 russh-sftp = "3"
 vt100 = "0.18"
+hex.workspace = true
+sha2.workspace = true
+base64.workspace = true

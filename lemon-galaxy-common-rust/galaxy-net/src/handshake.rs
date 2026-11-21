@@ -43,7 +43,7 @@ fn make_hello(key: &SignKey, exporter: &[u8], role: PeerRole, cert: Option<Signe
     Hello {
         proto: PROTOCOL_VERSION,
         role,
-        app_version: env!("CARGO_PKG_VERSION").into(),
+        app_version: galaxy_proto::APP_VERSION.into(),
         cert,
         device_pubkey: key.public(),
         sig: galaxy_crypto::session_auth_sign(key, exporter, role),

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = galaxy_proto::APP_VERSION;
 
 /// 各系统的差异部分。
 pub trait WorkerOs: Send + Sync + 'static {
@@ -54,6 +54,14 @@ pub trait WorkerOs: Send + Sync + 'static {
     /// 系统专有命令（如 Windows 的 service）；不认识返回 None
     fn extra_command(&self, _cmd: &str, _rest: &[String], _dir: &Path) -> Option<i32> {
         None
+    }
+    /// 更新时要替换的程序（已安装服务时是服务用的那份）；None 为当前程序
+    fn update_target(&self) -> Option<PathBuf> {
+        None
+    }
+    /// 重启已安装的服务（自动更新换好程序后用）；没有服务或失败返回 false
+    fn restart_service(&self) -> bool {
+        false
     }
     /// 帮助里补充的系统专有命令说明 (命令, 中文, 英文)
     fn extra_help(&self) -> Vec<(&'static str, &'static str, &'static str)> {
@@ -190,6 +198,8 @@ pub fn main(os: Arc<dyn WorkerOs>) -> ! {
             "enable" => set_enabled(&dir, true),
             "disable" => set_enabled(&dir, false),
             "events" => events(&dir, &a.rest),
+            "update" => update_cmd(os.as_ref(), &dir, &a.rest).await,
+            "auto-update" => auto_update_cmd(&dir, &a.rest),
             "install-service" => os.install_service(&dir),
             "uninstall-service" => os.uninstall_service(),
             "version" | "--version" | "-V" => {
@@ -227,6 +237,8 @@ fn help(os: &dyn WorkerOs) {
         println!("  assist              临时协助：显示设备码与验证码，需本人确认对方才能连入");
         println!("  disable / enable    一键禁止 / 允许远程");
         println!("  events [-n 50]      查看本机远程操作日志");
+        println!("  update [--check]    检查并安装新版本（发布签名校验通过才装）");
+        println!("  auto-update on|off  服务模式下是否自动更新（默认开）");
         for (c, z, _) in os.extra_help() {
             println!("  {c:<19} {z}");
         }
@@ -244,6 +256,8 @@ fn help(os: &dyn WorkerOs) {
         println!("  assist              Remote assistance with device code and verification code");
         println!("  disable / enable    Disable / enable remote access");
         println!("  events [-n 50]      Show local remote-operation log");
+        println!("  update [--check]    Check for and install a new version (signature verified)");
+        println!("  auto-update on|off  Auto-update when running as a service (default on)");
         for (c, _, e) in os.extra_help() {
             println!("  {c:<19} {e}");
         }
@@ -583,6 +597,26 @@ pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl s
         host.set_platform(p);
     }
     tracing::info!("LemonGalaxy worker {VERSION} 已启动，设备 {}", host.identity.device_id);
+    // 服务模式下定期自动更新：换好程序后退出，由服务管理器拉起新版本
+    if std::env::var("LEMON_GALAXY_SUPERVISED").as_deref() == Ok("1") {
+        let (os2, dir2) = (os.clone(), dir.to_path_buf());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            loop {
+                if HostState::load(&dir2.join("host.json")).auto_update {
+                    match apply_update(os2.as_ref(), &dir2).await {
+                        Ok(Some(v)) => {
+                            tracing::info!("已更新到 {v}，重启服务");
+                            std::process::exit(75);
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!("自动更新失败：{e}"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+            }
+        });
+    }
     let path = dir.join("host.json");
     let mut last = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
     let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -689,5 +723,119 @@ async fn assist(os: &dyn WorkerOs, rest: &[String]) -> i32 {
     }
     shutdown_signal().await;
     let _ = std::fs::remove_dir_all(tmp);
+    0
+}
+
+// ---------------- 更新 ----------------
+
+fn platform_name(os: &dyn WorkerOs) -> &'static str {
+    match os.platform() {
+        Platform::Windows => "windows",
+        Platform::Macos => "macos",
+        _ => "linux",
+    }
+}
+
+/// 用本机任一有效账号的令牌访问服务器。
+fn api_for(dir: &Path) -> Result<Api, String> {
+    let st = HostState::load(&dir.join("host.json"));
+    let server = ServerAddr::parse(&st.server).map_err(|_| t!("还没有登录", "Not signed in").to_string())?;
+    let acct = st.accounts.iter().find(|a| a.status == galaxy_host::AccountStatus::Active).ok_or_else(|| t!("没有可用的账号", "No active account").to_string())?;
+    let api = Api::new(server, if zh() { "zh-CN" } else { "en" }).map_err(|e| e.to_string())?;
+    api.set_token(Some(acct.token.clone()));
+    Ok(api)
+}
+
+async fn check_update(os: &dyn WorkerOs, dir: &Path) -> Result<Option<galaxy_client::update::UpdateInfo>, String> {
+    let api = api_for(dir)?;
+    galaxy_client::update::check(&api, "worker", platform_name(os), galaxy_proto::update::this_arch(), VERSION).await.map_err(|e| e.to_string())
+}
+
+/// 检查、下载、验证并替换当前程序。返回新版本号（没有新版本为 None）。
+pub async fn apply_update(os: &dyn WorkerOs, dir: &Path) -> Result<Option<String>, String> {
+    let Some(info) = check_update(os, dir).await? else { return Ok(None) };
+    let api = api_for(dir)?;
+    let exe = match os.update_target() {
+        Some(p) => p,
+        None => std::env::current_exe().map_err(|e| e.to_string())?,
+    };
+    let new = exe.with_extension("new");
+    galaxy_client::update::download(&api, &info, &new, &|_, _| {}).await.map_err(|e| e.to_string())?;
+    replace_exe(&exe, &new).map_err(|e| format!("{}: {e}", t!("替换程序失败", "Cannot replace program")))?;
+    Ok(Some(info.version))
+}
+
+fn replace_exe(exe: &Path, new: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(new, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(new, exe)
+    }
+    #[cfg(not(unix))]
+    {
+        // 运行中的程序不能覆盖，但可以改名
+        let old = exe.with_extension("old.exe");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(exe, &old)?;
+        if let Err(e) = std::fs::rename(new, exe) {
+            let _ = std::fs::rename(&old, exe);
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
+async fn update_cmd(os: &dyn WorkerOs, dir: &Path, rest: &[String]) -> i32 {
+    if rest.iter().any(|a| a == "--check") {
+        return match check_update(os, dir).await {
+            Ok(Some(i)) => {
+                println!("{} {}（{} {}）", t!("有新版本", "New version"), i.version, t!("当前", "current"), VERSION);
+                0
+            }
+            Ok(None) => {
+                println!("{} {VERSION}", t!("已是最新版本", "Up to date:"));
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        };
+    }
+    match apply_update(os, dir).await {
+        Ok(Some(v)) => {
+            println!("{} {v}", t!("已更新到", "Updated to"));
+            if os.restart_service() {
+                println!("{}", t!("已重启服务。", "Service restarted."));
+            } else {
+                println!("{}", t!("如果装了服务，请重启它让新版本生效。", "Restart the service to use the new version."));
+            }
+            0
+        }
+        Ok(None) => {
+            println!("{} {VERSION}", t!("已是最新版本", "Up to date:"));
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+fn auto_update_cmd(dir: &Path, rest: &[String]) -> i32 {
+    let path = dir.join("host.json");
+    let mut st = HostState::load(&path);
+    match rest.first().map(|s| s.as_str()) {
+        Some("on") => st.auto_update = true,
+        Some("off") => st.auto_update = false,
+        _ => {
+            println!("{}: {}", t!("自动更新", "Auto update"), onoff(st.auto_update));
+            return 0;
+        }
+    }
+    let _ = st.save(&path);
+    println!("{}: {}", t!("自动更新", "Auto update"), onoff(st.auto_update));
     0
 }

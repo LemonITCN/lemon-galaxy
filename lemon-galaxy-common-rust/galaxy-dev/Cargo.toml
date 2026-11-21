@@ -15,6 +15,7 @@ galaxy-proto.workspace = true
 galaxy-crypto.workspace = true
 galaxy-net.workspace = true
 galaxy-client.workspace = true
+base64.workspace = true
 galaxy-agent.workspace = true
 anyhow.workspace = true
 serde.workspace = true

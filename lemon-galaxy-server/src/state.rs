@@ -247,6 +247,7 @@ pub struct AppState {
     pub udp: Arc<tokio::net::UdpSocket>,
     pub http: reqwest::Client,
     pub setup_token: Mutex<Option<String>>,
+    pub updates: crate::update::UpdateStatus,
 }
 
 pub type St = Arc<AppState>;

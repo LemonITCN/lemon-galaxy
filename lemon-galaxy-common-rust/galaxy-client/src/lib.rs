@@ -9,6 +9,7 @@ pub mod identity;
 pub mod session;
 pub mod signal;
 pub mod ssh;
+pub mod update;
 pub mod vault;
 
 pub use error::{ClientError, Result};

@@ -89,6 +89,15 @@ impl WorkerOs for WindowsOs {
         service::uninstall()
     }
 
+    fn update_target(&self) -> Option<PathBuf> {
+        let installed = service::install_dir().join("lemon-galaxy-worker.exe");
+        installed.exists().then_some(installed)
+    }
+
+    fn restart_service(&self) -> bool {
+        service::restart()
+    }
+
     fn host_platform(&self) -> Option<Arc<dyn HostPlatform>> {
         Some(platform::WinPlatform::new())
     }
@@ -127,5 +136,9 @@ impl WorkerOs for WindowsOs {
 }
 
 pub fn main() {
+    // 上次自动更新留下的旧程序
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(exe.with_extension("old.exe"));
+    }
     galaxy_worker::main(Arc::new(WindowsOs));
 }
