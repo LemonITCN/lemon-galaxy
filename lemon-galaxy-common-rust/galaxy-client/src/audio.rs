@@ -58,6 +58,7 @@ impl PeerSession {
         }
         let (tx, mut rx) = mpsc::channel::<Bytes>(256);
         self.register_datagrams(channel, tx);
+        let me = Arc::downgrade(self);
         let task = tokio::spawn(async move {
             let Ok(mut dec) = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Stereo) else { return };
             let mut expected: Option<u32> = None;
@@ -87,6 +88,9 @@ impl PeerSession {
                     }
                 }
                 expected = Some(h.seq.wrapping_add(1));
+                if let Some(r) = me.upgrade().and_then(|s| s.audio_recorder()) {
+                    r.on_audio(&d[pos..]);
+                }
                 if let Ok(n) = dec.decode_float(&d[pos..], &mut buf, false) {
                     out.write(&buf[..n * 2]);
                 }

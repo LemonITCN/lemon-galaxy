@@ -4,6 +4,7 @@ pub mod account;
 pub mod audio;
 #[cfg(feature = "playback")]
 pub mod playback;
+pub mod record;
 pub mod ai;
 pub mod api;
 pub mod connector;

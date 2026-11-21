@@ -160,7 +160,7 @@ impl PeerSession {
                 view_only: options.view_only,
             };
             let ch = s.open_display(req, Arc::new(Sink(sink.clone()))).await?;
-            Ok(DisplayChannel::new(ch, sink))
+            Ok(DisplayChannel::new(ch, sink, Arc::downgrade(&s)))
         })
         .await
     }
@@ -545,10 +545,22 @@ enum DispCmd {
 #[derive(uniffi::Object)]
 pub struct DisplayChannel {
     tx: mpsc::UnboundedSender<DispCmd>,
+    ch: Arc<cs::DisplayChannel>,
+    session: std::sync::Weak<cs::PeerSession>,
+}
+
+/// 录完的录像。
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct RecordingInfo {
+    /// 写出的文件（录像中途被控端分辨率变了会分成几个文件）
+    pub paths: Vec<String>,
+    pub duration_ms: u64,
+    pub bytes: u64,
 }
 
 impl DisplayChannel {
-    fn new(ch: Arc<cs::DisplayChannel>, sink: Arc<dyn VideoSink>) -> Arc<Self> {
+    fn new(ch: Arc<cs::DisplayChannel>, sink: Arc<dyn VideoSink>, session: std::sync::Weak<cs::PeerSession>) -> Arc<Self> {
+        let ch2 = ch.clone();
         let (tx, mut rx) = mpsc::unbounded_channel::<DispCmd>();
         rt().spawn(async move {
             while let Some(m) = rx.recv().await {
@@ -564,7 +576,7 @@ impl DisplayChannel {
                 }
             }
         });
-        Arc::new(Self { tx })
+        Arc::new(Self { tx, ch: ch2, session })
     }
 }
 
@@ -580,7 +592,43 @@ impl DisplayChannel {
         let _ = self.tx.send(DispCmd::Bitrate(kbps));
     }
     pub fn stop(&self) {
+        if self.ch.is_recording() {
+            let _ = self.stop_recording();
+        }
         let _ = self.tx.send(DispCmd::Stop);
+    }
+
+    /// 开始录像到 `path`（.mp4，分片 MP4，H.264 原样写入不重新编码）。`with_audio` 为真时正在收听的声音也一起录。
+    /// 从下一个关键帧开始写（会马上请求一个）。
+    pub async fn start_recording(&self, path: String, with_audio: bool) -> Result<()> {
+        let ch = self.ch.clone();
+        let session = self.session.clone();
+        run(async move {
+            let r = ch.start_recording(std::path::Path::new(&path), with_audio).await.map_err(|e| GalaxyError::Other { detail: e })?;
+            if with_audio {
+                if let Some(s) = session.upgrade() {
+                    s.set_audio_recorder(Some(&r));
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 停止录像。没在录时报错。
+    pub fn stop_recording(&self) -> Result<RecordingInfo> {
+        if let Some(s) = self.session.upgrade() {
+            s.set_audio_recorder(None);
+        }
+        match self.ch.stop_recording() {
+            Some(Ok(s)) => Ok(RecordingInfo { paths: s.paths.into_iter().map(|p| p.to_string_lossy().to_string()).collect(), duration_ms: s.duration_ms, bytes: s.bytes }),
+            Some(Err(e)) => Err(GalaxyError::Other { detail: e }),
+            None => Err(GalaxyError::Other { detail: "没有在录像".into() }),
+        }
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.ch.is_recording()
     }
 }
 

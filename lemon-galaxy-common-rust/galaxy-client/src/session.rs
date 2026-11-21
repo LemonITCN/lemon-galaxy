@@ -41,6 +41,8 @@ pub struct PeerSession {
     stop_probe: watch::Sender<bool>,
     signal: Option<Arc<SignalClient>>,
     video: Mutex<HashMap<u8, mpsc::Sender<Bytes>>>,
+    /// 正在录像时，收到的声音包也写进录像
+    audio_rec: Mutex<Option<std::sync::Weak<crate::record::Recorder>>>,
     ms: Arc<MagicSock>,
     _peer: Arc<Peer>,
 }
@@ -68,6 +70,7 @@ impl PeerSession {
             stop_probe,
             signal,
             video: Default::default(),
+            audio_rec: Default::default(),
             ms,
             _peer: peer,
         });
@@ -146,6 +149,15 @@ impl PeerSession {
 
     pub(crate) fn unregister_datagrams(&self, channel: u8) {
         self.video.lock().remove(&channel);
+    }
+
+    /// 录像时把收到的声音也写进去（传 None 停止）。
+    pub fn set_audio_recorder(&self, r: Option<&Arc<crate::record::Recorder>>) {
+        *self.audio_rec.lock() = r.map(Arc::downgrade);
+    }
+
+    pub(crate) fn audio_recorder(&self) -> Option<Arc<crate::record::Recorder>> {
+        self.audio_rec.lock().as_ref().and_then(|w| w.upgrade())
     }
 
     // ---------------- 终端 ----------------
@@ -459,14 +471,23 @@ impl PeerSession {
         sink.on_config(codec, w, h);
         let (tx, mut rx) = mpsc::channel::<Bytes>(1024);
         self.video.lock().insert(channel, tx);
-        let ch = Arc::new(DisplayChannel { send: tokio::sync::Mutex::new(send), channel });
+        let recorder: Arc<Mutex<Option<Arc<crate::record::Recorder>>>> = Default::default();
+        let dims = Arc::new(std::sync::atomic::AtomicU64::new(((w as u64) << 32) | h as u64));
+        let ch = Arc::new(DisplayChannel { send: tokio::sync::Mutex::new(send), channel, recorder: recorder.clone(), dims: dims.clone() });
         // 控制消息
         let sink2 = sink.clone();
+        let rec2 = recorder.clone();
         tokio::spawn(async move {
             while let Ok(Some(m)) = frame::read::<DisplayOut>(&mut recv).await {
                 match m {
                     DisplayOut::Cursor { x, y, visible } => sink2.on_cursor(x, y, visible),
-                    DisplayOut::Resized { width, height } => sink2.on_config(codec, width, height),
+                    DisplayOut::Resized { width, height } => {
+                        dims.store(((width as u64) << 32) | height as u64, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(r) = rec2.lock().clone() {
+                            r.on_config(width, height);
+                        }
+                        sink2.on_config(codec, width, height)
+                    }
                     _ => {}
                 }
             }
@@ -480,6 +501,9 @@ impl PeerSession {
                 let Some((h, pos)) = VideoFragHeader::decode(&d) else { continue };
                 let (complete, lost) = asm.push(h, d.slice(pos..));
                 if let Some((data, pts, kf)) = complete {
+                    if let Some(r) = recorder.lock().clone() {
+                        r.on_video(&data, kf);
+                    }
                     sink.on_frame(data, pts, kf);
                 }
                 if lost && last_kf_req.elapsed() > Duration::from_millis(500) {
@@ -603,9 +627,35 @@ impl TerminalChannel {
 pub struct DisplayChannel {
     send: tokio::sync::Mutex<quinn::SendStream>,
     pub channel: u8,
+    recorder: Arc<Mutex<Option<Arc<crate::record::Recorder>>>>,
+    /// 当前画面尺寸（高 32 位宽、低 32 位高）
+    dims: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl DisplayChannel {
+    /// 开始录像（分片 MP4，不重新编码）。马上请求一个关键帧，从关键帧开始写。
+    pub async fn start_recording(&self, path: &std::path::Path, with_audio: bool) -> std::result::Result<Arc<crate::record::Recorder>, String> {
+        if self.recorder.lock().is_some() {
+            return Err("已经在录像了".into());
+        }
+        let r = crate::record::Recorder::new(path, with_audio)?;
+        let d = self.dims.load(std::sync::atomic::Ordering::Relaxed);
+        r.on_config((d >> 32) as u32, d as u32);
+        *self.recorder.lock() = Some(r.clone());
+        self.request_keyframe().await;
+        Ok(r)
+    }
+
+    /// 停止录像，返回写出的文件；没在录返回 None。
+    pub fn stop_recording(&self) -> Option<std::result::Result<crate::record::RecordingSummary, String>> {
+        let r = self.recorder.lock().take()?;
+        Some(r.finish())
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recorder.lock().is_some()
+    }
+
     pub async fn send_input(&self, ev: InputEvent) {
         let _ = frame::write(&mut *self.send.lock().await, &DisplayIn::Input(ev)).await;
     }

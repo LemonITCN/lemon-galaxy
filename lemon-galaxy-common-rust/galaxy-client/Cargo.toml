@@ -35,6 +35,12 @@ sha2.workspace = true
 base64.workspace = true
 opus.workspace = true
 cpal = { version = "0.18", optional = true }
+# 会话录像：分片 MP4 封装（纯 Rust）
+muxide = { version = "0.5", default-features = false }
+
+[dev-dependencies]
+openh264 = "0.9"
+mp4 = "0.14"
 
 [features]
 # 本机声卡播放远端声音（客户端用；Linux 命令行工具不需要）

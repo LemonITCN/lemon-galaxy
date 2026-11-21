@@ -92,7 +92,10 @@ async wake_on_lan(mac)
 - `FileClient`：`home`、`list`、`stat`、`realpath`、`mkdir`、`rename`、`remove(path, recursive)`、`chmod`、`search(root, pattern, content)`、`read_text`、`write_text`、
   `download(remote, local, TransferListener) -> Transfer`、`upload(local, remote, TransferListener) -> Transfer`（都支持断点续传；只接受本机文件路径）。
   `Transfer`：`cancel()`、`pause()`、`resume()`。
-- `DisplayChannel`：`send_input(InputEvent)`、`request_keyframe()`、`set_bitrate(kbps)`、`stop()`。
+- `DisplayChannel`：`send_input(InputEvent)`、`request_keyframe()`、`set_bitrate(kbps)`、`stop()`；
+  录像 `async start_recording(path, with_audio)`、`stop_recording() -> RecordingInfo{paths, duration_ms, bytes}`、`is_recording()`。
+  录像在内核里把收到的 H.264 与 Opus 直接封装成分片 MP4（不重新编码，边录边写，异常退出已写部分仍可播放）；
+  被控端分辨率变化时自动分段为 `名字-2.mp4` 等。Opus 音轨在 VLC、浏览器、ffmpeg 里能播，部分系统自带播放器可能只出画面。
   `VideoSink`：`on_config(codec, width, height)`（分辨率变化时会再次调用）、`on_frame(annexb, pts_us, keyframe)`、`on_cursor(x, y, visible)`（被控屏幕像素）、`on_closed(reason)`。
 - `AudioPlayback`：`set_volume(0..1)`、`set_muted(Bool)`、`is_active()`、`stop()`。内核收 Opus 数据报、解码（丢包补偿）后直接用本机默认输出设备播放
   （macOS / iOS CoreAudio、Windows WASAPI、安卓 AAudio），界面层只放开关与音量。iOS 播放前要把 AVAudioSession 设成 playback；
