@@ -347,6 +347,19 @@ private func portForwardSmoke(client: GalaxyClient, viaDevice: String?, viaSshHo
             log("  读到 \(banner.trimmingCharacters(in: .whitespacesAndNewlines))")
             if !banner.hasPrefix(marker) { log("失败 经映射读到的不对"); failures += 1 }
         } else { failures += 1 }
+        // 环境变量 PF_RESTART=1（经设备、自动端口那条）：脚本看到 PF-RESTART 后重启被控端，映射应自动恢复
+        if ProcessInfo.processInfo.environment["PF_RESTART"] == "1", viaDevice != nil, expectPort == nil {
+            log("PF-RESTART")
+            let back = await smokeStep("被控端重启后经映射再读标识") { () async throws -> String in
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+                for _ in 0..<60 {
+                    if let b = try? await Task.detached(operation: { try readBanner(port: port) }).value, b.hasPrefix(marker) { return b }
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+                throw GalaxyError.Other(detail: "60 秒内映射没有恢复")
+            }
+            if back == nil { failures += 1 } else { log("  被控端重启后映射自动恢复") }
+        }
         f.stop()
         let closed = await smokeStep("stop 后端口关闭") { () async throws -> Bool in
             for _ in 0..<20 {
