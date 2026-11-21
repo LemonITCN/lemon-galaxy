@@ -1,0 +1,71 @@
+;
+; LemonGalaxyDisplay.inf
+; LemonGalaxy virtual display driver (IddCx, user mode). One root-enumerated adapter
+; (Root\LemonGalaxyDisplay); the LemonGalaxy worker adds up to four monitors on demand.
+;
+
+[Version]
+PnpLockDown=1
+Signature="$Windows NT$"
+ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
+Class=Display
+ClassVer=2.0
+Provider=%ManufacturerName%
+CatalogFile=LemonGalaxyDisplay.cat
+DriverVer=
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$.10.0...17763
+
+[Standard.NT$ARCH$.10.0...17763]
+%DeviceName%=LemonGalaxyDisplay_Install, Root\LemonGalaxyDisplay
+
+[SourceDisksFiles]
+LemonGalaxyDisplay.dll=1
+
+[SourceDisksNames]
+1=%DiskName%
+
+[LemonGalaxyDisplay_Install.NT]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+CopyFiles=UMDriverCopy
+
+[LemonGalaxyDisplay_Install.NT.hw]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+AddReg=LemonGalaxyDisplay_HardwareDeviceSettings
+
+[LemonGalaxyDisplay_HardwareDeviceSettings]
+HKR,,"UpperFilters",%REG_MULTI_SZ%,"IndirectKmd"
+HKR,"WUDF","DeviceGroupId",%REG_SZ%,"LemonGalaxyDisplayGroup"
+; Only SYSTEM (the worker service and its session agent) and elevated administrators may open it.
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+
+[LemonGalaxyDisplay_Install.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[LemonGalaxyDisplay_Install.NT.Wdf]
+UmdfService=LemonGalaxyDisplay,LemonGalaxyDisplay_Install
+UmdfServiceOrder=LemonGalaxyDisplay
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+
+[LemonGalaxyDisplay_Install]
+UmdfLibraryVersion=$UMDFVERSION$
+ServiceBinary=%13%\LemonGalaxyDisplay.dll
+; The name of the IddCx class extension service, not a version (the minimum version is compiled in).
+UmdfExtensions=IddCx0102
+
+[DestinationDirs]
+UMDriverCopy=13
+
+[UMDriverCopy]
+LemonGalaxyDisplay.dll
+
+[Strings]
+ManufacturerName="LemonIT"
+DiskName="LemonGalaxy Display Installation Disk"
+DeviceName="LemonGalaxy Display"
+REG_MULTI_SZ=0x00010000
+REG_SZ=0x00000000

@@ -335,6 +335,26 @@
 
 ---
 
+### 5.8 第一阶段实施记录（2026-11-22）
+
+用户拍板：驱动以 LemonLink 自己的 IddCx 驱动（LemonLinkDisplay）为底移植进本仓库，随仓库 MIT 开源；签名以后走 SignPath Foundation（x64）。第一阶段只做驱动和独立测试，worker 集成、协议、各端主控、macOS 留到第二阶段。
+
+**落地位置**：`lemon-galaxy-worker-windows/driver/`（用法、安装、卸载见该目录 README）。
+- 驱动 `LemonGalaxyDisplay`：硬件 ID `Root\LemonGalaxyDisplay`，接口 GUID `{BE3C34E4-6555-40C7-916D-A2DB09DAB193}`，UMDF 服务名 `LemonGalaxyDisplay`，EDID 厂商码 `LGX`、名字 `LemonGalaxy`，最多 4 块屏，每块屏的模式由调用方给（最多 64 个）。设备只对 SYSTEM 和管理员开放。屏随加它的句柄存亡（服务崩溃即自动删屏，代替 5.2 里设想的看门狗）。
+- 和 5.2 设计的差异：没有做 `LIST`、`SET_RENDER_ADAPTER`、`PING`，IOCTL 只有 `GET_INFO / ADD / REMOVE`；第二阶段按需要再加（多 GPU 笔记本上本次实测渲染适配器自动选了 NVIDIA 独显）。
+- 测试工具 `LemonGalaxyDisplayTest`（C++）：加 1920x1080@60 屏，`SetDisplayConfig` 只加这一条路径扩展桌面，报 GDI 名 / 显示器名 / DXGI 输出，DXGI 桌面复制抓帧，切 2560x1440@60 再抓帧，再切 3840x2160@144、1920x1200@120，删屏、核对显示配置恢复原样，再验证 4 块上限、第 5 块被拒、关句柄自动删屏。
+
+**实测（开发笔记本 Windows 11 26200，Intel UHD + RTX 5060，已装 LemonLink Display 与 GameViewer）**：不开测试模式，测试证书放进受信任的根和受信任的发布者后驱动正常加载；全部检查通过。加屏到出现在 QueryDisplayConfig 约 30 ms，SetDisplayConfig 扩展约 0.5–0.8 s，改模式 0.2–0.5 s，删屏约 0.2 s；加屏后不会自动扩展桌面；抓帧第一次即成功（DXGI 输出挂在 NVIDIA 适配器下）；驱动日志里每次改模式后第一个 swap chain 都是 `IddCxSwapChainSetDevice` 返回 0x887A0026（ACCESS_LOST），第二个正常，与 LemonLink 的经验一致。
+
+**CI 方案（未落地，需在分支上验证后再加进 build.yml）**：
+1. 在 `windows-2025` runner 上新增独立 job（不放进现有 windows job，失败不挡发布：先 `continue-on-error: true`）。
+2. 先确认 runner 是否自带 WDK 的 VS 组件（`WindowsUserModeDriver10.0` 工具集来自它）；没有就用 `vs_installer.exe modify --add Microsoft.VisualStudio.Component.Windows.DriverKit`（组件名以 runner 上的 VS 版本为准）装上，再用 NuGet 取 WDK：`packages.config` 里写 `Microsoft.Windows.WDK.x64` 与 `Microsoft.Windows.SDK.CPP`、`Microsoft.Windows.SDK.CPP.x64`（同一版本，如 10.0.26100.x），`nuget restore -PackagesDirectory packages`，按微软 Windows-driver-samples 的做法在 `Directory.Build.props` 里固定同一版本。
+3. `msbuild LemonGalaxyDriver.sln /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off`。若 runner 缺 Spectre 库，加 `/p:Driver_SpectreMitigation=false` 或装 `Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre`。
+4. 上传 `build/x64/Release/LemonGalaxyDisplay/`（inf、dll、未签名 cat）和测试工具为构件；接入 SignPath 后由 SignPath 签 `.cat`。ARM64 等拿到微软签名再加。
+5. 风险：WDK NuGet 文档要求装 VS 的“Windows Driver Kit”组件，GitHub 镜像是否带它、版本是否与 NuGet 包匹配都要实跑确认，所以这次没有改 workflow。
+
+**第二阶段要做的**（Windows 部分）：worker 服务安装驱动（导入签名证书到 TrustedPublisher、`DiInstallDriverW`、SetupAPI 建根设备、修复与卸载）；Rust 侧 IOCTL 客户端（照 `LemonGalaxyDisplayControl.h` 写 `#[repr(C)]`，`windows` crate 要加 `Win32_Devices_DeviceAndDriverInstallation`、`Win32_Devices_Display`、`Win32_Storage_FileSystem`、`Win32_System_IO` 等 feature）；会话 agent 做路径激活、改模式、按 GDI 名接入现有 DXGI 采集并处理 ACCESS_LOST 重建；无头兜底；协议与各端主控界面；SignPath 签名接入。
+
 ## 6. 来源（访问日期均为 2026-11-22）
 
 **Windows 驱动项目**
