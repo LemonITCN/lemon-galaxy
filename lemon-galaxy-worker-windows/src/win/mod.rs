@@ -128,13 +128,13 @@ impl WorkerOs for WindowsOs {
         match cmd {
             "service" => Some(service::run_dispatcher(dir)),
             "__lg-session-agent" => Some(agent::main()),
-            "selftest-capture" => Some(agent::selftest()),
+            "selftest-capture" => Some(agent::selftest(_rest)),
             _ => None,
         }
     }
 
     fn extra_help(&self) -> Vec<(&'static str, &'static str, &'static str)> {
-        vec![("selftest-capture", "检查截屏与编码是否正常", "Check screen capture and encoding")]
+        vec![("selftest-capture", "检查截屏与编码是否正常（--bench 测试本机每种编码器，--dump 目录 存下码流）", "Check screen capture and encoding (--bench: test every encoder, --dump DIR: save streams)")]
     }
 }
 

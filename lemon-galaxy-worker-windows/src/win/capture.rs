@@ -1,15 +1,12 @@
 //! 截屏：优先 DXGI 桌面复制（Windows 8 起，GPU 拷贝，只在画面变化时出帧），失败时用 GDI。
-//! 光标不在桌面复制的画面里，统一用 GDI 画进帧。
+//! 光标不在桌面复制的画面里，统一用 GDI 画进帧（硬件编码时画在显卡纹理上，见 encode/gpu.rs）。
+//! 硬件编码器与桌面复制在同一块显卡上时，画面直接在显卡上拷给编码器，不读回内存（`next_gpu`）。
 //! 锁屏、UAC 时输入桌面会切到 Winlogon，采集线程跟着切过去（需要以 SYSTEM 身份运行）。
 
 use galaxy_proto::peer::DisplayInfo;
 use windows::core::{Interface, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_STAGING,
-};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING};
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO};
 use windows::Win32::Graphics::Gdi::{
@@ -18,7 +15,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::StationsAndDesktops::{CloseDesktop, GetThreadDesktop, GetUserObjectInformationW, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, HDESK, UOI_NAME};
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::WindowsAndMessaging::{DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, ICONINFO};
+use windows::Win32::UI::WindowsAndMessaging::{DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, HCURSOR, ICONINFO};
 
 /// 一块屏幕。坐标是虚拟桌面上的物理像素。
 #[derive(Clone, Debug)]
@@ -127,23 +124,41 @@ pub struct Frame {
 pub trait Capturer {
     /// 等下一帧，最多 `timeout_ms`。Ok(true) 表示 `frame` 已更新，Ok(false) 表示画面没变。
     fn next(&mut self, frame: &mut Frame, timeout_ms: u32) -> anyhow::Result<bool>;
+    /// 显卡上截屏：新画面直接拷进 `dst`（`device()` 上、`size()` 大小的 BGRA 纹理），不读回内存。
+    fn next_gpu(&mut self, _dst: &ID3D11Texture2D, _timeout_ms: u32) -> anyhow::Result<bool> {
+        anyhow::bail!("这种截屏方式不能直接输出到显卡")
+    }
+    /// 截屏用的 D3D11 设备（桌面复制才有）
+    fn device(&self) -> Option<&ID3D11Device> {
+        None
+    }
+    /// 画面尺寸
+    fn size(&self) -> (u32, u32);
     fn kind(&self) -> &'static str;
 }
 
 // ---------------- DXGI ----------------
 
 pub struct DxgiCapturer {
-    dup: IDXGIOutputDuplication,
+    output: IDXGIOutput1,
+    /// 桌面复制；失效（ACCESS_LOST：切分辨率、增删显示器、全屏独占、锁屏等）后为 None，下次取帧时重建
+    dup: Option<IDXGIOutputDuplication>,
     ctx: ID3D11DeviceContext,
     device: ID3D11Device,
     staging: Option<ID3D11Texture2D>,
     width: u32,
     height: u32,
     holding: bool,
+    /// 复制失效的时刻；一直重建不成（输出没了）超过几秒才报错，让调用方重新找屏幕
+    lost_since: Option<std::time::Instant>,
+    /// 复制建好后还没拿到真画面的起始时刻：画面一直不动时超过 1 秒就用 GDI 补一帧
+    fresh_since: Option<std::time::Instant>,
+    mon: Monitor,
 }
 
 impl DxgiCapturer {
-    pub fn new(mon: &Monitor) -> anyhow::Result<Self> {
+    /// `prefer`：已有的设备（硬件编码器的），在同一块显卡上就直接用它，画面可以零拷贝交给编码器。
+    pub fn new(mon: &Monitor, prefer: Option<&ID3D11Device>) -> anyhow::Result<Self> {
         unsafe {
             let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
             let mut i = 0;
@@ -158,18 +173,114 @@ impl DxgiCapturer {
                     if String::from_utf16_lossy(&desc.DeviceName[..n]) != mon.device {
                         continue;
                     }
-                    let mut device: Option<ID3D11Device> = None;
-                    let mut ctx: Option<ID3D11DeviceContext> = None;
-                    D3D11CreateDevice(&adapter, D3D_DRIVER_TYPE_UNKNOWN, windows::Win32::Foundation::HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut ctx))?;
-                    let device = device.ok_or_else(|| anyhow::anyhow!("D3D11 设备创建失败"))?;
-                    let ctx = ctx.ok_or_else(|| anyhow::anyhow!("D3D11 设备创建失败"))?;
-                    let o1: IDXGIOutput1 = output.cast()?;
-                    let dup = o1.DuplicateOutput(&device)?;
-                    let dd = dup.GetDesc();
-                    return Ok(Self { dup, ctx, device, staging: None, width: dd.ModeDesc.Width, height: dd.ModeDesc.Height, holding: false });
+                    let luid = adapter.GetDesc1()?.AdapterLuid;
+                    let reuse = prefer.filter(|d| super::encode::gpu::device_luid(d).map(|l| l.LowPart == luid.LowPart && l.HighPart == luid.HighPart).unwrap_or(false));
+                    let (device, ctx) = match reuse {
+                        Some(d) => (d.clone(), d.GetImmediateContext()?),
+                        None => super::encode::gpu::create_device(&adapter)?,
+                    };
+                    let output: IDXGIOutput1 = output.cast()?;
+                    // 刚切过模式时第一次复制常常马上失效，这里多试几次
+                    let mut last = None;
+                    for k in 0..4 {
+                        match output.DuplicateOutput(&device) {
+                            Ok(dup) => {
+                                let dd = dup.GetDesc();
+                                return Ok(Self {
+                                    output,
+                                    dup: Some(dup),
+                                    ctx,
+                                    device,
+                                    staging: None,
+                                    width: dd.ModeDesc.Width,
+                                    height: dd.ModeDesc.Height,
+                                    holding: false,
+                                    lost_since: None,
+                                    fresh_since: Some(std::time::Instant::now()),
+                                    mon: mon.clone(),
+                                });
+                            }
+                            Err(e) => {
+                                last = Some(e);
+                                std::thread::sleep(std::time::Duration::from_millis(30 * (k + 1)));
+                            }
+                        }
+                    }
+                    return Err(last.map(anyhow::Error::from).unwrap_or_else(|| anyhow::anyhow!("桌面复制失败")));
                 }
             }
         }
+    }
+
+    /// 重建桌面复制（尺寸可能变了，暂存纹理跟着重建）。
+    fn reduplicate(&mut self) -> bool {
+        unsafe {
+            match self.output.DuplicateOutput(&self.device) {
+                Ok(dup) => {
+                    let dd = dup.GetDesc();
+                    if (dd.ModeDesc.Width, dd.ModeDesc.Height) != (self.width, self.height) {
+                        self.staging = None;
+                    }
+                    self.width = dd.ModeDesc.Width;
+                    self.height = dd.ModeDesc.Height;
+                    self.dup = Some(dup);
+                    self.lost_since = None;
+                    self.fresh_since = Some(std::time::Instant::now());
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+    }
+
+    /// 取下一帧。Ok(None)：没有新帧（超时、复制刚失效正在重建）。
+    fn acquire(&mut self, timeout_ms: u32) -> anyhow::Result<Option<(DXGI_OUTDUPL_FRAME_INFO, Option<IDXGIResource>)>> {
+        unsafe {
+            if self.holding {
+                if let Some(d) = &self.dup {
+                    let _ = d.ReleaseFrame();
+                }
+                self.holding = false;
+            }
+            if self.dup.is_none() && !self.reduplicate() {
+                if self.lost_since.map(|t| t.elapsed() > std::time::Duration::from_secs(3)).unwrap_or(false) {
+                    anyhow::bail!("access_lost");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(timeout_ms.min(50) as u64));
+                return Ok(None);
+            }
+            let dup = self.dup.as_ref().unwrap();
+            let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut res: Option<IDXGIResource> = None;
+            match dup.AcquireNextFrame(timeout_ms, &mut info, &mut res) {
+                Ok(()) => {
+                    self.holding = true;
+                    Ok(Some((info, res)))
+                }
+                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => Ok(None),
+                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
+                    // 失效了：放掉旧的，立刻试着重建一次（切模式过程中可能还不行，下次再试）
+                    self.dup = None;
+                    self.lost_since.get_or_insert_with(std::time::Instant::now);
+                    self.reduplicate();
+                    Ok(None)
+                }
+                Err(e) => Err(e.into()),
+            }
+        }
+    }
+
+    /// 刚建复制还没出真画面、已经等了 1 秒：用 GDI 截一帧顶上（尺寸与复制一致时）。
+    fn gdi_fill(&mut self) -> Option<Frame> {
+        if !self.fresh_since.map(|t| t.elapsed() > std::time::Duration::from_secs(1)).unwrap_or(false) {
+            return None;
+        }
+        self.fresh_since = None;
+        let mut g = GdiCapturer::new(&self.mon, 60);
+        g.interval_ms = 0;
+        let mut f = Frame { width: 0, height: 0, data: vec![] };
+        g.next(&mut f, 0).ok()?;
+        ((f.width, f.height) == (self.width, self.height)).then_some(f)
     }
 
     fn ensure_staging(&mut self) -> anyhow::Result<ID3D11Texture2D> {
@@ -200,24 +311,17 @@ impl DxgiCapturer {
 
 impl Capturer for DxgiCapturer {
     fn next(&mut self, frame: &mut Frame, timeout_ms: u32) -> anyhow::Result<bool> {
+        let got = self.acquire(timeout_ms)?;
+        // LastPresentTime 为 0：画面没变（只有光标动）；刚建复制时的第一帧也是这样，那时表面还是全黑的，不能用
+        let Some((_, res)) = got.filter(|(info, _)| info.LastPresentTime != 0) else {
+            if let Some(f) = self.gdi_fill() {
+                *frame = f;
+                return Ok(true);
+            }
+            return Ok(false);
+        };
+        self.fresh_since = None;
         unsafe {
-            if self.holding {
-                let _ = self.dup.ReleaseFrame();
-                self.holding = false;
-            }
-            let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
-            let mut res: Option<IDXGIResource> = None;
-            match self.dup.AcquireNextFrame(timeout_ms, &mut info, &mut res) {
-                Ok(()) => {}
-                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
-                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => anyhow::bail!("access_lost"),
-                Err(e) => return Err(e.into()),
-            }
-            self.holding = true;
-            // 只有光标移动、画面没变时 LastPresentTime 为 0
-            if info.LastPresentTime == 0 && frame.width == self.width && !frame.data.is_empty() {
-                return Ok(false);
-            }
             let Some(res) = res else { return Ok(false) };
             let tex: ID3D11Texture2D = res.cast()?;
             let staging = self.ensure_staging()?;
@@ -238,6 +342,38 @@ impl Capturer for DxgiCapturer {
         }
     }
 
+    fn next_gpu(&mut self, dst: &ID3D11Texture2D, timeout_ms: u32) -> anyhow::Result<bool> {
+        let got = self.acquire(timeout_ms)?;
+        unsafe {
+            // 复制重建后尺寸变了：调用方会按新尺寸重建目标纹理
+            let mut d = D3D11_TEXTURE2D_DESC::default();
+            dst.GetDesc(&mut d);
+            if (d.Width, d.Height) != (self.width, self.height) {
+                return Ok(false);
+            }
+            let Some((_, res)) = got.filter(|(info, _)| info.LastPresentTime != 0) else {
+                if let Some(f) = self.gdi_fill() {
+                    self.ctx.UpdateSubresource(dst, 0, None, f.data.as_ptr() as _, f.width * 4, 0);
+                    return Ok(true);
+                }
+                return Ok(false);
+            };
+            self.fresh_since = None;
+            let Some(res) = res else { return Ok(false) };
+            let tex: ID3D11Texture2D = res.cast()?;
+            self.ctx.CopyResource(dst, &tex);
+            Ok(true)
+        }
+    }
+
+    fn device(&self) -> Option<&ID3D11Device> {
+        Some(&self.device)
+    }
+
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     fn kind(&self) -> &'static str {
         "dxgi"
     }
@@ -246,8 +382,10 @@ impl Capturer for DxgiCapturer {
 impl Drop for DxgiCapturer {
     fn drop(&mut self) {
         if self.holding {
-            unsafe {
-                let _ = self.dup.ReleaseFrame();
+            if let Some(d) = &self.dup {
+                unsafe {
+                    let _ = d.ReleaseFrame();
+                }
             }
         }
     }
@@ -329,7 +467,15 @@ impl Capturer for GdiCapturer {
         frame.height = h;
         frame.data.clear();
         frame.data.extend_from_slice(dib.bytes());
+        // GDI 的 alpha 是 0；显卡视频处理器会按 alpha 混合（全变黑），统一填成不透明
+        for px in frame.data.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
         Ok(true)
+    }
+
+    fn size(&self) -> (u32, u32) {
+        (self.mon.width(), self.mon.height())
     }
 
     fn kind(&self) -> &'static str {
@@ -337,8 +483,9 @@ impl Capturer for GdiCapturer {
     }
 }
 
-pub fn open_capturer(mon: &Monitor, fps: u32) -> Box<dyn Capturer> {
-    match DxgiCapturer::new(mon) {
+/// 打开截屏。`prefer` 见 `DxgiCapturer::new`。
+pub fn open_capturer(mon: &Monitor, fps: u32, prefer: Option<&ID3D11Device>) -> Box<dyn Capturer> {
+    match DxgiCapturer::new(mon, prefer) {
         Ok(c) => Box::new(c),
         Err(e) => {
             tracing::info!("桌面复制不可用（{e}），改用 GDI 截屏");
@@ -349,62 +496,94 @@ pub fn open_capturer(mon: &Monitor, fps: u32) -> Box<dyn Capturer> {
 
 // ---------------- 光标 ----------------
 
-/// 把当前光标画进帧里。返回光标是否可见。
-pub fn draw_cursor(frame: &mut Frame, mon: &Monitor) -> bool {
-    unsafe {
-        let mut ci = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
-        if GetCursorInfo(&mut ci).is_err() || ci.flags.0 & CURSOR_SHOWING.0 == 0 || ci.hCursor.is_invalid() {
-            return false;
-        }
-        let mut ii = ICONINFO::default();
-        if GetIconInfo(ci.hCursor.into(), &mut ii).is_err() {
-            return false;
-        }
-        let (hx, hy) = (ii.xHotspot as i32, ii.yHotspot as i32);
-        if !ii.hbmMask.is_invalid() {
-            let _ = DeleteObject(ii.hbmMask.into());
-        }
-        if !ii.hbmColor.is_invalid() {
-            let _ = DeleteObject(ii.hbmColor.into());
-        }
-        const S: i32 = 64;
-        let p: POINT = ci.ptScreenPos;
-        let (x0, y0) = (p.x - hx - mon.rect.left, p.y - hy - mon.rect.top);
-        let (fw, fh) = (frame.width as i32, frame.height as i32);
-        if x0 >= fw || y0 >= fh || x0 + S <= 0 || y0 + S <= 0 {
-            return false;
-        }
-        let Ok(mut dib) = Dib::new(S as u32, S as u32) else { return false };
-        // 把光标下面的画面拷进小位图，画上光标，再拷回去
-        let copy = |dib: &mut Dib, back: bool, frame: &mut Frame| {
-            let d = dib.bytes_mut().as_mut_ptr();
-            for yy in 0..S {
-                let fy = y0 + yy;
-                if fy < 0 || fy >= fh {
-                    continue;
-                }
-                for xx in 0..S {
-                    let fx = x0 + xx;
-                    if fx < 0 || fx >= fw {
-                        continue;
-                    }
-                    let fi = ((fy * fw + fx) * 4) as usize;
-                    let di = ((yy * S + xx) * 4) as usize;
-                    if back {
-                        frame.data[fi..fi + 4].copy_from_slice(std::slice::from_raw_parts(d.add(di), 4));
-                    } else {
-                        std::ptr::copy_nonoverlapping(frame.data.as_ptr().add(fi), d.add(di), 4);
-                    }
-                }
+/// 光标贴片边长（像素）：先把光标底下这一块画面拿出来，用 GDI 画上光标再放回去。
+pub const CURSOR_PATCH: i32 = 64;
+
+/// 当前光标在某块屏幕画面上的位置。
+pub struct CursorPatch {
+    /// 贴片左上角（画面内坐标，可能在画面外）
+    pub x: i32,
+    pub y: i32,
+    cursor: HCURSOR,
+}
+
+impl CursorPatch {
+    /// 光标可见且落在这块屏幕（`fw`×`fh` 的画面）上时返回贴片位置。
+    pub fn current(mon: &Monitor, fw: u32, fh: u32) -> Option<Self> {
+        unsafe {
+            let mut ci = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
+            if GetCursorInfo(&mut ci).is_err() || ci.flags.0 & CURSOR_SHOWING.0 == 0 || ci.hCursor.is_invalid() {
+                return None;
             }
-        };
-        copy(&mut dib, false, frame);
-        let ok = DrawIconEx(dib.dc, 0, 0, ci.hCursor.into(), 0, 0, 0, None, DI_NORMAL).is_ok();
+            let mut ii = ICONINFO::default();
+            if GetIconInfo(ci.hCursor.into(), &mut ii).is_err() {
+                return None;
+            }
+            let (hx, hy) = (ii.xHotspot as i32, ii.yHotspot as i32);
+            if !ii.hbmMask.is_invalid() {
+                let _ = DeleteObject(ii.hbmMask.into());
+            }
+            if !ii.hbmColor.is_invalid() {
+                let _ = DeleteObject(ii.hbmColor.into());
+            }
+            let p: POINT = ci.ptScreenPos;
+            let (x, y) = (p.x - hx - mon.rect.left, p.y - hy - mon.rect.top);
+            let (fw, fh) = (fw as i32, fh as i32);
+            if x >= fw || y >= fh || x + CURSOR_PATCH <= 0 || y + CURSOR_PATCH <= 0 {
+                return None;
+            }
+            Some(Self { x, y, cursor: ci.hCursor })
+        }
+    }
+
+    /// 贴片与画面相交的部分：(画面内 x0, y0, x1, y1)。
+    pub fn clip(&self, fw: u32, fh: u32) -> (i32, i32, i32, i32) {
+        (self.x.max(0), self.y.max(0), (self.x + CURSOR_PATCH).min(fw as i32), (self.y + CURSOR_PATCH).min(fh as i32))
+    }
+
+    /// 在贴片（`CURSOR_PATCH`² 的 BGRA，事先填好光标底下的画面）上画光标。
+    pub fn draw(&self, pixels: &mut [u8]) -> bool {
+        let n = (CURSOR_PATCH * CURSOR_PATCH * 4) as usize;
+        if pixels.len() < n {
+            return false;
+        }
+        let Ok(mut dib) = Dib::new(CURSOR_PATCH as u32, CURSOR_PATCH as u32) else { return false };
+        dib.bytes_mut().copy_from_slice(&pixels[..n]);
+        let ok = unsafe { DrawIconEx(dib.dc, 0, 0, self.cursor.into(), 0, 0, 0, None, DI_NORMAL).is_ok() };
         if ok {
-            copy(&mut dib, true, frame);
+            pixels[..n].copy_from_slice(dib.bytes());
         }
         ok
     }
+}
+
+/// 把当前光标画进帧里。返回光标是否可见。
+pub fn draw_cursor(frame: &mut Frame, mon: &Monitor) -> bool {
+    let Some(p) = CursorPatch::current(mon, frame.width, frame.height) else { return false };
+    let (x0, y0, x1, y1) = p.clip(frame.width, frame.height);
+    let s = CURSOR_PATCH as usize;
+    let fw = frame.width as usize;
+    let mut patch = vec![0u8; s * s * 4];
+    let rows = |patch: &mut [u8], frame: &mut Frame, back: bool| {
+        for fy in y0..y1 {
+            let py = (fy - p.y) as usize;
+            let px = (x0 - p.x) as usize;
+            let w = (x1 - x0) as usize * 4;
+            let fi = (fy as usize * fw + x0 as usize) * 4;
+            let pi = (py * s + px) * 4;
+            if back {
+                frame.data[fi..fi + w].copy_from_slice(&patch[pi..pi + w]);
+            } else {
+                patch[pi..pi + w].copy_from_slice(&frame.data[fi..fi + w]);
+            }
+        }
+    };
+    rows(&mut patch, frame, false);
+    if !p.draw(&mut patch) {
+        return false;
+    }
+    rows(&mut patch, frame, true);
+    true
 }
 
 /// 截一张图（AI 截屏用）：GDI 抓整屏并画上光标。

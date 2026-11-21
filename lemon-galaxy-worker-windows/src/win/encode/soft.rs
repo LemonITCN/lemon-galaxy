@@ -1,4 +1,5 @@
-//! H.264 编码（openh264，软件编码，屏幕内容实时模式）。输出 Annex-B，关键帧带 SPS/PPS。
+//! H.264 软件编码（openh264，屏幕内容实时模式）。没有可用的硬件编码器时用。输出 Annex-B，关键帧带 SPS/PPS。
+//! openh264 的封装没有运行时改码率的接口，改码率要重建（会出关键帧）。
 
 use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, RateControlMode, UsageType};
 use openh264::formats::{BgraSliceU8, YUVBuffer};
@@ -59,33 +60,4 @@ impl H264 {
         }
         Ok(Some((data, matches!(kind, FrameType::IDR | FrameType::I))))
     }
-}
-
-/// 缩放 BGRA（双线性的简化：按面积取最近点，AI 截图够用）并编成 JPEG。
-pub fn jpeg(bgra: &[u8], width: u32, height: u32, max_w: u32, max_h: u32) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    let mut k = 1.0f64;
-    if max_w > 0 && width > max_w {
-        k = k.min(max_w as f64 / width as f64);
-    }
-    if max_h > 0 && height > max_h {
-        k = k.min(max_h as f64 / height as f64);
-    }
-    let (ow, oh) = (((width as f64 * k).round() as u32).max(1), ((height as f64 * k).round() as u32).max(1));
-    let mut rgb = vec![0u8; (ow * oh * 3) as usize];
-    for y in 0..oh {
-        let sy = ((y as f64 + 0.5) / k) as u32;
-        let sy = sy.min(height - 1);
-        for x in 0..ow {
-            let sx = (((x as f64 + 0.5) / k) as u32).min(width - 1);
-            let si = ((sy * width + sx) * 4) as usize;
-            let di = ((y * ow + x) * 3) as usize;
-            rgb[di] = bgra[si + 2];
-            rgb[di + 1] = bgra[si + 1];
-            rgb[di + 2] = bgra[si];
-        }
-    }
-    let mut out = Vec::new();
-    let enc = jpeg_encoder::Encoder::new(&mut out, 80);
-    enc.encode(&rgb, ow as u16, oh as u16, jpeg_encoder::ColorType::Rgb)?;
-    Ok((out, ow, oh))
 }
