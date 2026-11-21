@@ -213,6 +213,35 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
         return MockPeerSession(client: self, device: d)
     }
 
+    // MARK: RDP
+
+    private var rdpForwards: Set<String> = []
+
+    override func openRdp(hostId: String) async throws -> RdpTarget {
+        await delay(200)
+        guard let e = vault().first(where: { $0.id == hostId }),
+              case let .rdpHost(label, host, port, username, password, domain, jump, _, _, _) = e.data else {
+            throw GalaxyError.NotFound(detail: zh ? "主机不存在" : "Host not found")
+        }
+        let p = port == 0 ? 3389 : port
+        if let jump, !jump.isEmpty {
+            guard let d = device(jump), d.online || d.lanSeen else {
+                throw GalaxyError.Network(detail: zh ? "经由的设备离线" : "The relay device is offline")
+            }
+            let id = UUID().uuidString.lowercased()
+            lock.locked { _ = rdpForwards.insert(id) }
+            return RdpTarget(label: label, host: "127.0.0.1", port: 50_000 + p % 1000, username: username, domain: domain,
+                             password: password, forwarded: true, forwardId: id)
+        }
+        return RdpTarget(label: label, host: host, port: p, username: username, domain: domain, password: password, forwarded: false, forwardId: "")
+    }
+
+    override func closeRdp(forwardId: String) {
+        lock.locked { _ = rdpForwards.remove(forwardId) }
+    }
+
+    var openRdpForwardCount: Int { lock.locked { rdpForwards.count } }
+
     override func connectSsh(hostId: String, prompt: SecretPrompt) async throws -> SshSession {
         try await mockConnectSsh(hostId: hostId, prompt: prompt)
     }
@@ -364,6 +393,13 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
 
     override func isClosed() -> Bool { closed }
     override func wakeOnLan(mac: String) async throws { await client.delay(100) }
+
+    override func setPrivacy(on: Bool) async throws {
+        await client.delay(100)
+        guard MockData.capabilities(for: device).contains("privacy") else {
+            throw GalaxyError.Other(detail: client.zh ? "这台设备不支持隐私屏" : "This device does not support the privacy screen")
+        }
+    }
 
     override func disconnect() {
         guard !closed else { return }

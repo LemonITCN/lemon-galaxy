@@ -159,6 +159,17 @@ struct HostsView: View {
 
     @ViewBuilder private var hostsSection: some View {
         let rows = HostTree.rows(account.hosts, query: query, tag: tag, favoritesOnly: favoritesOnly)
+        if !account.rdpForwards.isEmpty {
+            Section {
+                ForEach(account.rdpForwards) { f in
+                    RdpForwardRow(forward: f).galaxyRow()
+                }
+            } header: {
+                Text(loc("rdp.forwards"))
+            } footer: {
+                HStack { Spacer(); InfoButton(text: loc("rdp.suspendInfo"), size: 13) }
+            }
+        }
         if let tag {
             Section {
                 HStack {
@@ -218,8 +229,8 @@ struct HostsView: View {
             chooser = item
         case .ssh(let e):
             app.openTerminal(.ssh(e.id))
-        case .rdp:
-            app.showToast(loc("rdp.unsupported"), error: true)
+        case .rdp(let e):
+            app.openRdp(e.id)
         }
     }
 
@@ -287,8 +298,8 @@ struct ConnectButtons: View {
             Button { app.openTerminal(.ssh(e.id)) } label: { Label(loc("action.terminal"), systemImage: "terminal") }
             Button { app.openFiles(.ssh(e.id)) } label: { Label(loc("action.sftp"), systemImage: "folder") }
             Button { app.openAI([AgentTarget(kind: .sshHost, id: e.id)]) } label: { Label(loc("action.ai"), systemImage: "sparkles") }
-        case .rdp:
-            Button {} label: { Label(loc("rdp.unsupportedShort"), systemImage: "display") }.disabled(true)
+        case .rdp(let e):
+            Button { app.openRdp(e.id) } label: { Label(loc("rdp.connect"), systemImage: "display") }
         }
     }
 }
@@ -349,7 +360,6 @@ struct HostRow: View {
 
     private var dimmed: Bool {
         if case .device(let d, _) = item { return !(d.online || d.lanSeen) }
-        if case .rdp = item { return true }
         return false
     }
 

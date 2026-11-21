@@ -40,6 +40,8 @@ public final class GalaxyAccount: ObservableObject {
     @Published public private(set) var devices: [DeviceInfo] = []
     @Published public private(set) var vault: [VaultEntry] = []
     @Published public private(set) var refreshing = false
+    /// 进行中的 RDP 端口转发
+    @Published public internal(set) var rdpForwards: [RdpForward] = []
 
     /// 服务器吊销了本机会话（回登录页，界面提示一下）
     public var onSessionRevoked: (() -> Void)?
@@ -312,6 +314,7 @@ public final class GalaxyAccount: ObservableObject {
     }
 
     public func closeAllPeers() {
+        closeAllRdp()
         for p in peers.values { p.session.disconnect() }
         peers.removeAll()
         for s in sshSessions.values { s.session.disconnect() }

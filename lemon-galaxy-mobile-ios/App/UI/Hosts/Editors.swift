@@ -263,7 +263,7 @@ struct RdpEditor: View {
                 TextField(loc("field.host"), text: $host).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                 TextField(loc("field.port"), text: $port).keyboardType(.numberPad)
             } footer: {
-                HStack { Spacer(); InfoButton(text: loc("rdp.unsupported"), size: 13) }
+                HStack { Spacer(); InfoButton(text: loc("rdp.info"), size: 13) }
             }
             Section {
                 TextField(loc("field.username"), text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()

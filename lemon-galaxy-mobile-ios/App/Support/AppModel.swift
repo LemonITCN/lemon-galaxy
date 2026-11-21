@@ -40,6 +40,10 @@ final class AppModel: ObservableObject {
     @Published var filesTarget: RemoteTarget?
     @Published var locked = false
     @Published var assistShown = false
+    /// 经设备转发的 RDP：先提示转发会被挂起，再交给 Windows App
+    @Published var rdpLaunch: RdpTarget?
+    /// 没装 Windows App
+    @Published var rdpAppMissing = false
 
     init() {
         let settings = AppSettings()
@@ -201,6 +205,37 @@ final class AppModel: ObservableObject {
         // 全屏层收起的动画结束后再弹新建对话，否则弹不出来
         DispatchQueue.main.asyncAfter(deadline: .now() + (wasCovered ? 0.6 : 0.05)) { [weak self] in
             self?.newConversationTargets = targets
+        }
+    }
+
+    /// RDP 主机：交给微软 Windows App（rdp:// 链接，不带密码）。经设备转发时先弹提示与「停止转发」
+    func openRdp(_ hostId: String) {
+        Task {
+            do {
+                let t = try await account.openRdp(hostId)
+                if t.forwarded {
+                    sessionsShown = false
+                    rdpLaunch = t
+                } else {
+                    launchRdp(t)
+                }
+            } catch {
+                showError(error)
+            }
+        }
+    }
+
+    /// 打开 Windows App；没装时提示去 App Store，并收掉刚开的转发
+    func launchRdp(_ t: RdpTarget) {
+        guard let url = RdpLink.url(for: t), UIApplication.shared.canOpenURL(url) else {
+            if t.forwarded { account.closeRdp(t.forwardId) }
+            rdpAppMissing = true
+            return
+        }
+        UIApplication.shared.open(url) { [weak self] ok in
+            guard !ok else { return }
+            if t.forwarded { self?.account.closeRdp(t.forwardId) }
+            self?.rdpAppMissing = true
         }
     }
 

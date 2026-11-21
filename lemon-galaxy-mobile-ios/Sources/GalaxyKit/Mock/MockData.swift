@@ -108,7 +108,7 @@ enum MockData {
 
     static func capabilities(for d: DeviceInfo) -> [String] {
         var c = ["terminal", "files", "exec", "port_forward"]
-        if d.platform == .windows || d.platform == .macos { c += ["display", "input", "clipboard", "screenshot", "ui_tree"] }
+        if d.platform == .windows || d.platform == .macos { c += ["display", "input", "clipboard", "screenshot", "ui_tree", "privacy"] }
         return c
     }
 

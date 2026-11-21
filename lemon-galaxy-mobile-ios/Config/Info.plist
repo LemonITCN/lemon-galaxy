@@ -25,6 +25,10 @@
 		<string>en</string>
 		<string>zh-Hans</string>
 	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>rdp</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

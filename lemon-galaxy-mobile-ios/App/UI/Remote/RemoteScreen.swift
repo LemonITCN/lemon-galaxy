@@ -168,6 +168,12 @@ struct RemoteScreen: View {
                             }
                         }
                     } label: { ToolLabel(icon: "command", label: loc("remote.shortcuts")) }
+                    if session.supportsPrivacy {
+                        ToolButton(icon: session.privacyOn ? "eye.slash.fill" : "eye.slash", label: loc("remote.privacy"), active: session.privacyOn) {
+                            session.setPrivacy(!session.privacyOn)
+                        }
+                        .disabled(session.privacyBusy)
+                    }
                     Menu {
                         Button { session.sendClipboard() } label: { Label(loc("remote.sendClipboard"), systemImage: "arrow.up.doc.on.clipboard") }
                         Button { session.fetchClipboard() } label: { Label(loc("remote.getClipboard"), systemImage: "arrow.down.doc") }

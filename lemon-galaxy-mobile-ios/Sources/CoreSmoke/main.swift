@@ -4,7 +4,7 @@ import GalaxyKit
 // 真内核冒烟测试（macOS 上用 xcframework 的 macOS 切片跑，验证 GalaxyKit 的适配层与 iOS 端用的同一套模型）：
 //   swift run galaxy-core-smoke <服务器地址> <用户名> <密码> [--no-ai] [--keep-device]
 // 内存 SecureStore、临时数据目录，按 iOS 主控端的配置（platform=ios, device_kind=mobile）登录，依次验证：
-// 登录 → 上线 → 设备列表 → 加密库读写 → 连接 worker → 命令执行 → 终端收发 → 文件读写 → 上传下载 → AI 对话 → SSH 直连 → 清理本机设备 → 登出。
+// 登录 → 上线 → 设备列表 → 加密库读写 → 连接 worker → 命令执行 → 终端收发 → 文件读写 → 上传下载 → AI 对话 → SSH 直连 → RDP 转发 → 隐私屏 → 清理本机设备 → 登出。
 // 每步打印结果与耗时；全部通过退出码 0，否则 1。
 
 let started = Date()
@@ -289,6 +289,35 @@ final class Smoke {
             _ = await step("vault_delete（临时 SSH 主机）") { try await account.delete(tmp.id) }
         }
 
+        // RDP：经设备转发时本机开临时端口，停止后端口关闭；直连时原样给地址；链接不含密码
+        if let rdp = await step("vault_save（临时 RDP 主机，经由 \(target.hostname)）", {
+            try await account.save(VaultEntry(id: "", folderId: nil, sort: 9999, data: .rdpHost(
+                label: "ios-smoke-rdp", host: "127.0.0.1", port: 3389, username: "smoke", password: "secret", domain: "LAB",
+                jumpDeviceId: target.id, tags: [], note: "", favorite: false), updatedAt: 0))
+        }) {
+            if let t = await step("open_rdp（经设备转发）", { try await account.openRdp(rdp.id) }) {
+                let link = RdpLink.string(for: t)
+                log("  转发 \(t.forwarded) 本机 \(t.host):\(t.port) 链接 \(link)")
+                if !t.forwarded || t.port == 0 || link.contains("secret") || RdpLink.url(for: t) == nil { log("失败 open_rdp 结果不对"); failures += 1 }
+                let listening = tcpConnectable(t.port)
+                account.closeRdp(t.forwardId)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                let afterClose = tcpConnectable(t.port)
+                log("  本机端口：转发中可连 \(listening)，停止后可连 \(afterClose)；记录的转发 \(account.rdpForwards.count) 条")
+                if !listening || afterClose || !account.rdpForwards.isEmpty { log("失败 close_rdp 没有关掉转发"); failures += 1 }
+            }
+            _ = await step("vault_delete（临时 RDP 主机）") { try await account.delete(rdp.id) }
+        }
+
+        if info.capabilities.contains("privacy") {
+            _ = await step("set_privacy(on/off)") {
+                try await peer.session.setPrivacy(on: true)
+                try await peer.session.setPrivacy(on: false)
+            }
+        } else {
+            log("  对端能力里没有 privacy：界面不显示隐私屏开关（这台被控端：\(info.capabilities.joined(separator: ",")))")
+        }
+
         account.setLanDiscovery(false)
         account.release(target.id)
 
@@ -319,6 +348,21 @@ final class Smoke {
         log(failures == 0 ? "全部通过" : "有 \(failures) 步失败")
         return failures == 0 ? 0 : 1
     }
+}
+
+/// 本机 127.0.0.1 的端口能不能连上（检查 RDP 转发的监听）
+func tcpConnectable(_ port: UInt16) -> Bool {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = port.bigEndian
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    let r = withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    return r == 0
 }
 
 let args = CommandLine.arguments

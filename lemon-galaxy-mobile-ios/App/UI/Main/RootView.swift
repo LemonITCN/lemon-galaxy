@@ -35,6 +35,19 @@ struct RootView: View {
                 .environment(\.loc, localization.strings)
                 .environment(\.palette, palette)
         }
+        .sheet(item: $app.rdpLaunch) { t in
+            RdpLaunchSheet(target: t)
+                .environmentObject(app)
+                .environmentObject(account)
+                .environment(\.loc, localization.strings)
+                .environment(\.palette, palette)
+        }
+        .alert(localization.strings("rdp.appMissingTitle"), isPresented: $app.rdpAppMissing) {
+            Link(localization.strings("rdp.openAppStore"), destination: RdpLink.appStoreURL)
+            Button(localization.strings("common.cancel"), role: .cancel) {}
+        } message: {
+            Text(localization.strings("rdp.appMissingMessage"))
+        }
         .sheet(item: $app.resumeChoice) { choice in
             RemoteSessionsSheet(target: choice.target, sessions: choice.sessions)
                 .environmentObject(app)

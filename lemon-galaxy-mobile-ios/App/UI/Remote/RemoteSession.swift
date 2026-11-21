@@ -26,6 +26,9 @@ final class RemoteSession: ObservableObject, Identifiable {
     @Published private(set) var peer: PeerConnection?
     @Published private(set) var fps = 0
     @Published var keyboardShown = false
+    /// 隐私屏：被控端本地屏幕黑掉、本地键鼠失效（会话结束时被控端自动关闭）
+    @Published private(set) var privacyOn = false
+    @Published private(set) var privacyBusy = false
     let canvas = RemoteCanvasView()
     weak var app: AppModel?
 
@@ -62,6 +65,23 @@ final class RemoteSession: ObservableObject, Identifiable {
     }
 
     var display: DisplayInfo? { displays.first { $0.id == displayId } }
+    /// 对端能力里有 "privacy" 才显示隐私屏开关
+    var supportsPrivacy: Bool { peer?.info.capabilities.contains("privacy") ?? false }
+
+    func setPrivacy(_ on: Bool) {
+        guard let peer, !privacyBusy else { return }
+        privacyBusy = true
+        Task {
+            do {
+                try await peer.session.setPrivacy(on: on)
+                privacyOn = on
+                app?.showToast(L(on ? "remote.privacyOn" : "remote.privacyOff"))
+            } catch {
+                app?.showToast(L("remote.privacyFailed", describeError(error)), error: true)
+            }
+            privacyBusy = false
+        }
+    }
     var viewOnly: Bool { !(peer?.info.permissions.control ?? true) }
 
     func start() {
