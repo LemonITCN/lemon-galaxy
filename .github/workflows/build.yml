@@ -183,7 +183,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: windows-${{ matrix.arch }}
-          path: dist/lemon-galaxy-worker.exe
+          path: |
+            dist/lemon-galaxy-worker.exe
+            dist/lemon-galaxy-server.exe
           if-no-files-found: error
 
   macos:
@@ -341,6 +343,9 @@ jobs:
               cp "art/windows-$a/lemon-galaxy-worker.exe" "out/lemon-galaxy-worker-$V-windows-$a.exe"
               WINS+=("$a")
             fi
+            if [ -f "art/windows-$a/lemon-galaxy-server.exe" ]; then
+              (cd "art/windows-$a" && zip -q "../../out/lemon-galaxy-server-$V-windows-$a.zip" lemon-galaxy-server.exe)
+            fi
           done
           (cd out && sha256sum * > SHA256SUMS.txt)
           SIGNED=false
@@ -364,6 +369,10 @@ jobs:
             for a in "${WINS[@]}"; do
               case $a in x86_64) W="x64" ;; *) W="ARM64" ;; esac
               echo "| Windows 被控端 | Windows 10 / Server 2016 及以上，$W | [lemon-galaxy-worker-$V-windows-$a.exe]($DL/lemon-galaxy-worker-$V-windows-$a.exe) |"
+            done
+            for a in "${WINS[@]}"; do
+              case $a in x86_64) W="x64" ;; *) W="ARM64" ;; esac
+              [ -f "out/lemon-galaxy-server-$V-windows-$a.zip" ] && echo "| 服务器（试用） | Windows，$W | [lemon-galaxy-server-$V-windows-$a.zip]($DL/lemon-galaxy-server-$V-windows-$a.zip) |"
             done
             echo "| 服务器（内嵌管理后台） | Linux x86_64 | [lemon-galaxy-server-$V-linux-x86_64.tar.gz]($DL/lemon-galaxy-server-$V-linux-x86_64.tar.gz) |"
             echo "| 服务器（内嵌管理后台） | Linux ARM64 | [lemon-galaxy-server-$V-linux-aarch64.tar.gz]($DL/lemon-galaxy-server-$V-linux-aarch64.tar.gz) |"
