@@ -985,3 +985,20 @@ impl From<galaxy_client::update::UpdateInfo> for UpdateInfo {
         Self { version: i.version, file_name: i.file_name, size: i.size, sha256: i.sha256, url: i.url, notes: i.notes }
     }
 }
+
+/// 打开 RDP 主机用的地址：直连时就是主机本身；经设备转发时是本机 127.0.0.1 上的临时端口。
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct RdpTarget {
+    pub label: String,
+    /// 远程桌面客户端要连的地址与端口
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub domain: Option<String>,
+    /// 加密库里保存的密码（界面决定是否交给系统客户端，如 Windows 的 cmdkey）
+    pub password: Option<String>,
+    /// 经设备转发时为真；用完调 close_rdp 关掉转发
+    pub forwarded: bool,
+    /// 用于 close_rdp
+    pub forward_id: String,
+}

@@ -79,6 +79,7 @@ struct Inner {
     sessions: Mutex<HashMap<DeviceId, Weak<galaxy_client::session::PeerSession>>>,
     models: Mutex<Option<galaxy_proto::api::AiModelsResp>>,
     server_version: Mutex<String>,
+    rdp_forwards: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(uniffi::Object)]
@@ -501,6 +502,7 @@ impl GalaxyClient {
                 sessions: Mutex::new(HashMap::new()),
                 models: Mutex::new(None),
                 server_version: Mutex::new(String::new()),
+                rdp_forwards: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -789,6 +791,44 @@ impl GalaxyClient {
     }
 
     // ---------------- 本机被控 ----------------
+
+    // ---------------- RDP ----------------
+
+    /// 准备连接加密库里的 rdp_host：设了经由设备时在本机开端口转发穿过那台设备。
+    /// 界面拿返回的地址交给系统的远程桌面客户端（Windows 的 mstsc，其他平台的微软 Windows App）。
+    pub async fn open_rdp(&self, host_id: String) -> Result<RdpTarget> {
+        let inner = self.inner.clone();
+        run(async move {
+            use galaxy_client::vault::VaultData as VD;
+            let entries = {
+                let g = inner.vault.lock().await;
+                g.as_ref().map(|v| v.entries.clone()).ok_or_else(|| other("加密库不可用"))?
+            };
+            let e = entries.get(&host_id).ok_or_else(|| GalaxyError::NotFound { detail: "主机不存在".into() })?;
+            let VD::RdpHost { label, host, port, username, password, domain, jump_device_id, .. } = &e.data else {
+                return Err(other("这个条目不是 RDP 主机"));
+            };
+            let port = if *port == 0 { 3389 } else { *port };
+            match jump_device_id.clone().filter(|d| !d.is_empty()) {
+                Some(d) => {
+                    let s = inner.session_for(parse_dev(&d)?).await?;
+                    let (local, h) = s.forward_port(0, host.clone(), port).await?;
+                    let id = uuid::Uuid::new_v4().simple().to_string();
+                    inner.rdp_forwards.lock().insert(id.clone(), h);
+                    Ok(RdpTarget { label: label.clone(), host: "127.0.0.1".into(), port: local, username: username.clone(), domain: domain.clone(), password: password.clone(), forwarded: true, forward_id: id })
+                }
+                None => Ok(RdpTarget { label: label.clone(), host: host.clone(), port, username: username.clone(), domain: domain.clone(), password: password.clone(), forwarded: false, forward_id: String::new() }),
+            }
+        })
+        .await
+    }
+
+    /// 关掉 open_rdp 开的端口转发。
+    pub fn close_rdp(&self, forward_id: String) {
+        if let Some(h) = self.inner.rdp_forwards.lock().remove(&forward_id) {
+            h.abort();
+        }
+    }
 
     // ---------------- 自动更新 ----------------
 

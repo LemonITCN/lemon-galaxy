@@ -103,6 +103,12 @@ async wake_on_lan(mac)
 - `SshSession`：`info()`、`is_closed()`、`open_terminal(options, sink) -> TerminalChannel`（没有断线继承，detach 即结束）、`files() -> FileClient`（SFTP，接口与设备的完全相同，`content` 搜索只看 2 MB 以内文件）、`exec(request) -> ExecResult`、`forward_port(local_port, remote_host, remote_port) -> PortForward`、`disconnect()`。
 - AI 对话的目标可以是 `SshHost`：用加密库里保存的凭据与已确认的主机密钥连接（对话里不能弹窗问密码，需要询问时报错提示先在主机列表里连一次）；SSH 主机没有图形界面，只有命令、文件、终端工具。
 
+## 3.1.1 RDP 主机
+
+- `open_rdp(host_id) -> RdpTarget`：加密库里的 `rdp_host`。设了 `jump_device_id` 时在本机 127.0.0.1 开临时端口，经那台 LemonGalaxy 设备转发到目标的 RDP 端口（目标在对方内网、不用开放端口）；否则直接给主机地址。
+- 界面把 `host:port`、用户名（与可选的保存密码）交给系统的远程桌面客户端：Windows 用 mstsc（密码可经 cmdkey 临时存入凭据管理器，用完删除），macOS / iOS / 安卓用微软 Windows App（`rdp://full%20address=s:host:port&username=s:...`，密码由用户在那边输入）。
+- `close_rdp(forward_id)`：关掉转发（经设备时用完要关）。iOS 上转发要应用留在前台才稳定。
+
 ## 3.2 TerminalScreen 与 H264Decoder（自绘界面用）
 
 - `TerminalScreen(rows, cols, scrollback)`：`feed(bytes)`、`resize`、`state(scroll_offset)`（带颜色分段的行、光标、标题、备用屏、应用光标键、括号粘贴、鼠标上报模式、历史长度、响铃计数）、`text_between`、`text`。颜色：0 默认，`0x0100_00nn` 调色板，`0x02RRGGBB` 真彩色；flags 1 粗 2 斜 4 下划线 8 反色。
