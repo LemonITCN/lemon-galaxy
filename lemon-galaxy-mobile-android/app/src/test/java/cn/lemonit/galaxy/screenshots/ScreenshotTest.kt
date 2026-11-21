@@ -77,6 +77,13 @@ import cn.lemonit.galaxy.ui.hosts.sshViaText
 import cn.lemonit.galaxy.ui.login.LoginScreen
 import cn.lemonit.galaxy.ui.remote.RemoteActions
 import cn.lemonit.galaxy.ui.remote.RemoteDesktopScreen
+import cn.lemonit.galaxy.ui.remote.RemotePanel
+import cn.lemonit.galaxy.ui.remote.RemoteViewState
+import cn.lemonit.galaxy.core.bridge.DisplayInfo
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.pinch
 import cn.lemonit.galaxy.ui.remote.RecordingSavedDialog
 import cn.lemonit.galaxy.core.bridge.RecordingInfo
 import cn.lemonit.galaxy.ui.settings.AboutInfo
@@ -419,46 +426,146 @@ class ScreenshotTest {
 
     private fun remote(
         dark: Boolean,
-        toolbar: Boolean,
-        keyboard: Boolean,
         name: String,
+        menu: Boolean = false,
+        panel: RemotePanel? = null,
+        keyboard: Boolean = false,
         privacy: Boolean = false,
         soundOn: Boolean = true,
         recording: Boolean = false,
+        displays: List<DisplayInfo>? = null,
+        then: (RemoteViewState) -> Unit = {},
     ) {
         val bytes = context.assets.open("mock/desktop_preview.jpg").use { it.readBytes() }
         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size).asImageBitmap()
-        shot(name, dark) {
-            RemoteDesktopScreen(
-                ui = Fixtures.remote(zh)
-                    .let { if (privacy) it.copy(privacySupported = true, privacyAllowed = true, privacyOn = true) else it }
-                    .copy(audioOn = soundOn, recordingSince = if (recording) MockData.NOW - 83_000 else null),
-                actions = noRemoteActions,
-                video = { m -> Image(bmp, null, contentScale = ContentScale.FillBounds, modifier = m) },
-                initialToolbarOpen = toolbar,
-                initialKeyboard = keyboard,
-            )
+        val view = RemoteViewState()
+        val base = Fixtures.remote(zh)
+            .let { if (privacy) it.copy(privacySupported = true, privacyAllowed = true, privacyOn = true) else it }
+            .let { if (displays != null) it.copy(displays = displays) else it }
+            .copy(audioOn = soundOn, recordingSince = if (recording) MockData.NOW - 83_000 else null)
+        val ui = mutableStateOf(base)
+        val actions = object : RemoteActions by noRemoteActions {
+            override fun onDisplay(id: UInt) {
+                ui.value = ui.value.copy(displayId = id)
+            }
+        }
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            GalaxyTheme(mode = if (dark) ThemeMode.DARK else ThemeMode.LIGHT) {
+                Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
+                    RemoteDesktopScreen(
+                        ui = ui.value,
+                        actions = actions,
+                        video = { m -> Image(bmp, null, contentScale = ContentScale.FillBounds, modifier = m) },
+                        initialMenuOpen = menu,
+                        initialPanel = panel,
+                        initialKeyboard = keyboard,
+                        state = view,
+                    )
+                }
+            }
+        }
+        compose.mainClock.advanceTimeBy(800)
+        // 手势要跟着时钟走：做手势时打开自动推进，做完再停住截图
+        compose.mainClock.autoAdvance = true
+        then(view)
+        compose.waitForIdle()
+        compose.mainClock.autoAdvance = false
+        compose.mainClock.advanceTimeBy(400)
+        capture(name, dark)
+    }
+
+    private val threeDisplays = listOf(
+        DisplayInfo(1u, "Built-in Retina Display", 2560u, 1440u, 2.0f, true, false),
+        DisplayInfo(2u, "DELL U2723QE", 2560u, 1440u, 1.0f, false, false),
+        DisplayInfo(3u, "LG HDR 4K", 3840u, 2160u, 1.5f, false, false),
+    )
+
+    /** 收起：右边缘只有一个贴边把手（绿点 = 直连，黄点 = 中转；圆点 = 几块屏） */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remoteHandleZhDark() = remote(true, "remote_handle", displays = threeDisplays)
+
+    @Test @Config(qualifiers = PHONE_ZH)
+    fun remoteHandlePortraitZhLight() = remote(false, "remote_handle", displays = threeDisplays)
+
+    /** 展开：右侧竖排菜单（不滚动） */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remoteMenuZhDark() = remote(true, "remote_menu", menu = true, displays = threeDisplays)
+
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remoteMenuEnLight() = remote(false, "remote_menu", menu = true)
+
+    @Test @Config(qualifiers = PHONE_ZH)
+    fun remoteMenuPortraitZhDark() = remote(true, "remote_menu", menu = true, displays = threeDisplays)
+
+    /** 二级面板：显示器 / 画质 / 视图 / 连接 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remotePanelDisplayZhDark() = remote(true, "remote_panel_display", panel = RemotePanel.DISPLAY, displays = threeDisplays)
+
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remotePanelDisplayEnLight() = remote(false, "remote_panel_display", panel = RemotePanel.DISPLAY, displays = threeDisplays)
+
+    @Test @Config(qualifiers = PHONE_ZH)
+    fun remotePanelDisplayPortraitZhDark() = remote(true, "remote_panel_display", panel = RemotePanel.DISPLAY, displays = threeDisplays)
+
+    /** 二级面板：快捷键 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remotePanelShortcutsZhDark() = remote(true, "remote_panel_shortcuts", panel = RemotePanel.SHORTCUTS)
+
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remotePanelShortcutsEnDark() = remote(true, "remote_panel_shortcuts", panel = RemotePanel.SHORTCUTS)
+
+    /** 二级面板：工具（声音开、隐私屏关） */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remotePanelToolsZhDark() = remote(true, "remote_panel_tools", panel = RemotePanel.TOOLS)
+
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remotePanelToolsEnLight() = remote(false, "remote_panel_tools", panel = RemotePanel.TOOLS)
+
+    /** 隐私屏已开：方块高亮 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remotePrivacyZhDark() = remote(true, "remote_privacy", panel = RemotePanel.TOOLS, privacy = true)
+
+    /** 声音已关：方块不高亮、图标为静音 */
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remoteSoundOffEnLight() = remote(false, "remote_sound_off", panel = RemotePanel.TOOLS, soundOn = false)
+
+    /** 录像中：工具里红色停止方块 + 计时，菜单“工具”项带红点 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remoteRecordingZhDark() = remote(true, "remote_recording", panel = RemotePanel.TOOLS, recording = true)
+
+    /** 录像中、菜单收起：左上角红点 + 计时，把手上的点变红 */
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remoteRecordingBadgeEnLight() = remote(false, "remote_recording_badge", recording = true)
+
+    /** 在把手上上滑：切到下一块显示器，上方提示“显示器 2 / 3” */
+    private fun displaySwitch(dark: Boolean) = remote(dark, "remote_display_switch", displays = threeDisplays) {
+        compose.onNodeWithTag("remote-dock-handle").performTouchInput {
+            down(center)
+            repeat(8) { moveBy(Offset(0f, -12f)) }
+            up()
         }
     }
 
     @Test @Config(qualifiers = PHONE_LAND_ZH)
-    fun remoteToolbarZhDark() = remote(true, toolbar = true, keyboard = false, name = "remote_toolbar")
+    fun remoteDisplaySwitchZhDark() = displaySwitch(true)
 
-    /** 隐私屏已开：工具栏开关高亮 */
-    @Test @Config(qualifiers = PHONE_LAND_ZH)
-    fun remotePrivacyZhDark() = remote(true, toolbar = true, keyboard = false, name = "remote_privacy", privacy = true)
-
-    /** 声音已关：开关不高亮、图标为静音 */
     @Test @Config(qualifiers = PHONE_LAND_EN)
-    fun remoteSoundOffEnLight() = remote(false, toolbar = true, keyboard = false, name = "remote_sound_off", soundOn = false)
+    fun remoteDisplaySwitchEnLight() = displaySwitch(false)
 
-    /** 录像中：工具栏里红色停止键 + 计时 */
+    /** 双指捏合放大：画面保持比例，超出部分裁掉，上方显示缩放倍数 */
+    private fun zoomed(dark: Boolean) = remote(dark, "remote_zoomed") {
+        compose.onNodeWithTag("remote-surface").performTouchInput {
+            val c = Offset(width * 0.3f, height * 0.4f)
+            pinch(c - Offset(40f, 0f), c - Offset(200f, 0f), c + Offset(40f, 0f), c + Offset(200f, 0f), 400)
+        }
+    }
+
     @Test @Config(qualifiers = PHONE_LAND_ZH)
-    fun remoteRecordingZhDark() = remote(true, toolbar = true, keyboard = false, name = "remote_recording", recording = true)
+    fun remoteZoomedZhDark() = zoomed(true)
 
-    /** 录像中、工具栏收起：左上角红点 + 计时 */
-    @Test @Config(qualifiers = PHONE_LAND_EN)
-    fun remoteRecordingBadgeEnLight() = remote(false, toolbar = false, keyboard = false, name = "remote_recording_badge", recording = true)
+    @Test @Config(qualifiers = PHONE_ZH)
+    fun remoteZoomedPortraitZhLight() = zoomed(false)
 
     private fun recordingSaved(dark: Boolean) = shotScreen("remote_recording_saved", dark) {
         val path = "Android/data/cn.lemonit.galaxy/files/Movies/LemonGalaxy/LemonGalaxy-Office PC-20261121-213000.mp4"
@@ -477,10 +584,10 @@ class ScreenshotTest {
     fun remoteRecordingSavedEnDark() = recordingSaved(true)
 
     @Test @Config(qualifiers = PHONE_LAND_EN)
-    fun remoteKeyboardEnLight() = remote(false, toolbar = false, keyboard = true, name = "remote_keyboard")
+    fun remoteKeyboardEnLight() = remote(false, "remote_keyboard", keyboard = true)
 
     @Test @Config(qualifiers = TABLET_ZH)
-    fun remoteTabletZhDark() = remote(true, toolbar = true, keyboard = false, name = "remote_toolbar")
+    fun remoteTabletZhDark() = remote(true, "remote_panel_display", panel = RemotePanel.DISPLAY, displays = threeDisplays)
 
     // ---------------- AI ----------------
 

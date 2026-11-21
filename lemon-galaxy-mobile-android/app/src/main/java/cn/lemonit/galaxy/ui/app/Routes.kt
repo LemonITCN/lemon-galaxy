@@ -24,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -465,11 +466,13 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
     val privacyOnText = stringResource(R.string.rd_privacy_on_toast)
     val privacyOffText = stringResource(R.string.rd_privacy_off_toast)
 
-    // 横屏全屏沉浸，离开时恢复
+    // 默认横屏，菜单里可切到竖屏（跟随重力在两个横向 / 两个竖向之间转）
+    var portrait by rememberSaveable { mutableStateOf(false) }
+    // 全屏沉浸，离开时恢复
     DisposableEffect(Unit) {
         val activity = context.findActivity()
         val oldOrientation = activity?.requestedOrientation
-        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        if (!portrait) activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         val window = activity?.window
         val insets = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
         insets?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -479,6 +482,11 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
             if (oldOrientation != null) activity.requestedOrientation = oldOrientation
             controller.stop()
         }
+    }
+    // 在记下原方向之后再改
+    LaunchedEffect(portrait) {
+        context.findActivity()?.requestedOrientation =
+            if (portrait) ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
     }
     // 声音只在前台播放：切后台停掉，回来按开关重新开始
     LifecycleStartEffect(controller) {
@@ -545,6 +553,14 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
             override fun onDisconnect() {
                 nav.pop()
             }
+
+            override fun onFiles() {
+                nav.push(Route.Files(TargetRef.Device(deviceId)))
+            }
+
+            override fun onRotate() {
+                portrait = !portrait
+            }
         },
         video = { modifier ->
             AndroidView(
@@ -557,6 +573,8 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
                         })
                     }
                 },
+                // 缓冲区固定为画面分辨率：放大时只缩放显示，不跟着视图尺寸重新分配（放大 5 倍时视图远大于屏幕）
+                update = { v -> if (ui.videoW > 0 && ui.videoH > 0) v.holder.setFixedSize(ui.videoW, ui.videoH) },
                 modifier = modifier,
             )
         },

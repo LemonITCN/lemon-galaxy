@@ -12,7 +12,6 @@ import cn.lemonit.galaxy.core.mock.AnnexB
 import cn.lemonit.galaxy.core.mock.MockData
 import cn.lemonit.galaxy.ui.files.FileBrowserController
 import cn.lemonit.galaxy.ui.remote.Hid
-import cn.lemonit.galaxy.ui.remote.Viewport
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -52,36 +51,6 @@ class LogicTest {
         assertFalse(AccountController.isValidServer("galaxy.example.com:99999#sha256-AbCdEf0123456789"))
         assertFalse(AccountController.isValidServer("galaxy.example.com:7443#md5-AbCdEf0123456789"))
         assertFalse(AccountController.isValidServer("https://galaxy.example.com:7443#sha256-AbCdEf0123456789"))
-    }
-
-    @Test
-    fun viewportLetterboxAndMapping() {
-        // 1920x1080 画面放进 1000x1000 视图：宽度占满，上下留黑边
-        val v = Viewport(1000f, 1000f, 1920, 1080)
-        assertEquals(1000f, v.contentW, 0.01f)
-        assertEquals(562.5f, v.contentH, 0.01f)
-        assertEquals(218.75f, v.top, 0.01f)
-        assertEquals(960 to 540, v.toRemote(500f, 500f))
-        assertEquals(0 to 0, v.toRemote(-50f, 0f))
-        assertEquals(1919 to 1079, v.toRemote(5000f, 5000f))
-        val (x, y) = v.toView(960, 540)
-        assertEquals(500f, x, 0.01f)
-        assertEquals(500f, y, 0.01f)
-    }
-
-    @Test
-    fun viewportZoomKeepsFocusAndClamps() {
-        val v = Viewport(1000f, 562.5f, 1920, 1080)
-        val z = v.zoomed(2f, 250f, 140f, 0f, 0f)
-        assertEquals(2f, z.zoom, 0.001f)
-        // 缩放中心下的被控像素保持不变
-        assertEquals(v.toRemote(250f, 140f), z.toRemote(250f, 140f))
-        // 平移被夹住：不露黑边
-        val far = z.panned(10_000f, 10_000f)
-        assertEquals(0f, far.left, 0.01f)
-        assertEquals(0f, far.top, 0.01f)
-        // 缩小不低于 1 倍
-        assertEquals(1f, v.zoomed(0.2f, 0f, 0f, 0f, 0f).zoom, 0.001f)
     }
 
     @Test
