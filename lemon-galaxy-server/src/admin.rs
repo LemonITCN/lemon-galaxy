@@ -908,17 +908,24 @@ async fn decorate_devices(st: &AppState, rows: Vec<(Vec<u8>, Value)>) -> anyhow:
 
 #[derive(Deserialize)]
 struct DeviceQ {
-    #[serde(flatten)]
-    page: PageQ,
+    page: Option<i64>,
+    page_size: Option<i64>,
+    q: Option<String>,
     user_id: Option<i64>,
     online: Option<bool>,
     kind: Option<String>,
 }
 
+impl DeviceQ {
+    fn pq(&self) -> PageQ {
+        PageQ { page: self.page, page_size: self.page_size, q: self.q.clone() }
+    }
+}
+
 async fn list_devices(State(st): State<St>, Admin(_s): Admin, Query(q): Query<DeviceQ>) -> AppResult<Json<Value>> {
-    let like = q.page.like();
+    let like = q.pq().like();
     let uid = q.user_id;
-    let kind = q.kind.clone();
+    let kind = q.kind.clone().filter(|k| !k.is_empty());
     let rows = st
         .db
         .call(move |c| {
@@ -944,7 +951,7 @@ async fn list_devices(State(st): State<St>, Admin(_s): Admin, Query(q): Query<De
         items.retain(|d| d["online"].as_bool() == Some(on));
     }
     let total = items.len();
-    let (limit, offset) = q.page.limits();
+    let (limit, offset) = q.pq().limits();
     let items: Vec<Value> = items.into_iter().skip(offset as usize).take(limit as usize).collect();
     Ok(Json(json!({ "items": items, "total": total })))
 }
@@ -1050,8 +1057,9 @@ async fn terminate_connection(State(st): State<St>, Admin(s): Admin, Path(id): P
 
 #[derive(Deserialize)]
 struct AuditQ {
-    #[serde(flatten)]
-    page: PageQ,
+    page: Option<i64>,
+    page_size: Option<i64>,
+    q: Option<String>,
     from: Option<i64>,
     to: Option<i64>,
     actor_type: Option<String>,
@@ -1059,8 +1067,9 @@ struct AuditQ {
 }
 
 async fn list_audit(State(st): State<St>, Admin(_s): Admin, Query(q): Query<AuditQ>) -> AppResult<Json<Value>> {
-    let (limit, offset) = q.page.limits();
-    let like = q.page.like();
+    let pq = PageQ { page: q.page, page_size: q.page_size, q: q.q.clone() };
+    let (limit, offset) = pq.limits();
+    let like = pq.like();
     let from = q.from.unwrap_or(0);
     let to = q.to.unwrap_or(i64::MAX);
     let at = q.actor_type.clone().filter(|s| !s.is_empty());

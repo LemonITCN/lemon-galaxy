@@ -23,3 +23,4 @@ lemon-galaxy-control-macos/Vendor/
 lemon-galaxy-control-macos/Sources/LemonGalaxy/Core/Generated/galaxy_ffi.swift
 lemon-galaxy-mobile-ios/Vendor/
 lemon-galaxy-mobile-android/app/src/main/java/uniffi/
+.claude/

@@ -59,7 +59,9 @@ function niceMax(v: number): number {
 
 const max = computed(() => {
   const top = Math.max(0, ...props.points.map((p) => p.value))
-  if (!props.binary || top < 1024) return niceMax(top)
+  // 字节图至少显示到 1 KB，避免出现 0.5 B 这样的刻度
+  if (props.binary && top < 1024) return 1024
+  if (!props.binary) return niceMax(top)
   const unit = 1024 ** Math.floor(Math.log(top) / Math.log(1024))
   return niceMax(top / unit) * unit
 })

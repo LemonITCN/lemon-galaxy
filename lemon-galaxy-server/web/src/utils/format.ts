@@ -24,7 +24,7 @@ export function fromNow(ms: number | null | undefined): string {
 export function bytes(n: number | null | undefined): string {
   if (!n || n < 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
-  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)))
+  const i = Math.max(0, Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024))))
   const v = n / 1024 ** i
   return `${i === 0 || v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`
 }
