@@ -1,0 +1,4 @@
+# uniffi 生成绑定的配置。Swift / Kotlin 用默认值；C#（Windows 主控端）放进自己的命名空间。
+[bindings.csharp]
+namespace = "LemonGalaxy.Core.Native"
+cdylib_name = "galaxy_ffi"

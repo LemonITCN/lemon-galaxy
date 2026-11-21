@@ -8,7 +8,7 @@ import Foundation
 //   - 其余任意用户名密码都能登录。
 
 final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked Sendable {
-    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     static let version = "0.1.0-mock"
 
     let store: SecureStore
@@ -35,7 +35,7 @@ final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked 
         self.options = options
         self._devices = MockData.devices(zh: zh)
         self._vault = MockData.vault(zh: zh)
-        super.init(noPointer: NoPointer())
+        super.init(noHandle: NoHandle())
     }
 
     deinit { timers.forEach { $0.cancel() } }
@@ -334,7 +334,7 @@ final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked 
 // MARK: - PeerSession
 
 final class MockPeerSession: PeerSession, @unchecked Sendable {
-    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     let client: MockGalaxyClient
     let device: DeviceInfo
     private weak var listener: PeerListener?
@@ -347,7 +347,7 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
         self.client = client
         self.device = device
         self.currentPath = MockData.path(for: device)
-        super.init(noPointer: NoPointer())
+        super.init(noHandle: NoHandle())
     }
 
     deinit { timer?.cancel() }
@@ -446,9 +446,9 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
 }
 
 final class MockPortForward: PortForward, @unchecked Sendable {
-    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     let port: UInt16
-    init(port: UInt16) { self.port = port; super.init(noPointer: NoPointer()) }
+    init(port: UInt16) { self.port = port; super.init(noHandle: NoHandle()) }
     override func localPort() -> UInt16 { port }
     override func stop() {}
 }

@@ -2,7 +2,7 @@ import Foundation
 
 /// 模拟远端文件系统：内存里的一棵树。传输按定时器推进进度，文件名含 fail 的传到 60% 失败，用来演示重试。
 final class MockFileClient: FileClient, @unchecked Sendable {
-    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     final class Node {
         var name: String
         var kind: FileKind
@@ -33,7 +33,7 @@ final class MockFileClient: FileClient, @unchecked Sendable {
         case .macos: homePath = "/Users/\(username)"
         default: homePath = username == "root" ? "/root" : "/home/\(username)"
         }
-        super.init(noPointer: NoPointer())
+        super.init(noHandle: NoHandle())
         seed()
     }
 
@@ -275,7 +275,7 @@ final class MockFileClient: FileClient, @unchecked Sendable {
 
 /// 模拟传输：按约 40 MB/s 推进进度，支持暂停、继续、取消。
 final class MockTransfer: Transfer, @unchecked Sendable {
-    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     private let total: UInt64
     private var done: UInt64 = 0
     private var paused = false
@@ -295,7 +295,7 @@ final class MockTransfer: Transfer, @unchecked Sendable {
         self.listener = listener
         self.completion = completion
         self.timer = DispatchSource.makeTimerSource(queue: queue)
-        super.init(noPointer: NoPointer())
+        super.init(noHandle: NoHandle())
         // 每 100 毫秒推进一次；小文件至少走 3 步，好看到进度
         let step = speedScale == 0 ? total / 3 + 1 : max(total / 3, UInt64(4_000_000))
         timer.schedule(deadline: .now() + 0.1, repeating: speedScale == 0 ? 0.001 : 0.1)

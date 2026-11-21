@@ -1,6 +1,6 @@
 # 内核接口（galaxy-ffi）
 
-Rust 内核通过 uniffi 0.29 导出给各端原生界面：Swift（macOS / iOS）、Kotlin（Android）、C#（Windows，后续）。
+Rust 内核通过 uniffi 0.32.0 导出给各端原生界面：Swift（macOS / iOS）、Kotlin（Android）、C#（Windows 主控端，用 tools/uniffi-bindgen-cs 生成，`scripts/gen-csharp-bindings.sh`）。三种生成器必须对应同一个 uniffi 版本，升级时一起升。
 **以源码为准**：`lemon-galaxy-common-rust/galaxy-ffi/src/`（`types.rs` 记录与枚举、`callbacks.rs` 回调接口、`client.rs` / `session.rs` / `agent.rs` / `host.rs` 对象）。本文件是概览。
 
 约定：

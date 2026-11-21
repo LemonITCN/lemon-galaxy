@@ -8,7 +8,10 @@ uniffi::setup_scaffolding!();
 mod agent;
 mod callbacks;
 mod client;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod decode;
 mod host;
+mod screen;
 mod session;
 mod types;
 

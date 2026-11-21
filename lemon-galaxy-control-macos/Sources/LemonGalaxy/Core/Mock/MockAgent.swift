@@ -3,7 +3,7 @@ import Foundation
 /// 模拟 AI 智能体：按脚本流式吐文字、提出工具调用、按权限档位决定是否要确认、等用户回应确认卡片 / 提问 / 密码。
 /// 事件全部走 AgentListener.on_event，和真内核一致。
 final class MockAgentConversation: AgentConversation, @unchecked Sendable {
-    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     private let client: MockGalaxyClient
     private let config: ConversationConfig
     var listener: AgentListener?
@@ -32,7 +32,7 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
         self.trustUntil = config.trustMinutes.map { Date().addingTimeInterval(TimeInterval($0) * 60) }
         self.titleText = config.title ?? ""
         self.convId = "conv-" + UUID().uuidString.prefix(8).lowercased()
-        super.init(noPointer: NoPointer())
+        super.init(noHandle: NoHandle())
     }
 
     private var zh: Bool { client.zh }

@@ -12,10 +12,11 @@ func bridgeUnimplemented(_ function: String = #function) -> Never {
 public func coreVersion() -> String { "0.0.0-mirror" }
 public func coreInit(config: CoreConfig) {}
 public func coreSetLocale(locale: String) {}
+public func coreLogPath() -> String { "" }
 
 // MARK: - 记录与枚举
 
-public struct AgentTarget {
+public struct AgentTarget: Equatable, Hashable {
     public var kind: AgentTargetKind
     public var id: String
 
@@ -25,30 +26,17 @@ public struct AgentTarget {
         self.kind = kind
         self.id = id
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension AgentTarget: Sendable {}
 #endif
 
-extension AgentTarget: Equatable, Hashable {
-    public static func ==(lhs: AgentTarget, rhs: AgentTarget) -> Bool {
-        if lhs.kind != rhs.kind {
-            return false
-        }
-        if lhs.id != rhs.id {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(kind)
-        hasher.combine(id)
-    }
-}
-
-public struct AiModel {
+public struct AiModel: Equatable, Hashable {
     public var providerId: UInt64
     public var providerName: String
     public var id: String
@@ -68,50 +56,17 @@ public struct AiModel {
         self.tools = tools
         self.contextLength = contextLength
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension AiModel: Sendable {}
 #endif
 
-extension AiModel: Equatable, Hashable {
-    public static func ==(lhs: AiModel, rhs: AiModel) -> Bool {
-        if lhs.providerId != rhs.providerId {
-            return false
-        }
-        if lhs.providerName != rhs.providerName {
-            return false
-        }
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.vision != rhs.vision {
-            return false
-        }
-        if lhs.tools != rhs.tools {
-            return false
-        }
-        if lhs.contextLength != rhs.contextLength {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(providerId)
-        hasher.combine(providerName)
-        hasher.combine(id)
-        hasher.combine(name)
-        hasher.combine(vision)
-        hasher.combine(tools)
-        hasher.combine(contextLength)
-    }
-}
-
-public struct AiModels {
+public struct AiModels: Equatable, Hashable {
     public var enabled: Bool
     public var maxMode: AiMode
     public var items: [AiModel]
@@ -123,34 +78,17 @@ public struct AiModels {
         self.maxMode = maxMode
         self.items = items
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension AiModels: Sendable {}
 #endif
 
-extension AiModels: Equatable, Hashable {
-    public static func ==(lhs: AiModels, rhs: AiModels) -> Bool {
-        if lhs.enabled != rhs.enabled {
-            return false
-        }
-        if lhs.maxMode != rhs.maxMode {
-            return false
-        }
-        if lhs.items != rhs.items {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(enabled)
-        hasher.combine(maxMode)
-        hasher.combine(items)
-    }
-}
-
-public struct AssistInfo {
+public struct AssistInfo: Equatable, Hashable {
     public var deviceCode: String
     public var code: String
 
@@ -160,30 +98,17 @@ public struct AssistInfo {
         self.deviceCode = deviceCode
         self.code = code
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension AssistInfo: Sendable {}
 #endif
 
-extension AssistInfo: Equatable, Hashable {
-    public static func ==(lhs: AssistInfo, rhs: AssistInfo) -> Bool {
-        if lhs.deviceCode != rhs.deviceCode {
-            return false
-        }
-        if lhs.code != rhs.code {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(deviceCode)
-        hasher.combine(code)
-    }
-}
-
-public struct CaptureOptions {
+public struct CaptureOptions: Equatable, Hashable {
     public var maxFps: UInt32
     public var bitrateKbps: UInt32
     public var codecs: [VideoCodec]
@@ -195,34 +120,17 @@ public struct CaptureOptions {
         self.bitrateKbps = bitrateKbps
         self.codecs = codecs
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension CaptureOptions: Sendable {}
 #endif
 
-extension CaptureOptions: Equatable, Hashable {
-    public static func ==(lhs: CaptureOptions, rhs: CaptureOptions) -> Bool {
-        if lhs.maxFps != rhs.maxFps {
-            return false
-        }
-        if lhs.bitrateKbps != rhs.bitrateKbps {
-            return false
-        }
-        if lhs.codecs != rhs.codecs {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(maxFps)
-        hasher.combine(bitrateKbps)
-        hasher.combine(codecs)
-    }
-}
-
-public struct CaptureStarted {
+public struct CaptureStarted: Equatable, Hashable {
     public var width: UInt32
     public var height: UInt32
     public var codec: VideoCodec
@@ -234,34 +142,17 @@ public struct CaptureStarted {
         self.height = height
         self.codec = codec
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension CaptureStarted: Sendable {}
 #endif
 
-extension CaptureStarted: Equatable, Hashable {
-    public static func ==(lhs: CaptureStarted, rhs: CaptureStarted) -> Bool {
-        if lhs.width != rhs.width {
-            return false
-        }
-        if lhs.height != rhs.height {
-            return false
-        }
-        if lhs.codec != rhs.codec {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(width)
-        hasher.combine(height)
-        hasher.combine(codec)
-    }
-}
-
-public struct ConversationConfig {
+public struct ConversationConfig: Equatable, Hashable {
     public var providerId: UInt64
     public var modelId: String
     public var targets: [AgentTarget]
@@ -287,50 +178,17 @@ public struct ConversationConfig {
         self.trustMinutes = trustMinutes
         self.title = title
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension ConversationConfig: Sendable {}
 #endif
 
-extension ConversationConfig: Equatable, Hashable {
-    public static func ==(lhs: ConversationConfig, rhs: ConversationConfig) -> Bool {
-        if lhs.providerId != rhs.providerId {
-            return false
-        }
-        if lhs.modelId != rhs.modelId {
-            return false
-        }
-        if lhs.targets != rhs.targets {
-            return false
-        }
-        if lhs.mode != rhs.mode {
-            return false
-        }
-        if lhs.planFirst != rhs.planFirst {
-            return false
-        }
-        if lhs.trustMinutes != rhs.trustMinutes {
-            return false
-        }
-        if lhs.title != rhs.title {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(providerId)
-        hasher.combine(modelId)
-        hasher.combine(targets)
-        hasher.combine(mode)
-        hasher.combine(planFirst)
-        hasher.combine(trustMinutes)
-        hasher.combine(title)
-    }
-}
-
-public struct ConversationSummary {
+public struct ConversationSummary: Equatable, Hashable {
     public var id: String
     public var title: String
     public var modelId: String
@@ -354,46 +212,17 @@ public struct ConversationSummary {
         self.updatedAt = updatedAt
         self.config = config
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension ConversationSummary: Sendable {}
 #endif
 
-extension ConversationSummary: Equatable, Hashable {
-    public static func ==(lhs: ConversationSummary, rhs: ConversationSummary) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.title != rhs.title {
-            return false
-        }
-        if lhs.modelId != rhs.modelId {
-            return false
-        }
-        if lhs.targetNames != rhs.targetNames {
-            return false
-        }
-        if lhs.updatedAt != rhs.updatedAt {
-            return false
-        }
-        if lhs.config != rhs.config {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(title)
-        hasher.combine(modelId)
-        hasher.combine(targetNames)
-        hasher.combine(updatedAt)
-        hasher.combine(config)
-    }
-}
-
-public struct CoreConfig {
+public struct CoreConfig: Equatable, Hashable {
     public var dataDir: String
     public var cacheDir: String
     public var logLevel: String
@@ -417,58 +246,17 @@ public struct CoreConfig {
         self.hostname = hostname
         self.locale = locale
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension CoreConfig: Sendable {}
 #endif
 
-extension CoreConfig: Equatable, Hashable {
-    public static func ==(lhs: CoreConfig, rhs: CoreConfig) -> Bool {
-        if lhs.dataDir != rhs.dataDir {
-            return false
-        }
-        if lhs.cacheDir != rhs.cacheDir {
-            return false
-        }
-        if lhs.logLevel != rhs.logLevel {
-            return false
-        }
-        if lhs.platform != rhs.platform {
-            return false
-        }
-        if lhs.deviceKind != rhs.deviceKind {
-            return false
-        }
-        if lhs.appVersion != rhs.appVersion {
-            return false
-        }
-        if lhs.osVersion != rhs.osVersion {
-            return false
-        }
-        if lhs.hostname != rhs.hostname {
-            return false
-        }
-        if lhs.locale != rhs.locale {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(dataDir)
-        hasher.combine(cacheDir)
-        hasher.combine(logLevel)
-        hasher.combine(platform)
-        hasher.combine(deviceKind)
-        hasher.combine(appVersion)
-        hasher.combine(osVersion)
-        hasher.combine(hostname)
-        hasher.combine(locale)
-    }
-}
-
-public struct DeviceInfo {
+public struct DeviceInfo: Equatable, Hashable {
     public var id: String
     public var kind: DeviceKind
     public var platform: Platform
@@ -496,66 +284,17 @@ public struct DeviceInfo {
         self.lastSeenAt = lastSeenAt
         self.isSelf = isSelf
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension DeviceInfo: Sendable {}
 #endif
 
-extension DeviceInfo: Equatable, Hashable {
-    public static func ==(lhs: DeviceInfo, rhs: DeviceInfo) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.kind != rhs.kind {
-            return false
-        }
-        if lhs.platform != rhs.platform {
-            return false
-        }
-        if lhs.hostname != rhs.hostname {
-            return false
-        }
-        if lhs.osVersion != rhs.osVersion {
-            return false
-        }
-        if lhs.arch != rhs.arch {
-            return false
-        }
-        if lhs.appVersion != rhs.appVersion {
-            return false
-        }
-        if lhs.online != rhs.online {
-            return false
-        }
-        if lhs.lanSeen != rhs.lanSeen {
-            return false
-        }
-        if lhs.lastSeenAt != rhs.lastSeenAt {
-            return false
-        }
-        if lhs.isSelf != rhs.isSelf {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(kind)
-        hasher.combine(platform)
-        hasher.combine(hostname)
-        hasher.combine(osVersion)
-        hasher.combine(arch)
-        hasher.combine(appVersion)
-        hasher.combine(online)
-        hasher.combine(lanSeen)
-        hasher.combine(lastSeenAt)
-        hasher.combine(isSelf)
-    }
-}
-
-public struct DisplayInfo {
+public struct DisplayInfo: Equatable, Hashable {
     public var id: UInt32
     public var name: String
     public var width: UInt32
@@ -575,50 +314,17 @@ public struct DisplayInfo {
         self.primary = primary
         self.isVirtual = isVirtual
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension DisplayInfo: Sendable {}
 #endif
 
-extension DisplayInfo: Equatable, Hashable {
-    public static func ==(lhs: DisplayInfo, rhs: DisplayInfo) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.width != rhs.width {
-            return false
-        }
-        if lhs.height != rhs.height {
-            return false
-        }
-        if lhs.scale != rhs.scale {
-            return false
-        }
-        if lhs.primary != rhs.primary {
-            return false
-        }
-        if lhs.isVirtual != rhs.isVirtual {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(name)
-        hasher.combine(width)
-        hasher.combine(height)
-        hasher.combine(scale)
-        hasher.combine(primary)
-        hasher.combine(isVirtual)
-    }
-}
-
-public struct DisplayOptions {
+public struct DisplayOptions: Equatable, Hashable {
     public var displayId: UInt32
     public var maxFps: UInt32
     public var bitrateKbps: UInt32
@@ -634,42 +340,17 @@ public struct DisplayOptions {
         self.codecs = codecs
         self.viewOnly = viewOnly
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension DisplayOptions: Sendable {}
 #endif
 
-extension DisplayOptions: Equatable, Hashable {
-    public static func ==(lhs: DisplayOptions, rhs: DisplayOptions) -> Bool {
-        if lhs.displayId != rhs.displayId {
-            return false
-        }
-        if lhs.maxFps != rhs.maxFps {
-            return false
-        }
-        if lhs.bitrateKbps != rhs.bitrateKbps {
-            return false
-        }
-        if lhs.codecs != rhs.codecs {
-            return false
-        }
-        if lhs.viewOnly != rhs.viewOnly {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(displayId)
-        hasher.combine(maxFps)
-        hasher.combine(bitrateKbps)
-        hasher.combine(codecs)
-        hasher.combine(viewOnly)
-    }
-}
-
-public struct EnvVar {
+public struct EnvVar: Equatable, Hashable {
     public var name: String
     public var value: String
 
@@ -679,30 +360,17 @@ public struct EnvVar {
         self.name = name
         self.value = value
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension EnvVar: Sendable {}
 #endif
 
-extension EnvVar: Equatable, Hashable {
-    public static func ==(lhs: EnvVar, rhs: EnvVar) -> Bool {
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.value != rhs.value {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(name)
-        hasher.combine(value)
-    }
-}
-
-public struct ExecRequest {
+public struct ExecRequest: Equatable, Hashable {
     public var command: String
     public var shell: String?
     public var cwd: String?
@@ -718,42 +386,17 @@ public struct ExecRequest {
         self.timeoutMs = timeoutMs
         self.maxOutput = maxOutput
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension ExecRequest: Sendable {}
 #endif
 
-extension ExecRequest: Equatable, Hashable {
-    public static func ==(lhs: ExecRequest, rhs: ExecRequest) -> Bool {
-        if lhs.command != rhs.command {
-            return false
-        }
-        if lhs.shell != rhs.shell {
-            return false
-        }
-        if lhs.cwd != rhs.cwd {
-            return false
-        }
-        if lhs.timeoutMs != rhs.timeoutMs {
-            return false
-        }
-        if lhs.maxOutput != rhs.maxOutput {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(command)
-        hasher.combine(shell)
-        hasher.combine(cwd)
-        hasher.combine(timeoutMs)
-        hasher.combine(maxOutput)
-    }
-}
-
-public struct ExecResult {
+public struct ExecResult: Equatable, Hashable {
     public var code: Int32?
     public var stdout: String
     public var stderr: String
@@ -771,46 +414,17 @@ public struct ExecResult {
         self.truncated = truncated
         self.durationMs = durationMs
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension ExecResult: Sendable {}
 #endif
 
-extension ExecResult: Equatable, Hashable {
-    public static func ==(lhs: ExecResult, rhs: ExecResult) -> Bool {
-        if lhs.code != rhs.code {
-            return false
-        }
-        if lhs.stdout != rhs.stdout {
-            return false
-        }
-        if lhs.stderr != rhs.stderr {
-            return false
-        }
-        if lhs.timedOut != rhs.timedOut {
-            return false
-        }
-        if lhs.truncated != rhs.truncated {
-            return false
-        }
-        if lhs.durationMs != rhs.durationMs {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(code)
-        hasher.combine(stdout)
-        hasher.combine(stderr)
-        hasher.combine(timedOut)
-        hasher.combine(truncated)
-        hasher.combine(durationMs)
-    }
-}
-
-public struct FileEntry {
+public struct FileEntry: Equatable, Hashable {
     public var name: String
     public var path: String
     public var kind: FileKind
@@ -834,58 +448,17 @@ public struct FileEntry {
         self.group = group
         self.linkTarget = linkTarget
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension FileEntry: Sendable {}
 #endif
 
-extension FileEntry: Equatable, Hashable {
-    public static func ==(lhs: FileEntry, rhs: FileEntry) -> Bool {
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.path != rhs.path {
-            return false
-        }
-        if lhs.kind != rhs.kind {
-            return false
-        }
-        if lhs.size != rhs.size {
-            return false
-        }
-        if lhs.mode != rhs.mode {
-            return false
-        }
-        if lhs.modifiedAt != rhs.modifiedAt {
-            return false
-        }
-        if lhs.owner != rhs.owner {
-            return false
-        }
-        if lhs.group != rhs.group {
-            return false
-        }
-        if lhs.linkTarget != rhs.linkTarget {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(name)
-        hasher.combine(path)
-        hasher.combine(kind)
-        hasher.combine(size)
-        hasher.combine(mode)
-        hasher.combine(modifiedAt)
-        hasher.combine(owner)
-        hasher.combine(group)
-        hasher.combine(linkTarget)
-    }
-}
-
-public struct HostAccount {
+public struct HostAccount: Equatable, Hashable {
     public var userId: UInt64
     public var username: String
     public var displayName: String
@@ -901,42 +474,17 @@ public struct HostAccount {
         self.status = status
         self.policy = policy
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension HostAccount: Sendable {}
 #endif
 
-extension HostAccount: Equatable, Hashable {
-    public static func ==(lhs: HostAccount, rhs: HostAccount) -> Bool {
-        if lhs.userId != rhs.userId {
-            return false
-        }
-        if lhs.username != rhs.username {
-            return false
-        }
-        if lhs.displayName != rhs.displayName {
-            return false
-        }
-        if lhs.status != rhs.status {
-            return false
-        }
-        if lhs.policy != rhs.policy {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(userId)
-        hasher.combine(username)
-        hasher.combine(displayName)
-        hasher.combine(status)
-        hasher.combine(policy)
-    }
-}
-
-public struct HostEvent {
+public struct HostEvent: Equatable, Hashable {
     public var at: Int64
     public var session: String
     public var user: String
@@ -962,50 +510,17 @@ public struct HostEvent {
         self.ai = ai
         self.level = level
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension HostEvent: Sendable {}
 #endif
 
-extension HostEvent: Equatable, Hashable {
-    public static func ==(lhs: HostEvent, rhs: HostEvent) -> Bool {
-        if lhs.at != rhs.at {
-            return false
-        }
-        if lhs.session != rhs.session {
-            return false
-        }
-        if lhs.user != rhs.user {
-            return false
-        }
-        if lhs.kind != rhs.kind {
-            return false
-        }
-        if lhs.detail != rhs.detail {
-            return false
-        }
-        if lhs.ai != rhs.ai {
-            return false
-        }
-        if lhs.level != rhs.level {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(at)
-        hasher.combine(session)
-        hasher.combine(user)
-        hasher.combine(kind)
-        hasher.combine(detail)
-        hasher.combine(ai)
-        hasher.combine(level)
-    }
-}
-
-public struct HostPolicy {
+public struct HostPolicy: Equatable, Hashable {
     public var systemUser: String
     public var view: Bool
     public var control: Bool
@@ -1029,58 +544,17 @@ public struct HostPolicy {
         self.aiCap = aiCap
         self.notify = notify
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension HostPolicy: Sendable {}
 #endif
 
-extension HostPolicy: Equatable, Hashable {
-    public static func ==(lhs: HostPolicy, rhs: HostPolicy) -> Bool {
-        if lhs.systemUser != rhs.systemUser {
-            return false
-        }
-        if lhs.view != rhs.view {
-            return false
-        }
-        if lhs.control != rhs.control {
-            return false
-        }
-        if lhs.files != rhs.files {
-            return false
-        }
-        if lhs.terminal != rhs.terminal {
-            return false
-        }
-        if lhs.clipboard != rhs.clipboard {
-            return false
-        }
-        if lhs.audio != rhs.audio {
-            return false
-        }
-        if lhs.aiCap != rhs.aiCap {
-            return false
-        }
-        if lhs.notify != rhs.notify {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(systemUser)
-        hasher.combine(view)
-        hasher.combine(control)
-        hasher.combine(files)
-        hasher.combine(terminal)
-        hasher.combine(clipboard)
-        hasher.combine(audio)
-        hasher.combine(aiCap)
-        hasher.combine(notify)
-    }
-}
-
-public struct HostSessionInfo {
+public struct HostSessionInfo: Equatable, Hashable {
     public var id: String
     public var fromUser: String
     public var fromDevice: String
@@ -1100,50 +574,17 @@ public struct HostSessionInfo {
         self.startedAt = startedAt
         self.aiActive = aiActive
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension HostSessionInfo: Sendable {}
 #endif
 
-extension HostSessionInfo: Equatable, Hashable {
-    public static func ==(lhs: HostSessionInfo, rhs: HostSessionInfo) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.fromUser != rhs.fromUser {
-            return false
-        }
-        if lhs.fromDevice != rhs.fromDevice {
-            return false
-        }
-        if lhs.mode != rhs.mode {
-            return false
-        }
-        if lhs.path != rhs.path {
-            return false
-        }
-        if lhs.startedAt != rhs.startedAt {
-            return false
-        }
-        if lhs.aiActive != rhs.aiActive {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(fromUser)
-        hasher.combine(fromDevice)
-        hasher.combine(mode)
-        hasher.combine(path)
-        hasher.combine(startedAt)
-        hasher.combine(aiActive)
-    }
-}
-
-public struct HostStatus {
+public struct HostStatus: Equatable, Hashable {
     public var online: Bool
     public var remoteEnabled: Bool
     public var deviceId: String
@@ -1163,50 +604,17 @@ public struct HostStatus {
         self.sessions = sessions
         self.assist = assist
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension HostStatus: Sendable {}
 #endif
 
-extension HostStatus: Equatable, Hashable {
-    public static func ==(lhs: HostStatus, rhs: HostStatus) -> Bool {
-        if lhs.online != rhs.online {
-            return false
-        }
-        if lhs.remoteEnabled != rhs.remoteEnabled {
-            return false
-        }
-        if lhs.deviceId != rhs.deviceId {
-            return false
-        }
-        if lhs.publicIp != rhs.publicIp {
-            return false
-        }
-        if lhs.accounts != rhs.accounts {
-            return false
-        }
-        if lhs.sessions != rhs.sessions {
-            return false
-        }
-        if lhs.assist != rhs.assist {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(online)
-        hasher.combine(remoteEnabled)
-        hasher.combine(deviceId)
-        hasher.combine(publicIp)
-        hasher.combine(accounts)
-        hasher.combine(sessions)
-        hasher.combine(assist)
-    }
-}
-
-public struct ImageData {
+public struct ImageData: Equatable, Hashable {
     public var mime: String
     public var data: Data
     public var width: UInt32
@@ -1220,38 +628,17 @@ public struct ImageData {
         self.width = width
         self.height = height
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension ImageData: Sendable {}
 #endif
 
-extension ImageData: Equatable, Hashable {
-    public static func ==(lhs: ImageData, rhs: ImageData) -> Bool {
-        if lhs.mime != rhs.mime {
-            return false
-        }
-        if lhs.data != rhs.data {
-            return false
-        }
-        if lhs.width != rhs.width {
-            return false
-        }
-        if lhs.height != rhs.height {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(mime)
-        hasher.combine(data)
-        hasher.combine(width)
-        hasher.combine(height)
-    }
-}
-
-public struct PathInfo {
+public struct PathInfo: Equatable, Hashable {
     public var kind: PathKind
     public var rttMs: UInt32
     public var remoteAddr: String
@@ -1263,34 +650,17 @@ public struct PathInfo {
         self.rttMs = rttMs
         self.remoteAddr = remoteAddr
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension PathInfo: Sendable {}
 #endif
 
-extension PathInfo: Equatable, Hashable {
-    public static func ==(lhs: PathInfo, rhs: PathInfo) -> Bool {
-        if lhs.kind != rhs.kind {
-            return false
-        }
-        if lhs.rttMs != rhs.rttMs {
-            return false
-        }
-        if lhs.remoteAddr != rhs.remoteAddr {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(kind)
-        hasher.combine(rttMs)
-        hasher.combine(remoteAddr)
-    }
-}
-
-public struct PeerInfo {
+public struct PeerInfo: Equatable, Hashable {
     public var deviceId: String
     public var hostname: String
     public var platform: Platform
@@ -1316,62 +686,17 @@ public struct PeerInfo {
         self.capabilities = capabilities
         self.path = path
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension PeerInfo: Sendable {}
 #endif
 
-extension PeerInfo: Equatable, Hashable {
-    public static func ==(lhs: PeerInfo, rhs: PeerInfo) -> Bool {
-        if lhs.deviceId != rhs.deviceId {
-            return false
-        }
-        if lhs.hostname != rhs.hostname {
-            return false
-        }
-        if lhs.platform != rhs.platform {
-            return false
-        }
-        if lhs.osVersion != rhs.osVersion {
-            return false
-        }
-        if lhs.arch != rhs.arch {
-            return false
-        }
-        if lhs.systemUser != rhs.systemUser {
-            return false
-        }
-        if lhs.shell != rhs.shell {
-            return false
-        }
-        if lhs.permissions != rhs.permissions {
-            return false
-        }
-        if lhs.capabilities != rhs.capabilities {
-            return false
-        }
-        if lhs.path != rhs.path {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(deviceId)
-        hasher.combine(hostname)
-        hasher.combine(platform)
-        hasher.combine(osVersion)
-        hasher.combine(arch)
-        hasher.combine(systemUser)
-        hasher.combine(shell)
-        hasher.combine(permissions)
-        hasher.combine(capabilities)
-        hasher.combine(path)
-    }
-}
-
-public struct Permissions {
+public struct Permissions: Equatable, Hashable {
     public var view: Bool
     public var control: Bool
     public var files: Bool
@@ -1391,50 +716,17 @@ public struct Permissions {
         self.audio = audio
         self.aiCap = aiCap
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension Permissions: Sendable {}
 #endif
 
-extension Permissions: Equatable, Hashable {
-    public static func ==(lhs: Permissions, rhs: Permissions) -> Bool {
-        if lhs.view != rhs.view {
-            return false
-        }
-        if lhs.control != rhs.control {
-            return false
-        }
-        if lhs.files != rhs.files {
-            return false
-        }
-        if lhs.terminal != rhs.terminal {
-            return false
-        }
-        if lhs.clipboard != rhs.clipboard {
-            return false
-        }
-        if lhs.audio != rhs.audio {
-            return false
-        }
-        if lhs.aiCap != rhs.aiCap {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(view)
-        hasher.combine(control)
-        hasher.combine(files)
-        hasher.combine(terminal)
-        hasher.combine(clipboard)
-        hasher.combine(audio)
-        hasher.combine(aiCap)
-    }
-}
-
-public struct ServerInfo {
+public struct ServerInfo: Equatable, Hashable {
     public var address: String
     public var name: String
     public var version: String
@@ -1446,34 +738,17 @@ public struct ServerInfo {
         self.name = name
         self.version = version
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension ServerInfo: Sendable {}
 #endif
 
-extension ServerInfo: Equatable, Hashable {
-    public static func ==(lhs: ServerInfo, rhs: ServerInfo) -> Bool {
-        if lhs.address != rhs.address {
-            return false
-        }
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.version != rhs.version {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(address)
-        hasher.combine(name)
-        hasher.combine(version)
-    }
-}
-
-public struct TerminalOptions {
+public struct TerminalOptions: Equatable, Hashable {
     public var attachSession: String?
     public var shell: String?
     public var cols: UInt16
@@ -1489,42 +764,17 @@ public struct TerminalOptions {
         self.rows = rows
         self.env = env
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension TerminalOptions: Sendable {}
 #endif
 
-extension TerminalOptions: Equatable, Hashable {
-    public static func ==(lhs: TerminalOptions, rhs: TerminalOptions) -> Bool {
-        if lhs.attachSession != rhs.attachSession {
-            return false
-        }
-        if lhs.shell != rhs.shell {
-            return false
-        }
-        if lhs.cols != rhs.cols {
-            return false
-        }
-        if lhs.rows != rhs.rows {
-            return false
-        }
-        if lhs.env != rhs.env {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(attachSession)
-        hasher.combine(shell)
-        hasher.combine(cols)
-        hasher.combine(rows)
-        hasher.combine(env)
-    }
-}
-
-public struct TerminalSessionInfo {
+public struct TerminalSessionInfo: Equatable, Hashable {
     public var id: String
     public var title: String
     public var createdAt: Int64
@@ -1538,38 +788,17 @@ public struct TerminalSessionInfo {
         self.createdAt = createdAt
         self.attached = attached
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension TerminalSessionInfo: Sendable {}
 #endif
 
-extension TerminalSessionInfo: Equatable, Hashable {
-    public static func ==(lhs: TerminalSessionInfo, rhs: TerminalSessionInfo) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.title != rhs.title {
-            return false
-        }
-        if lhs.createdAt != rhs.createdAt {
-            return false
-        }
-        if lhs.attached != rhs.attached {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(title)
-        hasher.combine(createdAt)
-        hasher.combine(attached)
-    }
-}
-
-public struct ToolCallView {
+public struct ToolCallView: Equatable, Hashable {
     public var callId: String
     public var tool: String
     public var targetId: String
@@ -1595,62 +824,17 @@ public struct ToolCallView {
         self.modelReason = modelReason
         self.image = image
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension ToolCallView: Sendable {}
 #endif
 
-extension ToolCallView: Equatable, Hashable {
-    public static func ==(lhs: ToolCallView, rhs: ToolCallView) -> Bool {
-        if lhs.callId != rhs.callId {
-            return false
-        }
-        if lhs.tool != rhs.tool {
-            return false
-        }
-        if lhs.targetId != rhs.targetId {
-            return false
-        }
-        if lhs.targetName != rhs.targetName {
-            return false
-        }
-        if lhs.summary != rhs.summary {
-            return false
-        }
-        if lhs.detail != rhs.detail {
-            return false
-        }
-        if lhs.risk != rhs.risk {
-            return false
-        }
-        if lhs.riskReasons != rhs.riskReasons {
-            return false
-        }
-        if lhs.modelReason != rhs.modelReason {
-            return false
-        }
-        if lhs.image != rhs.image {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(callId)
-        hasher.combine(tool)
-        hasher.combine(targetId)
-        hasher.combine(targetName)
-        hasher.combine(summary)
-        hasher.combine(detail)
-        hasher.combine(risk)
-        hasher.combine(riskReasons)
-        hasher.combine(modelReason)
-        hasher.combine(image)
-    }
-}
-
-public struct ToolResultView {
+public struct ToolResultView: Equatable, Hashable {
     public var ok: Bool
     public var summary: String
     public var output: String
@@ -1666,42 +850,17 @@ public struct ToolResultView {
         self.image = image
         self.denied = denied
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension ToolResultView: Sendable {}
 #endif
 
-extension ToolResultView: Equatable, Hashable {
-    public static func ==(lhs: ToolResultView, rhs: ToolResultView) -> Bool {
-        if lhs.ok != rhs.ok {
-            return false
-        }
-        if lhs.summary != rhs.summary {
-            return false
-        }
-        if lhs.output != rhs.output {
-            return false
-        }
-        if lhs.image != rhs.image {
-            return false
-        }
-        if lhs.denied != rhs.denied {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(ok)
-        hasher.combine(summary)
-        hasher.combine(output)
-        hasher.combine(image)
-        hasher.combine(denied)
-    }
-}
-
-public struct TotpSetup {
+public struct TotpSetup: Equatable, Hashable {
     public var secret: String
     public var otpauthUri: String
 
@@ -1711,30 +870,17 @@ public struct TotpSetup {
         self.secret = secret
         self.otpauthUri = otpauthUri
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension TotpSetup: Sendable {}
 #endif
 
-extension TotpSetup: Equatable, Hashable {
-    public static func ==(lhs: TotpSetup, rhs: TotpSetup) -> Bool {
-        if lhs.secret != rhs.secret {
-            return false
-        }
-        if lhs.otpauthUri != rhs.otpauthUri {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(secret)
-        hasher.combine(otpauthUri)
-    }
-}
-
-public struct UserInfo {
+public struct UserInfo: Equatable, Hashable {
     public var id: UInt64
     public var username: String
     public var displayName: String
@@ -1750,42 +896,17 @@ public struct UserInfo {
         self.aiEnabled = aiEnabled
         self.totpEnabled = totpEnabled
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension UserInfo: Sendable {}
 #endif
 
-extension UserInfo: Equatable, Hashable {
-    public static func ==(lhs: UserInfo, rhs: UserInfo) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.username != rhs.username {
-            return false
-        }
-        if lhs.displayName != rhs.displayName {
-            return false
-        }
-        if lhs.aiEnabled != rhs.aiEnabled {
-            return false
-        }
-        if lhs.totpEnabled != rhs.totpEnabled {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(username)
-        hasher.combine(displayName)
-        hasher.combine(aiEnabled)
-        hasher.combine(totpEnabled)
-    }
-}
-
-public struct VaultEntry {
+public struct VaultEntry: Equatable, Hashable {
     public var id: String
     public var folderId: String?
     public var sort: Int64
@@ -1801,54 +922,32 @@ public struct VaultEntry {
         self.data = data
         self.updatedAt = updatedAt
     }
+
+    
+
+    
 }
 
 #if compiler(>=6)
 extension VaultEntry: Sendable {}
 #endif
 
-extension VaultEntry: Equatable, Hashable {
-    public static func ==(lhs: VaultEntry, rhs: VaultEntry) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.folderId != rhs.folderId {
-            return false
-        }
-        if lhs.sort != rhs.sort {
-            return false
-        }
-        if lhs.data != rhs.data {
-            return false
-        }
-        if lhs.updatedAt != rhs.updatedAt {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(folderId)
-        hasher.combine(sort)
-        hasher.combine(data)
-        hasher.combine(updatedAt)
-    }
-}
-
-public enum AccountStatus {
+public enum AccountStatus: Equatable, Hashable {
     
     case active
     case needsRelogin
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension AccountStatus: Sendable {}
 #endif
 
-extension AccountStatus: Equatable, Hashable {}
-
-public enum AgentEvent {
+public enum AgentEvent: Equatable, Hashable {
     
     case assistantDelta(messageId: String, text: String
     )
@@ -1876,15 +975,18 @@ public enum AgentEvent {
     )
     case error(message: String
     )
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension AgentEvent: Sendable {}
 #endif
 
-extension AgentEvent: Equatable, Hashable {}
-
-public enum AgentMessage {
+public enum AgentMessage: Equatable, Hashable {
     
     case user(text: String
     )
@@ -1892,42 +994,51 @@ public enum AgentMessage {
     )
     case tool(call: ToolCallView, result: ToolResultView?
     )
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension AgentMessage: Sendable {}
 #endif
 
-extension AgentMessage: Equatable, Hashable {}
-
-public enum AgentTargetKind {
+public enum AgentTargetKind: Equatable, Hashable {
     
     case device
     case sshHost
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension AgentTargetKind: Sendable {}
 #endif
 
-extension AgentTargetKind: Equatable, Hashable {}
-
-public enum AiMode {
+public enum AiMode: Equatable, Hashable {
     
     case off
     case readOnly
     case confirmAll
     case confirmDangerous
     case fullTrust
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension AiMode: Sendable {}
 #endif
 
-extension AiMode: Equatable, Hashable {}
-
-public enum ApprovalDecision {
+public enum ApprovalDecision: Equatable, Hashable {
     
     case allowOnce
     case allowSimilar
@@ -1935,29 +1046,35 @@ public enum ApprovalDecision {
     )
     case editAndRun(command: String
     )
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension ApprovalDecision: Sendable {}
 #endif
 
-extension ApprovalDecision: Equatable, Hashable {}
-
-public enum ClientState {
+public enum ClientState: Equatable, Hashable {
     
     case loggedOut
     case connecting
     case online
     case offline
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension ClientState: Sendable {}
 #endif
 
-extension ClientState: Equatable, Hashable {}
-
-public enum ClipboardData {
+public enum ClipboardData: Equatable, Hashable {
     
     case text(text: String
     )
@@ -1965,15 +1082,18 @@ public enum ClipboardData {
     )
     case files(paths: [String]
     )
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension ClipboardData: Sendable {}
 #endif
 
-extension ClipboardData: Equatable, Hashable {}
-
-public enum ComboKey {
+public enum ComboKey: Equatable, Hashable {
     
     case ctrlAltDel
     case lockScreen
@@ -1981,96 +1101,88 @@ public enum ComboKey {
     case winKey
     case taskManager
     case showDesktop
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension ComboKey: Sendable {}
 #endif
 
-extension ComboKey: Equatable, Hashable {}
-
-public enum ConnMode {
+public enum ConnMode: Equatable, Hashable {
     
     case control
     case assist
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension ConnMode: Sendable {}
 #endif
 
-extension ConnMode: Equatable, Hashable {}
-
-public enum DeviceKind {
+public enum DeviceKind: Equatable, Hashable {
     
     case control
     case worker
     case mobile
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension DeviceKind: Sendable {}
 #endif
 
-extension DeviceKind: Equatable, Hashable {}
-
-public enum EventLevel {
+public enum EventLevel: Equatable, Hashable {
     
     case info
     /**
      * 被拒绝的连接、被拦下的 AI 操作等，界面应醒目标出
      */
     case warning
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension EventLevel: Sendable {}
 #endif
 
-extension EventLevel: Equatable, Hashable {}
-
-public enum FileKind {
+public enum FileKind: Equatable, Hashable {
     
     case file
     case dir
     case symlink
     case other
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension FileKind: Sendable {}
 #endif
 
-extension FileKind: Equatable, Hashable {}
+#if compiler(>=6)
+extension GalaxyError: Sendable {}
+#endif
 
-public enum GalaxyError: Swift.Error {
-
-    
-    
-    case Network(detail: String
-    )
-    case Auth(code: String, detail: String
-    )
-    case Permission(detail: String
-    )
-    case NotFound(detail: String
-    )
-    case Protocol(detail: String
-    )
-    case Cancelled
-    case Other(detail: String
-    )
-}
-
-extension GalaxyError: Equatable, Hashable {}
-
-extension GalaxyError: Foundation.LocalizedError {
-    public var errorDescription: String? {
-        String(reflecting: self)
-    }
-}
-
-public enum InputEvent {
+public enum InputEvent: Equatable, Hashable {
     
     case mouseMove(x: Int32, y: Int32
     )
@@ -2086,28 +1198,34 @@ public enum InputEvent {
     )
     case specialCombo(combo: ComboKey
     )
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension InputEvent: Sendable {}
 #endif
 
-extension InputEvent: Equatable, Hashable {}
-
-public enum LoginResult {
+public enum LoginResult: Equatable, Hashable {
     
     case success
     case needTotp
     case mustChangePassword
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension LoginResult: Sendable {}
 #endif
 
-extension LoginResult: Equatable, Hashable {}
-
-public enum PathKind {
+public enum PathKind: Equatable, Hashable {
     
     case connecting
     case lan
@@ -2115,15 +1233,18 @@ public enum PathKind {
     case relayUdp
     case relayTcp
     case closed
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension PathKind: Sendable {}
 #endif
 
-extension PathKind: Equatable, Hashable {}
-
-public enum Platform {
+public enum Platform: Equatable, Hashable {
     
     case macos
     case windows
@@ -2131,45 +1252,54 @@ public enum Platform {
     case android
     case ios
     case harmonyos
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension Platform: Sendable {}
 #endif
 
-extension Platform: Equatable, Hashable {}
-
-public enum PointerButton {
+public enum PointerButton: Equatable, Hashable {
     
     case left
     case right
     case middle
     case back
     case forward
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension PointerButton: Sendable {}
 #endif
 
-extension PointerButton: Equatable, Hashable {}
-
-public enum RiskLevel {
+public enum RiskLevel: Equatable, Hashable {
     
     case read
     case normal
     case dangerous
     case unknown
     case forbidden
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension RiskLevel: Sendable {}
 #endif
 
-extension RiskLevel: Equatable, Hashable {}
-
-public enum SshAuth {
+public enum SshAuth: Equatable, Hashable {
     
     case password(password: String?
     )
@@ -2177,29 +1307,35 @@ public enum SshAuth {
     )
     case agent
     case interactive
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension SshAuth: Sendable {}
 #endif
 
-extension SshAuth: Equatable, Hashable {}
-
-public enum TouchPhase {
+public enum TouchPhase: Equatable, Hashable {
     
     case began
     case moved
     case ended
     case cancelled
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension TouchPhase: Sendable {}
 #endif
 
-extension TouchPhase: Equatable, Hashable {}
-
-public enum VaultData {
+public enum VaultData: Equatable, Hashable {
     
     case folder(name: String, color: String?, expanded: Bool
     )
@@ -2217,25 +1353,31 @@ public enum VaultData {
     )
     case preferences(json: String
     )
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension VaultData: Sendable {}
 #endif
 
-extension VaultData: Equatable, Hashable {}
-
-public enum VideoCodec {
+public enum VideoCodec: Equatable, Hashable {
     
     case h264
     case h265
+
+
+
+
+
 }
 
 #if compiler(>=6)
 extension VideoCodec: Sendable {}
 #endif
-
-extension VideoCodec: Equatable, Hashable {}
 
 // MARK: - 协议（对象与回调）
 
@@ -2652,9 +1794,9 @@ public protocol VideoSink: AnyObject, Sendable {
 // MARK: - 对象（占位）
 
 open class AgentConversation: AgentConversationProtocol, @unchecked Sendable {
-    public struct NoPointer { public init() {} }
-    public init(noPointer: NoPointer) {}
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
     open func answer(questionId: String, answer: String) { bridgeUnimplemented() }
     open func decide(callId: String, decision: ApprovalDecision) { bridgeUnimplemented() }
     open func id()  -> String { bridgeUnimplemented() }
@@ -2668,9 +1810,9 @@ open class AgentConversation: AgentConversationProtocol, @unchecked Sendable {
 }
 
 open class DisplayChannel: DisplayChannelProtocol, @unchecked Sendable {
-    public struct NoPointer { public init() {} }
-    public init(noPointer: NoPointer) {}
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
     open func requestKeyframe() { bridgeUnimplemented() }
     open func sendInput(event: InputEvent) { bridgeUnimplemented() }
     open func setBitrate(kbps: UInt32) { bridgeUnimplemented() }
@@ -2678,17 +1820,17 @@ open class DisplayChannel: DisplayChannelProtocol, @unchecked Sendable {
 }
 
 open class EncodedFrameSink: EncodedFrameSinkProtocol, @unchecked Sendable {
-    public struct NoPointer { public init() {} }
-    public init(noPointer: NoPointer) {}
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
     open func push(data: Data, ptsUs: UInt64, keyframe: Bool) { bridgeUnimplemented() }
     open func setResolution(width: UInt32, height: UInt32) { bridgeUnimplemented() }
 }
 
 open class FileClient: FileClientProtocol, @unchecked Sendable {
-    public struct NoPointer { public init() {} }
-    public init(noPointer: NoPointer) {}
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
     open func chmod(path: String, mode: UInt32) async throws { bridgeUnimplemented() }
     open func download(remote: String, local: String, listener: TransferListener)  -> Transfer { bridgeUnimplemented() }
     open func home() async throws  -> String { bridgeUnimplemented() }
@@ -2705,9 +1847,9 @@ open class FileClient: FileClientProtocol, @unchecked Sendable {
 }
 
 open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
-    public struct NoPointer { public init() {} }
-    public init(noPointer: NoPointer) {}
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
     open func aiModels() async throws  -> AiModels { bridgeUnimplemented() }
     open func changePassword(oldPassword: String, newPassword: String, totp: String?) async throws { bridgeUnimplemented() }
     open func completeFirstLogin(newPassword: String) async throws { bridgeUnimplemented() }
@@ -2738,9 +1880,9 @@ open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
 }
 
 open class HostService: HostServiceProtocol, @unchecked Sendable {
-    public struct NoPointer { public init() {} }
-    public init(noPointer: NoPointer) {}
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
     open func accounts()  -> [HostAccount] { bridgeUnimplemented() }
     open func disconnectAll() { bridgeUnimplemented() }
     open func recentEvents(limit: UInt32)  -> [HostEvent] { bridgeUnimplemented() }
@@ -2757,9 +1899,9 @@ open class HostService: HostServiceProtocol, @unchecked Sendable {
 }
 
 open class PeerSession: PeerSessionProtocol, @unchecked Sendable {
-    public struct NoPointer { public init() {} }
-    public init(noPointer: NoPointer) {}
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
     open func clipboardGet() async throws  -> ClipboardData? { bridgeUnimplemented() }
     open func clipboardSet(data: ClipboardData) async throws { bridgeUnimplemented() }
     open func disconnect() { bridgeUnimplemented() }
@@ -2780,17 +1922,17 @@ open class PeerSession: PeerSessionProtocol, @unchecked Sendable {
 }
 
 open class PortForward: PortForwardProtocol, @unchecked Sendable {
-    public struct NoPointer { public init() {} }
-    public init(noPointer: NoPointer) {}
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
     open func localPort()  -> UInt16 { bridgeUnimplemented() }
     open func stop() { bridgeUnimplemented() }
 }
 
 open class TerminalChannel: TerminalChannelProtocol, @unchecked Sendable {
-    public struct NoPointer { public init() {} }
-    public init(noPointer: NoPointer) {}
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
     open func detach() { bridgeUnimplemented() }
     open func kill() { bridgeUnimplemented() }
     open func resize(cols: UInt16, rows: UInt16) { bridgeUnimplemented() }
@@ -2800,9 +1942,9 @@ open class TerminalChannel: TerminalChannelProtocol, @unchecked Sendable {
 }
 
 open class Transfer: TransferProtocol, @unchecked Sendable {
-    public struct NoPointer { public init() {} }
-    public init(noPointer: NoPointer) {}
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
     open func cancel() { bridgeUnimplemented() }
     open func pause() { bridgeUnimplemented() }
     open func resume() { bridgeUnimplemented() }

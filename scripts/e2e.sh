@@ -116,11 +116,13 @@ if [ "$WIN" = 1 ] && net session >/dev/null 2>&1; then
   SID_HEX="$(od -An -tx1 "$SVC/keys/device_id" | tr -d ' \n')"
   check "$ME" timeout 90 "$BIN/galaxy-dev" --data "$WORK/ctl" exec "${SID_HEX:0:8}" "whoami"
   echo "svc-helper-test" >"$WORK/st.txt"
-  DEST="C:/Users/Public/lg-e2e-$$.txt"
-  timeout 90 "$BIN/galaxy-dev" --data "$WORK/ctl" put "${SID_HEX:0:8}" "$WORK/st.txt" "$DEST" >/dev/null 2>&1 || fail "服务被控端上传失败"
-  OWNER="$(powershell -NoProfile -Command "(Get-Acl '$DEST').Owner")"
-  echo "文件属主：$OWNER"
-  echo "$OWNER" | grep -qi "$ME" || fail "文件属主应为 ${ME}（以指定账号写文件没生效）"
+  # 「~」应解析到该账号自己的用户目录（不是 SYSTEM 的）
+  timeout 90 "$BIN/galaxy-dev" --data "$WORK/ctl" put "${SID_HEX:0:8}" "$WORK/st.txt" "~/lg-e2e-$$.txt" >/dev/null 2>&1 || fail "服务被控端上传失败"
+  DEST="$(cygpath -u "$USERPROFILE")/lg-e2e-$$.txt"
+  [ -f "$DEST" ] || fail "文件没有落在 $USERPROFILE（以指定账号写文件没生效）"
+  OWNER="$(powershell -NoProfile -Command "(Get-Acl '$(cygpath -w "$DEST")').Owner")"
+  echo "文件已写到 $USERPROFILE，属主：$OWNER"
+  echo "$OWNER" | grep -qi "NT AUTHORITY" && fail "文件属主是系统账号（以指定账号写文件没生效）"
   rm -f "$DEST"
   check "first-42" timeout 90 "$BIN/galaxy-dev" --data "$WORK/ctl" term-test "${SID_HEX:0:8}"
   cleanup_svc

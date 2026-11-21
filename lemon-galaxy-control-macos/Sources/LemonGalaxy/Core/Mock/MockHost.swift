@@ -3,7 +3,7 @@ import Foundation
 /// 模拟本机被控服务。不会调用 HostPlatform 里需要系统授权的接口（截屏、注入），只保存注册的平台对象。
 /// 「模拟」菜单（只在模拟内核下出现）可以触发协助请求、被控会话、AI 操作，用来演示提示条与弹窗。
 final class MockHostService: HostService, @unchecked Sendable {
-    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     private weak var client: MockGalaxyClient?
     private let lock = NSLock()
     private var platform: HostPlatform?
@@ -34,7 +34,7 @@ final class MockHostService: HostService, @unchecked Sendable {
             ev(242, "auth_failed", "", false, "临时协助：验证码错误 1 次", "Assistance: 1 incorrect verification code"),
             ev(1440, "policy", "", false, "本机修改了 alice 的权限：关闭声音", "Local change to alice's permissions: audio off"),
         ]
-        super.init(noPointer: NoPointer())
+        super.init(noHandle: NoHandle())
     }
 
     private var zh: Bool { client?.zh ?? true }

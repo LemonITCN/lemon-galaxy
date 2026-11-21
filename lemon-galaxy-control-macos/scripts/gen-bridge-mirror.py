@@ -2,7 +2,7 @@
 """从 uniffi 生成的 galaxy_ffi.swift 生成「无内核镜像」Core/Bridge/BridgeMirror.swift。
 
 用途：没有 Vendor/LemonGalaxyCore.xcframework 时（例如没编 Rust 的机器、只想看界面），工程仍能只用模拟内核编译。
-镜像里的记录、枚举、协议与生成代码逐字相同；对象类只保留 init(noPointer:) 和方法签名（方法体是占位），
+镜像里的记录、枚举、协议与生成代码逐字相同；对象类只保留 init(noHandle:) 和方法签名（方法体是占位），
 MockCore 继承它们，与继承真生成类的写法完全一样。整个文件包在 #if !LEMONGALAXY_REAL_CORE 里。
 
 每次重新生成内核绑定（scripts/build-ffi-apple.sh）后运行一次：
@@ -91,9 +91,9 @@ obj_src = []
 for name in objects:
     methods = proto_methods.get(name + "Protocol", [])
     parts = [f"open class {name}: {name}Protocol, @unchecked Sendable {{",
-             "    public struct NoPointer { public init() {} }",
-             "    public init(noPointer: NoPointer) {}",
-             "    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {}"]
+             "    public struct NoHandle { public init() {} }",
+             "    public init(noHandle: NoHandle) {}",
+             "    required public init(unsafeFromHandle handle: UInt64) {}"]
     for sig in methods:
         parts.append(f"    open {sig.rstrip()} {stub_body(sig)}")
     parts.append("}")
@@ -113,6 +113,7 @@ func bridgeUnimplemented(_ function: String = #function) -> Never {
 public func coreVersion() -> String { "0.0.0-mirror" }
 public func coreInit(config: CoreConfig) {}
 public func coreSetLocale(locale: String) {}
+public func coreLogPath() -> String { "" }
 '''
 body = header + "\n// MARK: - 记录与枚举\n\n" + "\n\n".join(types)
 body += "\n\n// MARK: - 协议（对象与回调）\n\n" + "\n\n".join("\n".join(b) for _, b in protocols)

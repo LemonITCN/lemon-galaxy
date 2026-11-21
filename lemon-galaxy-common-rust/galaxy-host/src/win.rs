@@ -549,7 +549,8 @@ pub fn cmdline(program: &str, args: &[&str]) -> String {
 
 /// PowerShell 用 -EncodedCommand 传脚本，避开所有引号问题，并把输出编码设为 UTF-8。
 pub fn powershell_args(script: &str) -> Vec<String> {
-    let full = format!("[Console]::OutputEncoding=[Text.Encoding]::UTF8;$OutputEncoding=[Text.Encoding]::UTF8;{script}");
+    // 关掉进度条：输出被重定向时进度会以 CLIXML 写进错误输出
+    let full = format!("$ProgressPreference='SilentlyContinue';[Console]::OutputEncoding=[Text.Encoding]::UTF8;$OutputEncoding=[Text.Encoding]::UTF8;{script}");
     let bytes: Vec<u8> = full.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
     use base64::Engine;
     vec!["-NoProfile".into(), "-NonInteractive".into(), "-ExecutionPolicy".into(), "Bypass".into(), "-EncodedCommand".into(), base64::engine::general_purpose::STANDARD.encode(bytes)]
@@ -749,6 +750,12 @@ pub fn spawn(s: Spawn) -> io::Result<Child> {
             si.StartupInfo.hStdInput = i;
             si.StartupInfo.hStdOutput = o;
             si.StartupInfo.hStdError = e;
+        } else if s.pseudo_console.is_some() {
+            // 本进程的标准输入输出被重定向（服务、管道）时，不指定的话子进程会沿用它们而不是伪终端
+            si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdInput = INVALID_HANDLE_VALUE;
+            si.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
+            si.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
         }
         let mut cmd = wide(&s.cmdline);
         let cwd = s.cwd.as_deref().filter(|c| std::path::Path::new(c).is_dir()).map(wide);

@@ -1,0 +1,14 @@
+# 生成 galaxy-ffi 的 C# 绑定（Windows 主控端用）。独立工作区，不参与主工程编译。
+#   cargo run --release --manifest-path tools/uniffi-bindgen-cs/Cargo.toml -- --library <galaxy_ffi.dll|.dylib|.so> --out-dir <目录>
+# 生成器固定在支持 uniffi 0.32 的提交上；升级 uniffi 时一起升级这里。
+[package]
+name = "lemon-galaxy-uniffi-bindgen-cs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+uniffi-bindgen-cs = { git = "https://github.com/NordSecurity/uniffi-bindgen-cs", rev = "fc32e9bbf91ee66b0b92241f575cbce1bf5e3151" }

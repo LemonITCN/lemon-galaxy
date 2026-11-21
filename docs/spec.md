@@ -24,7 +24,7 @@
 | `lemon-galaxy-common-rust` | 公共内核：协议、加密、连接层、会话、终端/文件/命令执行、AI 智能体、SSH 客户端、FFI | Rust workspace |
 | `lemon-galaxy-worker-linux` | Linux 纯被控端，命令行工具 + 后台服务 | Rust，静态编译单文件（x86_64 / ARM64） |
 | `lemon-galaxy-worker-macos` | macOS 纯被控端（小体积，菜单栏状态 + 登录） | Swift + Rust 内核（后续期） |
-| `lemon-galaxy-worker-windows` | Windows 纯被控端（小体积，Win7 SP1 起） | Rust + Win32（后续期） |
+| `lemon-galaxy-worker-windows` | Windows 纯被控端（小体积） | Rust + Win32：系统服务 + 会话画面代理 |
 | `lemon-galaxy-control-macos` | Mac 主控 + 被控 | SwiftUI + AppKit，macOS 13 起 |
 | `lemon-galaxy-control-windows` | Windows 主控 + 被控 | WPF（.NET Framework 4.8，Win7 SP1 起）（后续期） |
 | `lemon-galaxy-mobile-android` | 安卓主控（只能控制别人） | Kotlin + Jetpack Compose，Android 8.0 起 |
@@ -46,6 +46,16 @@
 - 管理员创建用户时设初始密码；用户第一次在任意客户端登录时必须改密码，之后服务器和管理员都不知道该用户的密码（OPAQUE，见 security.md）。
 
 ## 3. 功能清单
+
+### 3.0 Windows 被控端的进程结构
+
+- 服务进程（LocalSystem，开机自启，失败自动重启）：联网、账号、终端、文件、命令执行，与 Linux 被控端共用 galaxy-worker 命令行与 galaxy-host 内核。
+- 画面代理：服务把自己的令牌复制一份、放进当前控制台会话启动（`__lg-session-agent`），负责 DXGI 桌面复制截屏（不可用时退回 GDI）、openh264 编码、SendInput 键鼠、剪贴板；锁屏与 UAC 安全桌面也能看到和操作。控制台会话切换时自动换到新会话重启，进行中的画面续上。
+- 以指定账号运行：终端、命令、文件子进程用该账号的令牌启动——已登录则取会话令牌，否则 S4U 登录（无需密码，只能访问本机资源）；管理员账号用提升后的完整令牌（与 Windows 自带 OpenSSH 一致）。
+- 终端用 ConPTY（Windows 10 1809 / Server 2019 起），更老的系统退回按行发送的简化终端。
+- 协议里的路径一律用「/」：Windows 写成 `/C:/Users/x`，`/` 列出各个盘。
+- 数据目录：管理员为 `%ProgramData%\LemonGalaxy\worker`（只给 SYSTEM 与管理员组），普通用户为 `%LOCALAPPDATA%\LemonGalaxy\worker`。
+- 目前要求 Windows 10 / Server 2016 起（Rust 标准库的要求）；Windows 7 / 8 需要改用 win7 编译目标，后续再做。
 
 ### 3.1 远程桌面（Windows / macOS 被控）
 

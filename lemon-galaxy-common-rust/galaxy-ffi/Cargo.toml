@@ -1,6 +1,6 @@
 [package]
 name = "galaxy-ffi"
-description = "LemonGalaxy 内核导出给 Swift / Kotlin 的接口（uniffi）"
+description = "LemonGalaxy 内核导出给 Swift / Kotlin 的接口（uniffi），C# 由 uniffi-bindgen-cs 生成"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -34,9 +34,14 @@ futures.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 parking_lot.workspace = true
+vt100 = "0.18"
 bytes.workspace = true
 uuid.workspace = true
-uniffi = { version = "0.29.5" }
+uniffi = { version = "=0.32.0" }
+
+# 桌面端（Windows 主控端）用的 H.264 软解；手机端用系统硬件解码，不编进去
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+openh264 = "0.9"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
