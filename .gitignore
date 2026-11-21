@@ -18,3 +18,8 @@ node_modules/
 # 本机测试数据
 /.devdata/
 lemon-galaxy-server/web/dist/
+# 内核构建生成物（由 scripts/build-ffi-apple.sh、Gradle 任务生成）
+lemon-galaxy-control-macos/Vendor/
+lemon-galaxy-control-macos/Sources/LemonGalaxy/Core/Generated/galaxy_ffi.swift
+lemon-galaxy-mobile-ios/Vendor/
+lemon-galaxy-mobile-android/app/src/main/java/uniffi/

@@ -239,6 +239,21 @@ impl Agent {
         self.st.lock().history.clone()
     }
 
+    /// 恢复以前的对话：界面历史原样恢复；模型上下文只带回文字往来（工具结果不再带入）。
+    pub fn restore(&self, history: Vec<AgentMessage>) {
+        let mut s = self.st.lock();
+        s.messages.clear();
+        for m in &history {
+            match m {
+                AgentMessage::User { text } => s.messages.push(json!({ "role": "user", "content": text })),
+                AgentMessage::Assistant { text, .. } if !text.is_empty() => s.messages.push(json!({ "role": "assistant", "content": text })),
+                _ => {}
+            }
+        }
+        s.history = history;
+        s.plan_approved = true;
+    }
+
     /// 当前对用户生效的档位（考虑完全信任时限）。
     fn current_mode(&self) -> AiMode {
         let mut s = self.st.lock();

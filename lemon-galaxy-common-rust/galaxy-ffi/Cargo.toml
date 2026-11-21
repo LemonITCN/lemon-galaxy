@@ -1,8 +1,43 @@
 [package]
 name = "galaxy-ffi"
+description = "LemonGalaxy 内核导出给 Swift / Kotlin 的接口（uniffi）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+name = "galaxy_ffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
 [dependencies]
+galaxy-proto.workspace = true
+galaxy-crypto.workspace = true
+galaxy-net.workspace = true
+galaxy-client.workspace = true
+galaxy-host.workspace = true
+galaxy-agent.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+bytes.workspace = true
+uuid.workspace = true
+uniffi = { version = "0.29.5" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
+log = "0.4"

@@ -1,0 +1,311 @@
+# 每次推送到 main、每个 PR 都构建全部工程并测试。
+# 发布：推送到 main 且全部通过后，自动发布 Release「LemonGalaxy <版本>.<构建序号>」并标为最新版；推送 v* 标签时按标签版本发布。
+#
+# 产物
+#   服务器         lemon-galaxy-server  Linux x86_64 / ARM64 静态单文件（内嵌 Web 管理后台）
+#   Linux 被控端   lemon-galaxy-worker  Linux x86_64 / ARM64 静态单文件
+#   Mac 客户端     LemonGalaxy.dmg      macOS 13 起，Apple 芯片 + Intel 通用（主控 + 被控）
+#   安卓客户端     LemonGalaxy.apk      Android 8.0 起
+#
+# 可选的签名（仓库 Settings → Secrets 配置后自动启用，不配置则跳过）
+#   MACOS_CERTIFICATE_P12 / MACOS_CERTIFICATE_PASSWORD / MACOS_SIGN_IDENTITY   Developer ID 证书
+#   APPLE_NOTARY_KEY_P8 / APPLE_NOTARY_KEY_ID / APPLE_NOTARY_ISSUER_ID         公证
+#   LEMONGALAXY_KEYSTORE_BASE64 / LEMONGALAXY_KEYSTORE_PASSWORD / LEMONGALAXY_KEY_ALIAS / LEMONGALAXY_KEY_PASSWORD   安卓正式签名
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  rust-tests:
+    name: 内核测试 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: 更新 Rust
+        run: rustup update stable --no-self-update && rustup default stable && rustc --version
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-test-${{ runner.os }}-${{ runner.arch }}-
+      - name: 单元测试
+        run: cargo test --workspace --exclude galaxy-ffi
+
+  web:
+    name: 管理后台前端
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: 构建
+        working-directory: lemon-galaxy-server/web
+        run: |
+          node --version
+          npm ci --no-audit --no-fund
+          npm run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: lemon-galaxy-server/web/dist
+          if-no-files-found: error
+
+  linux:
+    name: 服务器与 Linux 被控端 (${{ matrix.arch }})
+    needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, arch: x86_64 }
+          - { os: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: lemon-galaxy-server/web/dist
+      - name: 准备 musl 工具链
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools >/dev/null
+          rustup update stable --no-self-update && rustup default stable
+          rustup target add ${{ matrix.arch }}-unknown-linux-musl
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-linux-${{ matrix.arch }}-
+      - name: 静态编译
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          cargo build --release --target ${{ matrix.arch }}-unknown-linux-musl -p lemon-galaxy-server -p lemon-galaxy-worker-linux -p galaxy-dev
+          mkdir -p dist
+          cp target/${{ matrix.arch }}-unknown-linux-musl/release/lemon-galaxy-server dist/
+          cp target/${{ matrix.arch }}-unknown-linux-musl/release/lemon-galaxy-worker dist/
+          cp target/${{ matrix.arch }}-unknown-linux-musl/release/galaxy-dev dist/
+          file dist/* || true
+          ls -l dist
+      - name: 端到端测试（服务器 + Linux 被控端 + 主控）
+        run: scripts/e2e-linux.sh dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            dist/lemon-galaxy-server
+            dist/lemon-galaxy-worker
+          if-no-files-found: error
+
+  macos:
+    name: Mac 客户端
+    runs-on: macos-26
+    env:
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: 选用最新的正式版 Xcode
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_[0-9]*.app | grep -v -i -E 'beta|rc' | sort -V | tail -1)"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+      - name: 更新 Rust
+        run: rustup update stable --no-self-update && rustup default stable && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-macos-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-macos-
+      - name: 导入签名证书
+        if: env.MACOS_CERTIFICATE_P12 != ''
+        run: |
+          KC="$RUNNER_TEMP/sign.keychain-db"
+          KC_PASS="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          echo "LEMONGALAXY_SIGN_IDENTITY=$MACOS_SIGN_IDENTITY" >> "$GITHUB_ENV"
+      - name: 内核 xcframework
+        run: scripts/build-ffi-apple.sh
+      - name: 构建通用包与 DMG
+        run: |
+          [ -n "${LEMONGALAXY_SIGN_IDENTITY:-}" ] || echo "LEMONGALAXY_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
+          LEMONGALAXY_SIGN_IDENTITY="${LEMONGALAXY_SIGN_IDENTITY:--}" lemon-galaxy-control-macos/scripts/build.sh --dmg
+      - name: 公证
+        if: env.APPLE_NOTARY_KEY_P8 != '' && env.MACOS_SIGN_IDENTITY != ''
+        run: |
+          echo "$APPLE_NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          DMG="$(ls lemon-galaxy-control-macos/build/dist.noindex/*.dmg)"
+          xcrun notarytool submit "$DMG" --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID" --wait
+          xcrun stapler staple "$DMG"
+          rm -f "$RUNNER_TEMP/notary.p8"
+      - name: 自测
+        run: |
+          APP="lemon-galaxy-control-macos/build/LemonGalaxy.noindex/LemonGalaxy.app"
+          lipo -info "$APP/Contents/MacOS/LemonGalaxy"
+          mkdir -p selftest
+          "$APP/Contents/MacOS/LemonGalaxy" --selftest "$PWD/selftest" --only login &
+          PID=$!
+          for i in $(seq 1 180); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          if kill -0 $PID 2>/dev/null; then kill $PID; echo "自测超时"; exit 1; fi
+          wait $PID
+          ls selftest | head
+          mkdir -p out && cp lemon-galaxy-control-macos/build/dist.noindex/*.dmg out/LemonGalaxy-macOS.dmg
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: out/LemonGalaxy-macOS.dmg
+          if-no-files-found: error
+
+  android:
+    name: 安卓客户端
+    runs-on: ubuntu-24.04
+    env:
+      LEMONGALAXY_KEYSTORE_BASE64: ${{ secrets.LEMONGALAXY_KEYSTORE_BASE64 }}
+      LEMONGALAXY_KEYSTORE_PASSWORD: ${{ secrets.LEMONGALAXY_KEYSTORE_PASSWORD }}
+      LEMONGALAXY_KEY_ALIAS: ${{ secrets.LEMONGALAXY_KEY_ALIAS }}
+      LEMONGALAXY_KEY_PASSWORD: ${{ secrets.LEMONGALAXY_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: 准备工具链
+        run: |
+          echo "JAVA_HOME=${JAVA_HOME_21_X64:-$JAVA_HOME}" >> "$GITHUB_ENV"
+          rustup update stable --no-self-update && rustup default stable
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358" >/dev/null
+          echo "sdk.dir=$ANDROID_HOME" > lemon-galaxy-mobile-android/local.properties
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            target
+          key: android-${{ hashFiles('Cargo.lock', 'lemon-galaxy-mobile-android/**/*.gradle.kts', 'lemon-galaxy-mobile-android/gradle/libs.versions.toml') }}
+          restore-keys: android-
+      - name: 构建与测试
+        working-directory: lemon-galaxy-mobile-android
+        run: |
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
+          APK="$(ls app/build/outputs/apk/release/*.apk | head -1)"
+          unzip -l "$APK" | grep libgalaxy_ffi.so
+          mkdir -p ../out && cp "$APK" ../out/LemonGalaxy-Android.apk
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android
+          path: out/LemonGalaxy-Android.apk
+          if-no-files-found: error
+
+  release:
+    name: 发布
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [rust-tests, linux, macos, android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          path: art
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAC_NOTARIZED: ${{ secrets.MACOS_SIGN_IDENTITY != '' && secrets.APPLE_NOTARY_KEY_P8 != '' }}
+        run: |
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then TAG="$GITHUB_REF_NAME"; V="${TAG#v}"; else V="$VERSION.$GITHUB_RUN_NUMBER"; TAG="v$V"; fi
+          mkdir -p out
+          cp art/macos/LemonGalaxy-macOS.dmg "out/LemonGalaxy-$V-macOS.dmg"
+          cp art/android/LemonGalaxy-Android.apk "out/LemonGalaxy-$V-Android.apk"
+          for a in x86_64 aarch64; do
+            cp "art/linux-$a/lemon-galaxy-worker" "out/lemon-galaxy-worker-$V-linux-$a"
+            chmod +x "out/lemon-galaxy-worker-$V-linux-$a"
+            tar -C "art/linux-$a" -czf "out/lemon-galaxy-server-$V-linux-$a.tar.gz" lemon-galaxy-server
+          done
+          (cd out && sha256sum * > SHA256SUMS.txt)
+          DL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          PREV="$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)"
+          {
+            echo "## 下载"
+            echo
+            echo "| 用途 | 系统 | 文件 |"
+            echo "|---|---|---|"
+            echo "| Mac 客户端（主控 + 被控） | macOS 13 及以上（Apple 芯片、Intel 通用） | [LemonGalaxy-$V-macOS.dmg]($DL/LemonGalaxy-$V-macOS.dmg) |"
+            echo "| 安卓客户端（主控） | Android 8.0 及以上 | [LemonGalaxy-$V-Android.apk]($DL/LemonGalaxy-$V-Android.apk) |"
+            echo "| Linux 被控端 | x86_64，任意发行版 | [lemon-galaxy-worker-$V-linux-x86_64]($DL/lemon-galaxy-worker-$V-linux-x86_64) |"
+            echo "| Linux 被控端 | ARM64，任意发行版 | [lemon-galaxy-worker-$V-linux-aarch64]($DL/lemon-galaxy-worker-$V-linux-aarch64) |"
+            echo "| 服务器（内嵌管理后台） | Linux x86_64 | [lemon-galaxy-server-$V-linux-x86_64.tar.gz]($DL/lemon-galaxy-server-$V-linux-x86_64.tar.gz) |"
+            echo "| 服务器（内嵌管理后台） | Linux ARM64 | [lemon-galaxy-server-$V-linux-aarch64.tar.gz]($DL/lemon-galaxy-server-$V-linux-aarch64.tar.gz) |"
+            echo
+            echo "校验：[SHA256SUMS.txt]($DL/SHA256SUMS.txt)"
+            echo
+            echo "### 快速开始"
+            echo
+            echo '1. 服务器：解压后运行 `./lemon-galaxy-server --public-host <你的域名或公网 IP>`，日志里会打印初始化网址和「客户端填写的服务器地址」。放行 TCP 与 UDP 7443 端口。'
+            echo '2. 打开初始化网址创建管理员、绑定两步验证，在后台「用户」里创建账号。'
+            echo '3. Linux 被控端：`chmod +x lemon-galaxy-worker && ./lemon-galaxy-worker login`，再 `sudo ./lemon-galaxy-worker install-service` 安装开机自启。'
+            echo '4. 在 Mac 或安卓客户端用同一服务器地址和账号登录。'
+            echo
+            if [ "$MAC_NOTARIZED" != true ]; then
+              echo "macOS 首次打开如果提示无法验证开发者，到「系统设置 → 隐私与安全性」底部点「仍要打开」。"
+              echo
+            fi
+            echo "## 更新内容"
+            echo
+            if [ -n "$PREV" ]; then
+              git log --no-merges --format='- %s' "$PREV..$GITHUB_SHA" | head -50
+            else
+              git log --no-merges --format='- %s' "$GITHUB_SHA" | head -50
+            fi
+          } > notes.md
+          FILES=(out/*)
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${FILES[@]}"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "LemonGalaxy $V" --notes-file notes.md --latest "${FILES[@]}"
+          fi
