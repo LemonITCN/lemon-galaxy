@@ -126,6 +126,7 @@ class RemoteDesktopController(
         requestKeyframe = { channel?.requestKeyframe() },
         onVideoSize = { w, h -> _ui.update { it.copy(videoW = w, videoH = h, status = RemoteStatus.STREAMING) } },
         onCursorChanged = { x, y, v -> _ui.update { it.copy(cursorX = x, cursorY = y, cursorVisible = v) } },
+        onClosedByRemote = { reason -> _ui.update { it.copy(status = RemoteStatus.FAILED, error = reason) } },
     )
 
     fun start() {
@@ -152,7 +153,7 @@ class RemoteDesktopController(
         val q = _ui.value.quality
         val peer = conn.peer(deviceId)
         channel = peer.session.openDisplay(
-            DisplayOptions(displayId, q.maxFps, q.bitrateKbps, listOf(VideoCodec.H265, VideoCodec.H264)),
+            DisplayOptions(displayId, q.maxFps, q.bitrateKbps, VideoDecoder.supportedCodecs(), viewOnly = false),
             decoder,
         )
     }
@@ -190,11 +191,11 @@ class RemoteDesktopController(
     fun sendAll(events: List<InputEvent>) = events.forEach(::send)
 
     suspend fun clipboardSend(text: String) = withContext(Dispatchers.Default) {
-        conn.peer(deviceId).session.clipboardSet(ClipboardData(text, null))
+        conn.peer(deviceId).session.clipboardSet(ClipboardData.Text(text))
     }
 
     suspend fun clipboardGet(): String? = withContext(Dispatchers.Default) {
-        conn.peer(deviceId).session.clipboardGet().text
+        (conn.peer(deviceId).session.clipboardGet() as? ClipboardData.Text)?.text
     }
 
     fun stop() {

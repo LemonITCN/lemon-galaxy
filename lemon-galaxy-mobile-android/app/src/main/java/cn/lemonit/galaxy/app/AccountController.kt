@@ -2,7 +2,6 @@ package cn.lemonit.galaxy.app
 
 import cn.lemonit.galaxy.core.bridge.ClientState
 import cn.lemonit.galaxy.core.bridge.GalaxyClientInterface
-import cn.lemonit.galaxy.core.bridge.GalaxyClientProposedInterface
 import cn.lemonit.galaxy.core.bridge.LoginResult
 import cn.lemonit.galaxy.core.bridge.ServerInfo
 import cn.lemonit.galaxy.core.bridge.TotpSetup
@@ -56,8 +55,6 @@ class AccountController(
     private val _totpEnabled = MutableStateFlow<Boolean?>(null)
     val totpEnabled: StateFlow<Boolean?> = _totpEnabled.asStateFlow()
 
-    val proposed: GalaxyClientProposedInterface? get() = client as? GalaxyClientProposedInterface
-
     fun onClientState(state: ClientState) {
         _clientState.value = state
     }
@@ -78,7 +75,7 @@ class AccountController(
         _user.value = client.currentUser()
         _server.value = client.server()
         _signedIn.value = true
-        refreshTotp()
+        _totpEnabled.value = client.currentUser()?.totpEnabled
     }
 
     fun edit(block: (LoginUiState) -> LoginUiState) = _login.update { block(it).copy(error = null) }
@@ -137,22 +134,20 @@ class AccountController(
         }
     }
 
-    suspend fun changePassword(old: String, new: String) = client.changePassword(old, new)
+    suspend fun changePassword(old: String, new: String, totp: String?) = client.changePassword(old, new, totp)
 
-    fun refreshTotp() {
-        val p = proposed ?: return
-        scope.launch { _totpEnabled.value = runCatching { p.totpEnabled() }.getOrNull() }
-    }
+    suspend fun totpSetup(): TotpSetup = client.totpSetup()
 
-    suspend fun totpSetup(): TotpSetup = proposed!!.totpSetup()
     suspend fun totpVerify(code: String) {
-        proposed!!.totpVerify(code)
+        client.totpVerify(code)
         _totpEnabled.value = true
+        _user.value = client.currentUser() ?: _user.value?.copy(totpEnabled = true)
     }
 
     suspend fun totpDisable(code: String) {
-        proposed!!.totpDisable(code)
+        client.totpDisable(code)
         _totpEnabled.value = false
+        _user.value = client.currentUser() ?: _user.value?.copy(totpEnabled = false)
     }
 
     companion object {

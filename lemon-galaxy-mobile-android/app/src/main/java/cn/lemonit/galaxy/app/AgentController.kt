@@ -4,14 +4,13 @@ import cn.lemonit.galaxy.core.bridge.AgentConversationInterface
 import cn.lemonit.galaxy.core.bridge.AgentEvent
 import cn.lemonit.galaxy.core.bridge.AgentListener
 import cn.lemonit.galaxy.core.bridge.AgentMessage
-import cn.lemonit.galaxy.core.bridge.AgentRole
 import cn.lemonit.galaxy.core.bridge.AiMode
 import cn.lemonit.galaxy.core.bridge.AiModels
 import cn.lemonit.galaxy.core.bridge.ApprovalDecision
 import cn.lemonit.galaxy.core.bridge.ConversationConfig
 import cn.lemonit.galaxy.core.bridge.ConversationSummary
 import cn.lemonit.galaxy.core.bridge.GalaxyClientInterface
-import cn.lemonit.galaxy.core.bridge.GalaxyClientProposedInterface
+import cn.lemonit.galaxy.core.bridge.AgentTarget
 import cn.lemonit.galaxy.core.bridge.ToolCallView
 import cn.lemonit.galaxy.core.bridge.ToolResultView
 import kotlinx.coroutines.CoroutineScope
@@ -56,6 +55,8 @@ data class ConversationUi(
     val step: Int = 0,
     val promptTokens: Long = 0,
     val completionTokens: Long = 0,
+    /** 完全信任到期时间（毫秒），不限时为空。 */
+    val trustUntil: Long? = null,
 ) {
     val waitingForUser: Boolean
         get() = items.any {
@@ -114,6 +115,7 @@ class ConversationController(
         is AgentEvent.Usage -> s.copy(promptTokens = e.promptTokens.toLong(), completionTokens = e.completionTokens.toLong())
         is AgentEvent.Status -> s.copy(running = e.running, step = e.step.toInt())
         is AgentEvent.Error -> s.copy(items = s.items + ChatItem.Error(nextKey("err"), e.message))
+        is AgentEvent.ModeChanged -> s.copy(mode = e.effective, trustUntil = e.untilMs)
     }
 
     private fun ConversationUi.upsertAssistant(id: String, block: (ChatItem.Assistant) -> ChatItem.Assistant): ConversationUi {
@@ -131,12 +133,10 @@ class ConversationController(
     fun send(text: String) {
         if (text.isBlank()) return
         _ui.update { it.copy(items = it.items + ChatItem.User(nextKey("u"), text), title = it.title.ifEmpty { text.take(40) }, running = true) }
-        scope.launch {
-            try {
-                conversation.send(text)
-            } catch (e: Exception) {
-                _ui.update { it.copy(running = false, items = it.items + ChatItem.Error(nextKey("err"), e.userMessage())) }
-            }
+        try {
+            conversation.send(text)
+        } catch (e: Exception) {
+            _ui.update { it.copy(running = false, items = it.items + ChatItem.Error(nextKey("err"), e.userMessage())) }
         }
     }
 
@@ -171,27 +171,65 @@ class ConversationController(
         _ui.update { it.copy(mode = mode) }
     }
 
+    fun setForeground(foreground: Boolean) {
+        conversation.setForeground(foreground)
+        if (!foreground) _ui.update { it.copy(running = false) }
+    }
+
     companion object {
-        fun itemsFromHistory(history: List<AgentMessage>): List<ChatItem> = history.mapNotNull { m ->
-            when (m.role) {
-                AgentRole.USER -> ChatItem.User(m.id, m.text)
-                AgentRole.ASSISTANT -> ChatItem.Assistant(m.id, m.text, m.thinking, false)
-                AgentRole.TOOL -> m.toolCall?.let { c ->
-                    val r = m.toolResult
+        fun itemsFromHistory(history: List<AgentMessage>): List<ChatItem> = history.mapIndexed { i, m ->
+            when (m) {
+                is AgentMessage.User -> ChatItem.User("h-u-$i", m.text)
+                is AgentMessage.Assistant -> ChatItem.Assistant(m.id.ifEmpty { "h-a-$i" }, m.text, m.thinking.ifEmpty { null }, false)
+                is AgentMessage.Tool -> {
+                    val r = m.result
                     ChatItem.Tool(
-                        c.callId, c, m.approval != null,
+                        m.call.callId.ifEmpty { "h-t-$i" }, m.call, false,
                         when {
                             r == null -> ToolPhase.FAILED
                             r.denied -> ToolPhase.DENIED
                             r.ok -> ToolPhase.DONE
                             else -> ToolPhase.FAILED
                         },
-                        r?.output.orEmpty(), r, m.approval,
+                        r?.output.orEmpty(), r, null,
                     )
                 }
-                AgentRole.SYSTEM -> null
             }
         }
+    }
+}
+
+/** 对话列表里的一行（内核的摘要 + 本机记下的档位 + 打开中的运行状态）。 */
+data class ConversationListItem(
+    val id: String,
+    val title: String,
+    val modelName: String,
+    val targetNames: List<String>,
+    val mode: AiMode,
+    val updatedAt: Long,
+    val running: Boolean,
+    val waitingForUser: Boolean,
+)
+
+/**
+ * 每个对话创建时的配置（模型、目标、档位）记在本机：内核的 open_conversation 需要界面再给一次配置，
+ * 而对话摘要里只有模型 id 与目标名称。
+ */
+interface ConversationConfigStore {
+    fun get(id: String): ConversationConfig?
+    fun put(id: String, config: ConversationConfig)
+    fun remove(id: String)
+}
+
+class MemoryConversationConfigStore : ConversationConfigStore {
+    private val map = java.util.concurrent.ConcurrentHashMap<String, ConversationConfig>()
+    override fun get(id: String) = map[id]
+    override fun put(id: String, config: ConversationConfig) {
+        map[id] = config
+    }
+
+    override fun remove(id: String) {
+        map.remove(id)
     }
 }
 
@@ -199,13 +237,16 @@ class ConversationController(
 class AgentController(
     private val client: GalaxyClientInterface,
     private val scope: CoroutineScope,
+    private val configs: ConversationConfigStore = MemoryConversationConfigStore(),
+    /** 目标名称 → 目标（重新打开没有本机配置的历史对话时按名称找回）。 */
+    private val resolveTargets: (List<String>) -> List<AgentTarget> = { emptyList() },
+    private val defaultMode: () -> AiMode = { AiMode.CONFIRM_DANGEROUS },
 ) {
-    private val proposed get() = client as? GalaxyClientProposedInterface
     private val _models = MutableStateFlow<AiModels?>(null)
     val models: StateFlow<AiModels?> = _models.asStateFlow()
-    private val _summaries = MutableStateFlow<List<ConversationSummary>>(emptyList())
-    val summaries: StateFlow<List<ConversationSummary>> = _summaries.asStateFlow()
-    private val opened = mutableMapOf<String, ConversationController>()
+    private val _items = MutableStateFlow<List<ConversationListItem>>(emptyList())
+    val items: StateFlow<List<ConversationListItem>> = _items.asStateFlow()
+    private val opened = java.util.concurrent.ConcurrentHashMap<String, ConversationController>()
     private val _modelsError = MutableStateFlow<String?>(null)
     val modelsError: StateFlow<String?> = _modelsError.asStateFlow()
 
@@ -214,54 +255,82 @@ class AgentController(
             try {
                 _models.value = client.aiModels()
                 _modelsError.value = null
+                refreshList()
             } catch (e: Exception) {
                 _modelsError.value = e.userMessage()
             }
         }
     }
 
+    private fun modelName(id: String) = _models.value?.items?.firstOrNull { it.id == id }?.name ?: id
+
+    /** 刷新对话列表（内核要解密本机文件，放到后台线程）。 */
     fun refreshList() {
-        val p = proposed
-        _summaries.value = if (p != null) {
-            p.conversations()
-        } else {
-            opened.values.map { c ->
-                val u = c.ui.value
-                ConversationSummary(u.id, u.title, u.modelName, u.targetNames, u.mode, System.currentTimeMillis(), u.running, u.waitingForUser)
-            }
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) { rebuildList() }
+    }
+
+    private fun rebuildList() {
+        val saved = runCatching { client.listConversations() }.getOrDefault(emptyList())
+        val ids = saved.map { it.id }.toSet()
+        val fromCore = saved.map { c ->
+            val live = opened[c.id]?.ui?.value
+            ConversationListItem(
+                c.id, live?.title?.ifEmpty { null } ?: c.title, modelName(c.modelId), c.targetNames,
+                live?.mode ?: configs.get(c.id)?.mode ?: defaultMode(), c.updatedAt,
+                live?.running ?: false, live?.waitingForUser ?: false,
+            )
+        }
+        // 刚建还没落盘的对话也列出来
+        val pending = opened.values.map { it.ui.value }.filter { it.id !in ids }.map { u ->
+            ConversationListItem(u.id, u.title, u.modelName, u.targetNames, u.mode, System.currentTimeMillis(), u.running, u.waitingForUser)
+        }
+        _items.value = (pending + fromCore).sortedByDescending { it.updatedAt }
+    }
+
+    private fun listenerFor(holder: () -> ConversationController?) = object : AgentListener {
+        override fun onEvent(event: AgentEvent) {
+            holder()?.onEvent(event)
         }
     }
 
-    fun create(config: ConversationConfig, modelName: String, vision: Boolean, targetNames: List<String>, trustMinutes: UInt?): ConversationController {
-        lateinit var controller: ConversationController
-        val listener = object : AgentListener {
-            override fun onEvent(event: AgentEvent) = controller.onEvent(event)
-        }
-        val conv = client.newConversation(config, listener)
+    suspend fun create(config: ConversationConfig, modelName: String, vision: Boolean, targetNames: List<String>): ConversationController {
+        var controller: ConversationController? = null
+        val conv = client.newConversation(config, listenerFor { controller })
         controller = ConversationController(
             conv,
-            ConversationUi(conv.id(), "", modelName, vision, targetNames, config.mode),
+            ConversationUi(conv.id(), config.title.orEmpty(), modelName, vision, targetNames, config.mode),
             scope,
         )
-        if (config.mode == AiMode.FULL_TRUST && trustMinutes != null) conv.setMode(AiMode.FULL_TRUST, trustMinutes)
+        configs.put(conv.id(), config)
         opened[conv.id()] = controller
         refreshList()
         return controller
     }
 
-    fun open(id: String): ConversationController? {
+    fun opened(id: String): ConversationController? = opened[id]
+
+    /** 打开历史对话：配置优先用本机记下的，没有就按摘要里的模型与目标名称拼一个。 */
+    suspend fun open(id: String): ConversationController? {
         opened[id]?.let { return it }
-        val p = proposed ?: return null
-        val summary = p.conversations().firstOrNull { it.id == id } ?: return null
-        lateinit var controller: ConversationController
-        val listener = object : AgentListener {
-            override fun onEvent(event: AgentEvent) = controller.onEvent(event)
-        }
-        val conv = p.openConversation(id, listener) ?: return null
-        val vision = _models.value?.items?.firstOrNull { it.name == summary.modelName }?.vision ?: false
+        val summary = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { client.listConversations() }.getOrDefault(emptyList()).firstOrNull { it.id == id }
+        } ?: return null
+        val models = _models.value ?: runCatching { client.aiModels() }.getOrNull()?.also { _models.value = it }
+        val model = models?.items?.firstOrNull { it.id == summary.modelId }
+        val config = configs.get(id) ?: ConversationConfig(
+            providerId = model?.providerId ?: 0u,
+            modelId = summary.modelId,
+            targets = resolveTargets(summary.targetNames),
+            mode = defaultMode(),
+            planFirst = false,
+            trustMinutes = null,
+            title = summary.title,
+        )
+        var controller: ConversationController? = null
+        val conv = client.openConversation(id, config, listenerFor { controller })
         controller = ConversationController(
             conv,
-            ConversationUi(id, summary.title, summary.modelName, vision, summary.targetNames, summary.mode),
+            ConversationUi(id, summary.title, model?.name ?: summary.modelId, model?.vision ?: false, summary.targetNames, config.mode),
             scope,
         )
         opened[id] = controller
@@ -270,11 +339,14 @@ class AgentController(
 
     fun delete(id: String) {
         opened.remove(id)?.stop()
-        proposed?.deleteConversation(id)
+        runCatching { client.deleteConversation(id) }
+        configs.remove(id)
         refreshList()
     }
 
+    /** 切到后台：内核停止正在进行的任务（ai-agent.md 第 1 节）。 */
     fun setForeground(foreground: Boolean) {
-        proposed?.setForeground(foreground)
+        opened.values.forEach { it.setForeground(foreground) }
+        if (!foreground) refreshList()
     }
 }

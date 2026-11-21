@@ -90,7 +90,7 @@ fun openHostAction(container: AppContainer, nav: Navigator, item: HostItem, acti
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HostsTab(container: AppContainer, nav: Navigator) {
-    HoldMulticastLock()
+    HoldMulticastLock(discovery = true)
     val data by container.hosts.data.collectAsState()
     val refreshing by container.hosts.refreshing.collectAsState()
     var filter by remember { mutableStateOf(HostsFilter()) }
@@ -160,7 +160,7 @@ fun HostsTab(container: AppContainer, nav: Navigator) {
     sheetItem?.let { item ->
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(onDismissRequest = { sheetItem = null }, sheetState = sheetState) {
-            HostActionsContent(item, onAction = { a ->
+            HostActionsContent(item, sshSupported = container.connections.sshSupported, onAction = { a ->
                 sheetItem = null
                 when (a) {
                     HostAction.MOVE -> moveItem = item
@@ -241,7 +241,7 @@ fun HostsTab(container: AppContainer, nav: Navigator) {
 
 @Composable
 fun AiTab(container: AppContainer, nav: Navigator) {
-    val items by container.agents.summaries.collectAsState()
+    val items by container.agents.items.collectAsState()
     val models by container.agents.models.collectAsState()
     val selected = (nav.top as? Route.Conversation)?.id
     ConversationListScreen(
@@ -263,7 +263,8 @@ fun AiTab(container: AppContainer, nav: Navigator) {
 fun FilesTab(container: AppContainer, nav: Navigator) {
     val data by container.hosts.data.collectAsState()
     val transfers by container.transfers.items.collectAsState()
-    val targets = HostTree.items(data).filter { (it is HostItem.Device && it.reachable()) || it is HostItem.Ssh }
+    val ssh = container.connections.sshSupported
+    val targets = HostTree.items(data).filter { (it is HostItem.Device && it.reachable()) || (ssh && it is HostItem.Ssh) }
         .sortedWith(compareBy({ it !is HostItem.Device }, { it.title.lowercase() }))
     val selected = (nav.top as? Route.Files)?.target?.let { if (it is TargetRef.Device) "device:${it.deviceId}" else "ssh:${(it as TargetRef.Ssh).hostId}" }
     FilesHomeScreen(
@@ -340,7 +341,7 @@ fun SettingsTab(container: AppContainer, nav: Navigator, openUrl: (String) -> Un
         },
     )
     if (changePw) {
-        ChangePasswordDialog(container.account::changePassword, onDone = { container.toast(pwDone) }, onDismiss = { changePw = false })
+        ChangePasswordDialog(container.account::changePassword, requireTotp = totp == true, onDone = { container.toast(pwDone) }, onDismiss = { changePw = false })
     }
     if (twoFactor && totp != null) {
         TwoFactorDialog(

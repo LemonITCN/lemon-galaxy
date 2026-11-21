@@ -45,7 +45,7 @@ class MockCoreTest {
     private val server = "galaxy.example.com:7443#sha256-q3Vb1oX9mH2c7uY0kN4t"
 
     private fun newClient(): GalaxyClientInterface {
-        val core = MockCore { name -> File("src/main/assets/$name").readBytes() }
+        val core = MockCore { name -> File("src/mock/assets/$name").readBytes() }
         core.coreInit(CoreConfig("/tmp", "/tmp", "debug", Platform.ANDROID, DeviceKind.MOBILE, "0.1.0", "Android 16", "Pixel", "zh-CN"))
         return core.newGalaxyClient(store, object : ClientListener {
             override fun onState(state: ClientState) {
@@ -116,7 +116,7 @@ class MockCoreTest {
 
             override fun onExit(code: Int?) = Unit
         }
-        val ch = peer.openTerminal(TerminalOptions(null, null, 80u, 24u), sink)
+        val ch = peer.openTerminal(TerminalOptions(null, null, 80u, 24u, emptyList()), sink)
         ch.write("whoami\r".toByteArray())
         waitFor { out.contains("demo\r\n") }
         ch.detach()
@@ -124,7 +124,7 @@ class MockCoreTest {
         assertTrue(sessions.any { it.id == ch.sessionId() && !it.attached })
         // 接续：回放之前的输出
         val replay = StringBuffer()
-        peer.openTerminal(TerminalOptions(ch.sessionId(), null, 80u, 24u), object : TerminalSink {
+        peer.openTerminal(TerminalOptions(ch.sessionId(), null, 80u, 24u, emptyList()), object : TerminalSink {
             override fun onOutput(data: ByteArray) {
                 replay.append(data.decodeToString())
             }
@@ -132,7 +132,7 @@ class MockCoreTest {
             override fun onExit(code: Int?) = Unit
         })
         assertTrue(replay.contains("whoami"))
-        peer.close()
+        peer.disconnect()
     }
 
     @Test
@@ -176,7 +176,7 @@ class MockCoreTest {
     fun sshPromptsForHostKeyAndPassword() = runBlocking<Unit> {
         client.login(server, "alice", "pw", null)
         val asked = CopyOnWriteArrayList<Boolean>()
-        val session = client.connectSsh(MockData.SSH_PG, object : SecretPrompt {
+        val session = (client as cn.lemonit.galaxy.core.bridge.SshClientInterface).connectSsh(MockData.SSH_PG, object : SecretPrompt {
             override fun ask(prompt: String, echo: Boolean): String? {
                 asked.add(echo)
                 return if (echo) "yes" else "secret"
@@ -192,7 +192,7 @@ class MockCoreTest {
         client.login(server, "alice", "pw", null)
         val events = CopyOnWriteArrayList<AgentEvent>()
         val conv = client.newConversation(
-            ConversationConfig(1u, "glm-5.2", listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_WEB_01)), AiMode.CONFIRM_DANGEROUS, false),
+            ConversationConfig(1u, "glm-5.2", listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_WEB_01)), AiMode.CONFIRM_DANGEROUS, false, null, null),
             object : AgentListener {
                 override fun onEvent(event: AgentEvent) {
                     events.add(event)
@@ -221,7 +221,7 @@ class MockCoreTest {
         client.login(server, "alice", "pw", null)
         val events = CopyOnWriteArrayList<AgentEvent>()
         val conv = client.newConversation(
-            ConversationConfig(1u, "glm-5.2", listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_WEB_01)), AiMode.READ_ONLY, false),
+            ConversationConfig(1u, "glm-5.2", listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_WEB_01)), AiMode.READ_ONLY, false, null, null),
             object : AgentListener {
                 override fun onEvent(event: AgentEvent) {
                     events.add(event)

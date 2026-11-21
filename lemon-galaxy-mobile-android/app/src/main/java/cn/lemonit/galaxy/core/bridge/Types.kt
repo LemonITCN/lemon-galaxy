@@ -11,10 +11,8 @@ package cn.lemonit.galaxy.core.bridge
  *   - 带数据的 enum → sealed class，每个成员是嵌套的 data class / object；
  *   - u64/u32/u16 → ULong/UInt/UShort，i64/i32 → Long/Int，Vec<u8> → ByteArray，Option<T> → T?；
  *   - GalaxyError → GalaxyException（uniffi 把 Error 后缀换成 Exception）。
- * 真绑定到位后，这个包换成 uniffi.galaxy_ffi 的类型（或在这里写 typealias 指过去），界面代码不用改。
- *
- * ffi.md 里引用了但没定义的类型（ExecRequest、ClipboardData、AgentMessage 等）在这里按协议文档补了定义，
- * 标注「ffi.md 未定义」，需要内核按此或另行在 ffi.md 里定下来。
+ * 字段与 galaxy-ffi（uniffi 0.29）生成的 uniffi.galaxy_ffi.* 一一对应；真内核由 core/rust/UniffiCore 适配到这里，
+ * 模拟内核（截图测试、无 Rust 工具链时）直接实现这里的接口。界面只认这个包。
  */
 
 // ---------- 1. 初始化 ----------
@@ -46,6 +44,12 @@ data class UserInfo(
     val username: String,
     val displayName: String,
     val aiEnabled: Boolean,
+    val totpEnabled: Boolean,
+)
+
+data class TotpSetup(
+    val secret: String,
+    val otpauthUri: String,
 )
 
 data class ServerInfo(
@@ -161,6 +165,8 @@ data class PeerInfo(
     val platform: Platform,
     val osVersion: String,
     val arch: String,
+    val systemUser: String,
+    val shell: String,
     val permissions: Permissions,
     val capabilities: List<String>,
     val path: PathInfo,
@@ -176,8 +182,7 @@ data class Permissions(
     val aiCap: AiMode,
 )
 
-/** ffi.md 只写了「kind: Lan | Direct | RelayUdp | RelayTcp」，这里按此定义。 */
-enum class PathKind { LAN, DIRECT, RELAY_UDP, RELAY_TCP }
+enum class PathKind { CONNECTING, LAN, DIRECT, RELAY_UDP, RELAY_TCP, CLOSED }
 
 data class PathInfo(
     val kind: PathKind,
@@ -185,39 +190,42 @@ data class PathInfo(
     val remoteAddr: String,
 )
 
-/** ffi.md 未定义：按 protocol.md 8.2 的 Exec 流补充。 */
 data class ExecRequest(
     val command: String,
     val shell: String?,
     val cwd: String?,
-    val timeoutMs: UInt?,
-    val maxOutput: ULong?,
+    val timeoutMs: ULong,
+    val maxOutput: ULong,
 )
 
-/** ffi.md 未定义：按 protocol.md 8.2 的 Exec Done 补充。 */
 data class ExecResult(
     val code: Int?,
-    val signal: Int?,
-    val stdout: ByteArray,
-    val stderr: ByteArray,
+    val stdout: String,
+    val stderr: String,
     val timedOut: Boolean,
     val truncated: Boolean,
     val durationMs: ULong,
 )
 
-/** ffi.md 未定义：剪贴板内容（文字或图片，二者至多其一）。 */
-data class ClipboardData(
-    val text: String?,
-    val image: ImageData?,
-)
+sealed class ClipboardData {
+    data class Text(val text: String) : ClipboardData()
+    data class Image(val image: ImageData) : ClipboardData()
+    data class Files(val paths: List<String>) : ClipboardData()
+}
 
 // ---------- 3.1 终端 ----------
+
+data class EnvVar(
+    val name: String,
+    val value: String,
+)
 
 data class TerminalOptions(
     val attachSession: String?,
     val shell: String?,
     val cols: UShort,
     val rows: UShort,
+    val env: List<EnvVar>,
 )
 
 data class TerminalSessionInfo(
@@ -262,21 +270,21 @@ data class DisplayOptions(
     val maxFps: UInt,
     val bitrateKbps: UInt,
     val codecs: List<VideoCodec>,
+    val viewOnly: Boolean,
 )
 
-/** protocol.md 8.4：Left | Right | Middle | Back | Forward。 */
-enum class MouseButton { LEFT, RIGHT, MIDDLE, BACK, FORWARD }
+enum class PointerButton { LEFT, RIGHT, MIDDLE, BACK, FORWARD }
 
-/** ffi.md 只写了「CtrlAltDel | LockScreen | ...」，其余成员为补充建议。 */
-enum class SpecialCombo { CTRL_ALT_DEL, LOCK_SCREEN, TASK_MANAGER, SHOW_DESKTOP }
+enum class ComboKey { CTRL_ALT_DEL, LOCK_SCREEN, ALT_TAB, WIN_KEY, TASK_MANAGER, SHOW_DESKTOP }
+
+enum class TouchPhase { BEGAN, MOVED, ENDED, CANCELLED }
 
 sealed class InputEvent {
     /** 坐标为被控屏幕像素。 */
     data class MouseMove(val x: Int, val y: Int) : InputEvent()
 
-    // 注意：成员名与枚举 MouseButton 同名，uniffi 生成代码里需要全限定名（见报告里的 ffi.md 建议）
     data class MouseButton(
-        val button: cn.lemonit.galaxy.core.bridge.MouseButton,
+        val button: PointerButton,
         val down: Boolean,
         val x: Int,
         val y: Int,
@@ -289,7 +297,9 @@ sealed class InputEvent {
 
     data class Text(val text: String) : InputEvent()
 
-    data class SpecialCombo(val combo: cn.lemonit.galaxy.core.bridge.SpecialCombo) : InputEvent()
+    data class Touch(val id: UInt, val phase: TouchPhase, val x: Int, val y: Int) : InputEvent()
+
+    data class SpecialCombo(val combo: ComboKey) : InputEvent()
 }
 
 // ---------- 4. AI 智能体 ----------
@@ -325,6 +335,17 @@ data class ConversationConfig(
     val targets: List<AgentTarget>,
     val mode: AiMode,
     val planFirst: Boolean,
+    val trustMinutes: UInt?,
+    val title: String?,
+)
+
+/** 本机保存的对话（内核用设备密钥加密存放）。 */
+data class ConversationSummary(
+    val id: String,
+    val title: String,
+    val modelId: String,
+    val targetNames: List<String>,
+    val updatedAt: Long,
 )
 
 sealed class ApprovalDecision {
@@ -376,26 +397,18 @@ sealed class AgentEvent {
     data class SecretRequested(val requestId: String, val prompt: String, val targetId: String) : AgentEvent()
     data class Usage(val promptTokens: ULong, val completionTokens: ULong) : AgentEvent()
     data class Status(val running: Boolean, val step: UInt) : AgentEvent()
+
+    /** 档位变化：effective 为与管理员、机主上限取最严后的实际档位；完全信任带到期时间。 */
+    data class ModeChanged(val mode: AiMode, val effective: AiMode, val untilMs: Long?) : AgentEvent()
     data class Error(val message: String) : AgentEvent()
 }
 
-/** ffi.md 未定义：对话历史中的角色。 */
-enum class AgentRole { USER, ASSISTANT, TOOL, SYSTEM }
-
-/**
- * ffi.md 未定义：`AgentConversation.messages()` 返回的历史条目（恢复界面用）。
- * 工具调用一条一个，toolCall 与 toolResult 同时给出；approval 记录用户当时的决定（自动放行为空）。
- */
-data class AgentMessage(
-    val id: String,
-    val role: AgentRole,
-    val text: String,
-    val thinking: String?,
-    val toolCall: ToolCallView?,
-    val toolResult: ToolResultView?,
-    val approval: ApprovalDecision?,
-    val createdAt: Long,
-)
+/** `AgentConversation.messages()` 返回的历史（恢复界面用）。 */
+sealed class AgentMessage {
+    data class User(val text: String) : AgentMessage()
+    data class Assistant(val id: String, val text: String, val thinking: String) : AgentMessage()
+    data class Tool(val call: ToolCallView, val result: ToolResultView?) : AgentMessage()
+}
 
 // ---------- 7. 错误 ----------
 

@@ -101,5 +101,6 @@ internal class MockDisplayChannel(
     override fun stop() {
         stopped = true
         job.cancel()
+        sink.onClosed("stopped")
     }
 }

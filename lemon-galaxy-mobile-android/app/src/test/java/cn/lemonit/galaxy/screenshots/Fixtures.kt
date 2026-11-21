@@ -14,7 +14,7 @@ import cn.lemonit.galaxy.app.TransferState
 import cn.lemonit.galaxy.core.bridge.AiMode
 import cn.lemonit.galaxy.core.bridge.AiModels
 import cn.lemonit.galaxy.core.bridge.ApprovalDecision
-import cn.lemonit.galaxy.core.bridge.ConversationSummary
+import cn.lemonit.galaxy.app.ConversationListItem
 import cn.lemonit.galaxy.core.bridge.ImageData
 import cn.lemonit.galaxy.core.bridge.PathInfo
 import cn.lemonit.galaxy.core.bridge.PathKind
@@ -83,10 +83,10 @@ object Fixtures {
     val models = AiModels(true, AiMode.FULL_TRUST, MockData.models())
 
     fun summaries(zh: Boolean) = listOf(
-        ConversationSummary("c1", if (zh) "web-01 磁盘快满了，帮我清理一下" else "web-01 is almost out of disk, please clean up", "GLM-5.2", listOf("web-01 (nginx)"), AiMode.CONFIRM_DANGEROUS, MockData.NOW - 2 * 60_000, true, true),
-        ConversationSummary("c2", if (zh) "nginx 改了配置，帮我检查并重新加载" else "I changed the nginx config, please check it and reload", "GLM-5.2", listOf("web-01 (nginx)"), AiMode.CONFIRM_DANGEROUS, MockData.NOW - 3 * 3_600_000, false, false),
-        ConversationSummary("c3", if (zh) "看看 Xcode 为什么卡住了" else "Why is Xcode stuck?", "Kimi K2.6", listOf("Build Mac"), AiMode.CONFIRM_ALL, MockData.NOW - 26 * 3_600_000, false, false),
-        ConversationSummary("c4", if (zh) "批量重启 3 台 worker 上的 docker" else "Restart docker on three workers", "DeepSeek V4", listOf("web-01 (nginx)", "db-01", "nas"), AiMode.READ_ONLY, MockData.NOW - 4 * 86_400_000, false, false),
+        ConversationListItem("c1", if (zh) "web-01 磁盘快满了，帮我清理一下" else "web-01 is almost out of disk, please clean up", "GLM-5.2", listOf("web-01 (nginx)"), AiMode.CONFIRM_DANGEROUS, MockData.NOW - 2 * 60_000, true, true),
+        ConversationListItem("c2", if (zh) "nginx 改了配置，帮我检查并重新加载" else "I changed the nginx config, please check it and reload", "GLM-5.2", listOf("web-01 (nginx)"), AiMode.CONFIRM_DANGEROUS, MockData.NOW - 3 * 3_600_000, false, false),
+        ConversationListItem("c3", if (zh) "看看 Xcode 为什么卡住了" else "Why is Xcode stuck?", "Kimi K2.6", listOf("Build Mac"), AiMode.CONFIRM_ALL, MockData.NOW - 26 * 3_600_000, false, false),
+        ConversationListItem("c4", if (zh) "批量重启 3 台 worker 上的 docker" else "Restart docker on three workers", "DeepSeek V4", listOf("web-01 (nginx)", "db-01", "nas"), AiMode.READ_ONLY, MockData.NOW - 4 * 86_400_000, false, false),
     )
 
     fun conversation(zh: Boolean, image: ImageData?): ConversationUi {
@@ -155,7 +155,7 @@ object Fixtures {
         )
     }
 
-    val user = UserInfo(3u, "alice", "Alice Chen", true)
+    val user = UserInfo(3u, "alice", "Alice Chen", true, true)
     val server = ServerInfo("galaxy.example.com:7443#sha256-q3Vb1oX9mH2c7uY0kN4tLwR8zPaF5sDgE6jK1lQ2xYc", "LemonGalaxy", "0.1.0")
 
     val path = PathInfo(PathKind.LAN, 3u, "192.168.1.31:51820")

@@ -63,10 +63,32 @@ class AppContainer(
     val client: GalaxyClientInterface = core.newGalaxyClient(store, listener)
     val account = AccountController(client, settings, scope)
     val hosts = HostsController(client, scope, ::toast)
-    val connections = ConnectionManager(client, prompts)
+    val connections = ConnectionManager(client, prompts).also { c ->
+        appContext?.getString(cn.lemonit.galaxy.R.string.ssh_unsupported)?.let { c.sshUnsupportedMessage = it }
+    }
     val terminals = TerminalController(scope, connections, appContext) { hosts.data.value.targetName(it) }
     val transfers = TransferManager(appContext, scope, connections)
-    val agents = AgentController(client, scope)
+    val agents = AgentController(
+        client, scope,
+        configs = appContext?.let { cn.lemonit.galaxy.data.PrefsConversationConfigStore.create(it) } ?: MemoryConversationConfigStore(),
+        resolveTargets = { names ->
+            val d = hosts.data.value
+            names.mapNotNull { n ->
+                d.devices.firstOrNull { d.deviceName(it.id) == n || it.hostname == n }
+                    ?.let { cn.lemonit.galaxy.core.bridge.AgentTarget(cn.lemonit.galaxy.core.bridge.AgentTargetKind.DEVICE, it.id) }
+            }
+        },
+        defaultMode = { settings.prefs.value.defaultAiMode },
+    )
+
+    init {
+        cn.lemonit.galaxy.core.platform.LanDiscovery.onDiscoveryChanged = { active -> runCatching { client.setLanDiscovery(active) } }
+    }
+
+    /** 界面语言变化时同步给内核（影响内核返回的错误文字）。 */
+    fun setCoreLocale(zh: Boolean) {
+        runCatching { core.coreSetLocale(if (zh) "zh-CN" else "en") }
+    }
 
     fun onSignedIn() {
         hosts.reload()

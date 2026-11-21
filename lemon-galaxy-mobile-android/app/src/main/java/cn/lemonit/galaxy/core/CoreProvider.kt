@@ -12,9 +12,10 @@ import cn.lemonit.galaxy.core.mock.MockCore
 /**
  * 界面拿内核实现的唯一入口。
  *
- * - 默认（BuildConfig.USE_MOCK_CORE = true，`-Pgalaxy.core=mock`）：模拟实现 MockCore，不需要 .so。
- * - `-Pgalaxy.core=rust`：通过反射加载 [RUST_ADAPTER]（把 uniffi 生成的 uniffi.galaxy_ffi.* 包成 bridge 接口的适配层，
- *   内核到位后再写），界面代码不直接引用任何具体实现。
+ * - 默认（`galaxy.core=rust`，BuildConfig.USE_MOCK_CORE = false）：通过反射加载 [RUST_ADAPTER]
+ *   （src/rust/java，把 uniffi 生成的 uniffi.galaxy_ffi.* 包成 bridge 接口），APK 里带三个 ABI 的 libgalaxy_ffi.so。
+ * - `-Pgalaxy.core=mock` 或 `-Pgalaxy.skipRust=true`：模拟实现 MockCore，不需要 .so（截图测试也用它）。
+ * 界面代码不直接引用任何具体实现。
  */
 object CoreProvider {
     const val RUST_ADAPTER = "cn.lemonit.galaxy.core.rust.UniffiCore"

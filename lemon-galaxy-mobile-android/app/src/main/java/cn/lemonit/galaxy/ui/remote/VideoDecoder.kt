@@ -21,6 +21,7 @@ class VideoDecoder(
     private val requestKeyframe: () -> Unit,
     private val onVideoSize: (Int, Int) -> Unit,
     private val onCursorChanged: (Int, Int, Boolean) -> Unit,
+    private val onClosedByRemote: (String) -> Unit = {},
 ) : VideoSink {
     private class Frame(val data: ByteArray, val ptsUs: Long, val keyframe: Boolean)
 
@@ -64,6 +65,11 @@ class VideoDecoder(
     }
 
     override fun onCursor(x: Int, y: Int, visible: Boolean) = onCursorChanged(x, y, visible)
+
+    /** 画面流被被控端或内核关闭（权限变化、屏幕拔出、连接断开等）。 */
+    override fun onClosed(reason: String) {
+        if (running) onClosedByRemote(reason)
+    }
 
     private fun mime(c: VideoCodec) = when (c) {
         VideoCodec.H264 -> MediaFormat.MIMETYPE_VIDEO_AVC
@@ -135,7 +141,25 @@ class VideoDecoder(
         codec = null
     }
 
-    private companion object {
-        const val TAG = "VideoDecoder"
+    companion object {
+        private const val TAG = "VideoDecoder"
+
+        /**
+         * 本机有硬件（或系统）解码器的编码，按偏好排序（H.265 优先，省带宽）。
+         * 没有 HEVC 解码器的手机只报 H.264，避免被控端选了解不了的编码。
+         */
+        fun supportedCodecs(): List<VideoCodec> {
+            val types = runCatching {
+                android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).codecInfos
+                    .filter { !it.isEncoder }
+                    .flatMap { it.supportedTypes.map(String::lowercase) }
+                    .toSet()
+            }.getOrDefault(emptySet())
+            val out = buildList {
+                if (MediaFormat.MIMETYPE_VIDEO_HEVC in types) add(VideoCodec.H265)
+                if (MediaFormat.MIMETYPE_VIDEO_AVC in types) add(VideoCodec.H264)
+            }
+            return out.ifEmpty { listOf(VideoCodec.H264) }
+        }
     }
 }

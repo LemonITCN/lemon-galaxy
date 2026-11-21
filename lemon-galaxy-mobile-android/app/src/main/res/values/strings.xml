@@ -155,6 +155,7 @@
     <string name="assist_connect">Connect</string>
     <string name="assist_info">A device that is not signed in shows a device code and a verification code. The verification code is only shown on that screen and never passes through the server. The other person must tap Allow before the connection starts.</string>
     <string name="secret_prompt_title">Input required</string>
+    <string name="ssh_unsupported">SSH direct connections need a newer core. Reach this host through a device terminal for now.</string>
     <string name="host_key_title">Unknown host</string>
 
     <!-- Terminal -->

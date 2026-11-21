@@ -400,6 +400,7 @@ internal class MockShell(
 
 internal class MockTerminalChannel(private val shell: MockShell) : TerminalChannelInterface {
     override fun sessionId(): String = shell.id
+    override fun title(): String = shell.title
     override fun write(data: ByteArray) = shell.write(data)
     override fun resize(cols: UShort, rows: UShort) = shell.resize(cols.toInt(), rows.toInt())
     override fun detach() {

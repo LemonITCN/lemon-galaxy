@@ -250,6 +250,22 @@ internal class MockFileClient(
         fs.write(path, bytes, bytes.size.toULong())
     }
 
+    override suspend fun realpath(path: String): String = fs.normalize(path)
+
+    override suspend fun search(root: String, pattern: String, content: Boolean): List<FileEntry> {
+        delay(200)
+        val out = mutableListOf<FileEntry>()
+        fun walk(dir: String, depth: Int) {
+            if (depth > 6 || out.size > 200) return
+            runCatching { fs.list(dir) }.getOrDefault(emptyList()).forEach { e ->
+                if (e.name.contains(pattern, ignoreCase = true)) out.add(e)
+                if (e.kind == FileKind.DIR) walk(e.path, depth + 1)
+            }
+        }
+        walk(root, 0)
+        return out
+    }
+
     override fun download(remote: String, local: String, listener: TransferListener): TransferInterface {
         val node = fs.find(remote)
         val t = MockTransfer(scope, bytesPerSecond, listener)

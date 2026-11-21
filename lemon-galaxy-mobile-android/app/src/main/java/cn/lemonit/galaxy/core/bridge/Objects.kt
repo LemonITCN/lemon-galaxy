@@ -5,17 +5,20 @@ package cn.lemonit.galaxy.core.bridge
 /*
  * docs/ffi.md 的 Kotlin 对照（对象与回调部分）。
  *
- * uniffi 给每个 object 生成 `XxxInterface` 接口和实现类 `Xxx`；界面只依赖 `XxxInterface`。
- * async fn → suspend fun；错误统一抛 GalaxyException。
+ * 与 uniffi.galaxy_ffi 生成的 `XxxInterface` 同名同签名；界面只依赖这里的接口。
+ * async fn → suspend fun（内核在自己的线程池执行）；错误统一抛 GalaxyException。
  * 回调（callback）由界面层实现，内核可能在任意线程调用，界面自己切回主线程。
  *
- * 第 5 节 HostService（本机被控）安卓不需要，GalaxyClient.host() 在这里省略。
+ * HostService（本机被控）安卓是 mobile 类型用不到，GalaxyClient.host() 在这里省略。
  */
 
 /** 顶层函数与 GalaxyClient 构造器（ffi.md 第 1、2 节）。由 CoreProvider 选择实现。 */
 interface GalaxyCore {
     fun coreVersion(): String
     fun coreInit(config: CoreConfig)
+
+    /** 运行时切换界面语言（影响内核返回的错误文字）。 */
+    fun coreSetLocale(locale: String)
 
     /** 对应 `GalaxyClient::new(store, listener)`。 */
     fun newGalaxyClient(store: SecureStore, listener: ClientListener): GalaxyClientInterface
@@ -39,9 +42,17 @@ interface GalaxyClientInterface {
     /** server 为后台给出的完整地址 "host:port#sha256-指纹"。 */
     suspend fun login(server: String, username: String, password: String, totp: String?): LoginResult
     suspend fun completeFirstLogin(newPassword: String)
-    suspend fun changePassword(oldPassword: String, newPassword: String)
+    suspend fun changePassword(oldPassword: String, newPassword: String, totp: String?)
     suspend fun logout()
     fun restore(): Boolean
+    fun deviceId(): String
+
+    suspend fun totpSetup(): TotpSetup
+    suspend fun totpVerify(code: String)
+    suspend fun totpDisable(code: String)
+
+    /** 设备列表页打开（持有组播锁）时 true：内核每 10 秒做一次局域网查询。 */
+    fun setLanDiscovery(active: Boolean)
 
     fun devices(): List<DeviceInfo>
     suspend fun refreshDevices()
@@ -52,10 +63,16 @@ interface GalaxyClientInterface {
 
     suspend fun connect(deviceId: String): PeerSessionInterface
     suspend fun connectAssist(deviceCode: String, verificationCode: String): PeerSessionInterface
-    suspend fun connectSsh(hostId: String, secretPrompt: SecretPrompt): SshSessionInterface
 
     suspend fun aiModels(): AiModels
-    fun newConversation(config: ConversationConfig, listener: AgentListener): AgentConversationInterface
+    suspend fun newConversation(config: ConversationConfig, listener: AgentListener): AgentConversationInterface
+
+    /** 本机保存的对话，按更新时间倒序。 */
+    fun listConversations(): List<ConversationSummary>
+
+    /** 重新打开历史对话（模型、目标、档位由界面给出）。 */
+    suspend fun openConversation(id: String, config: ConversationConfig, listener: AgentListener): AgentConversationInterface
+    fun deleteConversation(id: String)
 }
 
 interface ClientListener {
@@ -71,7 +88,8 @@ interface PeerSessionInterface {
     fun info(): PeerInfo
     fun path(): PathInfo
     fun setListener(listener: PeerListener)
-    fun close()
+    fun disconnect()
+    fun isClosed(): Boolean
 
     suspend fun openTerminal(options: TerminalOptions, sink: TerminalSink): TerminalChannelInterface
     suspend fun listTerminals(): List<TerminalSessionInfo>
@@ -85,10 +103,11 @@ interface PeerSessionInterface {
     suspend fun openDisplay(options: DisplayOptions, sink: VideoSink): DisplayChannelInterface
     suspend fun screenshot(displayId: UInt, maxWidth: UInt): ImageData
 
-    suspend fun clipboardGet(): ClipboardData
+    suspend fun clipboardGet(): ClipboardData?
     suspend fun clipboardSet(data: ClipboardData)
 
     suspend fun forwardPort(localPort: UShort, remoteHost: String, remotePort: UShort): PortForwardInterface
+    suspend fun wakeOnLan(mac: String)
 }
 
 interface PeerListener {
@@ -96,10 +115,9 @@ interface PeerListener {
     fun onClosed(reason: String)
 }
 
-/** ffi.md 未定义 PortForward 对象：这里按最小需要补充。 */
 interface PortForwardInterface {
     fun localPort(): UShort
-    fun close()
+    fun stop()
 }
 
 // ---------- 3.1 终端 ----------
@@ -111,6 +129,7 @@ interface TerminalSink {
 
 interface TerminalChannelInterface {
     fun sessionId(): String
+    fun title(): String
     fun write(data: ByteArray)
     fun resize(cols: UShort, rows: UShort)
 
@@ -131,6 +150,8 @@ interface FileClientInterface {
     suspend fun chmod(path: String, mode: UInt)
     suspend fun readText(path: String, maxBytes: ULong): String
     suspend fun writeText(path: String, text: String)
+    suspend fun realpath(path: String): String
+    suspend fun search(root: String, pattern: String, content: Boolean): List<FileEntry>
 
     /** 支持断点续传。local 为本机文件路径。 */
     fun download(remote: String, local: String, listener: TransferListener): TransferInterface
@@ -156,6 +177,7 @@ interface VideoSink {
     /** Annex B 码流。 */
     fun onFrame(data: ByteArray, ptsUs: ULong, keyframe: Boolean)
     fun onCursor(x: Int, y: Int, visible: Boolean)
+    fun onClosed(reason: String)
 }
 
 interface DisplayChannelInterface {
@@ -169,7 +191,10 @@ interface DisplayChannelInterface {
 
 interface AgentConversationInterface {
     fun id(): String
-    suspend fun send(text: String)
+    fun title(): String
+
+    /** 发送一条消息；任务在内核后台运行，进度经监听器回调。 */
+    fun send(text: String)
 
     /** 回应确认卡片。 */
     fun decide(callId: String, decision: ApprovalDecision)
@@ -182,25 +207,13 @@ interface AgentConversationInterface {
     fun setMode(mode: AiMode, trustMinutes: UInt?)
     fun stop()
 
+    /** 切到后台时 false：内核停止正在进行的任务（ai-agent.md 第 1 节）。 */
+    fun setForeground(foreground: Boolean)
+
     /** 历史（恢复界面用）。 */
     fun messages(): List<AgentMessage>
 }
 
 interface AgentListener {
     fun onEvent(event: AgentEvent)
-}
-
-// ---------- 6. SSH 直连 ----------
-
-/** 键盘交互认证、私钥口令、首次连接确认主机指纹。内核在后台线程同步等待返回。 */
-interface SecretPrompt {
-    fun ask(prompt: String, echo: Boolean): String?
-}
-
-interface SshSessionInterface {
-    suspend fun openTerminal(cols: UShort, rows: UShort, sink: TerminalSink): TerminalChannelInterface
-    fun files(): FileClientInterface
-    suspend fun exec(request: ExecRequest): ExecResult
-    suspend fun forwardLocal(localPort: UShort, remoteHost: String, remotePort: UShort): PortForwardInterface
-    fun close()
 }

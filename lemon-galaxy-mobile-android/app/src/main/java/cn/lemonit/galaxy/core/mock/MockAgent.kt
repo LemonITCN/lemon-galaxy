@@ -4,7 +4,6 @@ import cn.lemonit.galaxy.core.bridge.AgentConversationInterface
 import cn.lemonit.galaxy.core.bridge.AgentEvent
 import cn.lemonit.galaxy.core.bridge.AgentListener
 import cn.lemonit.galaxy.core.bridge.AgentMessage
-import cn.lemonit.galaxy.core.bridge.AgentRole
 import cn.lemonit.galaxy.core.bridge.AiMode
 import cn.lemonit.galaxy.core.bridge.ApprovalDecision
 import cn.lemonit.galaxy.core.bridge.ConversationConfig
@@ -18,8 +17,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -40,7 +37,6 @@ internal class MockConversation(
     private val scope: CoroutineScope,
     private val zh: Boolean,
     private val screenshot: () -> ImageData?,
-    private val foreground: MutableStateFlow<Boolean>,
 ) : AgentConversationInterface {
     private val history = mutableListOf<AgentMessage>()
     private val decisions = ConcurrentHashMap<String, CompletableDeferred<ApprovalDecision>>()
@@ -52,7 +48,7 @@ internal class MockConversation(
     private var completionTokens = 0uL
     @Volatile var running = false
     @Volatile var waiting = false
-    var title: String = ""
+    var title: String = config.title.orEmpty()
     var updatedAt: Long = System.currentTimeMillis()
     private var mode: AiMode = config.mode
     private var step = 0u
@@ -62,12 +58,9 @@ internal class MockConversation(
     fun summary() = ConversationSummary(
         id = id,
         title = title.ifEmpty { tr("新对话", "New conversation") },
-        modelName = modelName,
+        modelId = config.modelId,
         targetNames = targets.map { it.name },
-        mode = mode,
         updatedAt = updatedAt,
-        running = running,
-        waitingForUser = waiting,
     )
 
     fun seed(messages: List<AgentMessage>, title: String, at: Long) {
@@ -78,11 +71,18 @@ internal class MockConversation(
 
     override fun id(): String = id
 
-    override suspend fun send(text: String) {
+    override fun title(): String = title
+
+    override fun send(text: String) {
         if (title.isEmpty()) title = text.take(40)
-        record(AgentMessage(newId(), AgentRole.USER, text, null, null, null, null, System.currentTimeMillis()))
+        record(AgentMessage.User(text))
         job?.cancel()
         job = scope.launch { runScript(text) }
+    }
+
+    /** 与真内核一致：切到后台停止当前任务。 */
+    override fun setForeground(foreground: Boolean) {
+        if (!foreground && running) stop()
     }
 
     override fun decide(callId: String, decision: ApprovalDecision) {
@@ -100,7 +100,9 @@ internal class MockConversation(
 
     override fun setMode(mode: AiMode, trustMinutes: UInt?) {
         this.mode = mode
-        config = config.copy(mode = mode)
+        config = config.copy(mode = mode, trustMinutes = trustMinutes)
+        val until = if (mode == AiMode.FULL_TRUST && trustMinutes != null) System.currentTimeMillis() + trustMinutes.toLong() * 60_000 else null
+        emit(AgentEvent.ModeChanged(mode, mode, until))
     }
 
     override fun stop() {
@@ -122,9 +124,7 @@ internal class MockConversation(
         listener.onEvent(e)
     }
 
-    private suspend fun pauseIfBackground() {
-        if (!foreground.value) foreground.first { it }
-    }
+    private fun pauseIfBackground() = Unit
 
     private suspend fun say(text: String, thinking: String? = null) {
         val mid = newId()
@@ -141,7 +141,7 @@ internal class MockConversation(
             delay(35)
         }
         emit(AgentEvent.AssistantDone(mid))
-        record(AgentMessage(mid, AgentRole.ASSISTANT, text, thinking, null, null, null, System.currentTimeMillis()))
+        record(AgentMessage.Assistant(mid, text, thinking.orEmpty()))
     }
 
     private fun nextStep() {
@@ -192,7 +192,7 @@ internal class MockConversation(
                 "", null, true,
             )
             emit(AgentEvent.ToolFinished(callId, r))
-            record(AgentMessage(newId(), AgentRole.TOOL, "", null, call, r, null, System.currentTimeMillis()))
+            record(AgentMessage.Tool(call, r))
             return null
         }
         if (pending != null) {
@@ -207,7 +207,7 @@ internal class MockConversation(
                     "", null, true,
                 )
                 emit(AgentEvent.ToolFinished(callId, r))
-                record(AgentMessage(newId(), AgentRole.TOOL, "", null, call, r, decision, System.currentTimeMillis()))
+                record(AgentMessage.Tool(call, r))
                 return null
             }
             if (decision is ApprovalDecision.AllowSimilar) similarAllowed.add(key)
@@ -231,7 +231,7 @@ internal class MockConversation(
         }
         val r = ToolResultView(true, tr("完成，退出码 0", "Done, exit code 0"), lines.joinToString("\n"), if (tool == "screenshot") image else null, false)
         emit(AgentEvent.ToolFinished(callId, r))
-        record(AgentMessage(newId(), AgentRole.TOOL, "", null, call, r, decision, System.currentTimeMillis()))
+        record(AgentMessage.Tool(call, r))
         return r
     }
 
@@ -245,7 +245,6 @@ internal class MockConversation(
         val a = d.await()
         waiting = false
         answers.remove(qid)
-        record(AgentMessage(newId(), AgentRole.SYSTEM, "$question\n→ $a", null, null, null, null, System.currentTimeMillis()))
         return a
     }
 

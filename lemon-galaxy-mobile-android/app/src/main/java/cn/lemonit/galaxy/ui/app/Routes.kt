@@ -16,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -520,10 +521,24 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
 
 @Composable
 fun ConversationRoute(id: String, container: AppContainer, nav: Navigator, showBack: Boolean) {
-    val controller: ConversationController? = remember(id) { container.agents.open(id) }
     val models by container.agents.models.collectAsState()
+    // 已打开的直接用；历史对话要向内核重新打开（异步）
+    val loaded by androidx.compose.runtime.produceState<ConversationController?>(container.agents.opened(id), id) {
+        if (value == null) {
+            value = try {
+                container.agents.open(id)
+            } catch (e: Exception) {
+                container.toast(e.userMessage())
+                null
+            }
+            if (value == null) nav.pop()
+        }
+    }
+    val controller = loaded
     if (controller == null) {
-        LaunchedEffect(id) { nav.pop() }
+        androidx.compose.foundation.layout.Box(androidx.compose.ui.Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
+            androidx.compose.material3.CircularProgressIndicator()
+        }
         return
     }
     val ui by controller.ui.collectAsState()
@@ -570,7 +585,9 @@ fun NewConversationRoute(target: TargetRef?, container: AppContainer, nav: Navig
     val models by container.agents.models.collectAsState()
     val modelsError by container.agents.modelsError.collectAsState()
     val prefs = container.settings.prefs.value
-    val targets = HostTree.items(data).filter { (it is HostItem.Device && it.reachable()) || it is HostItem.Ssh }
+    // 真内核的 AI 目前只支持设备目标；SSH 主机要等内核支持 SSH 直连
+    val ssh = container.connections.sshSupported
+    val targets = HostTree.items(data).filter { (it is HostItem.Device && it.reachable()) || (ssh && it is HostItem.Ssh) }
     val initialKey = when (target) {
         is TargetRef.Device -> "device:${target.deviceId}"
         is TargetRef.Ssh -> "ssh:${target.hostId}"
@@ -579,6 +596,8 @@ fun NewConversationRoute(target: TargetRef?, container: AppContainer, nav: Navig
     var draft by remember {
         mutableStateOf(NewConversationDraft(targets = setOfNotNull(initialKey), mode = prefs.defaultAiMode))
     }
+    var starting by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     LaunchedEffect(models) {
         if (models == null) container.agents.loadModels()
         if (draft.modelKey == null) models?.items?.firstOrNull()?.let { draft = draft.copy(modelKey = it.key()) }
@@ -593,10 +612,23 @@ fun NewConversationRoute(target: TargetRef?, container: AppContainer, nav: Navig
         onBack = { nav.pop() },
         onStart = {
             val m = models?.items?.firstOrNull { it.key() == draft.modelKey } ?: return@NewConversationScreen
+            if (starting) return@NewConversationScreen
             val chosen = targets.filter { it.key in draft.targets }
-            val config = ConversationConfig(m.providerId, m.id, chosen.mapNotNull(AgentTargetOf::of), draft.mode, draft.planFirst)
-            val c = container.agents.create(config, m.name, m.vision, chosen.map { it.title }, if (draft.mode == AiMode.FULL_TRUST) draft.trustMinutes else null)
-            nav.replace(Route.Conversation(c.ui.value.id))
+            val config = ConversationConfig(
+                m.providerId, m.id, chosen.mapNotNull(AgentTargetOf::of), draft.mode, draft.planFirst,
+                trustMinutes = if (draft.mode == AiMode.FULL_TRUST) draft.trustMinutes else null,
+                title = null,
+            )
+            starting = true
+            scope.launch {
+                try {
+                    val c = container.agents.create(config, m.name, m.vision, chosen.map { it.title })
+                    nav.replace(Route.Conversation(c.ui.value.id))
+                } catch (e: Exception) {
+                    container.toast(e.userMessage())
+                }
+                starting = false
+            }
         },
     )
 }

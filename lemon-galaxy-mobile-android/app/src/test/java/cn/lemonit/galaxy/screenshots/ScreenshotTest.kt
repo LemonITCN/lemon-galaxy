@@ -497,10 +497,12 @@ class ScreenshotTest {
     fun tabletAiEnLight() {
         val c = appContainer(false)
         val m = MockData.models().first()
-        val conv = c.agents.create(
-            ConversationConfig(m.providerId, m.id, listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_WEB_01)), AiMode.CONFIRM_DANGEROUS, false),
-            m.name, m.vision, listOf("web-01 (nginx)"), null,
-        )
+        val conv = runBlocking {
+            c.agents.create(
+                ConversationConfig(m.providerId, m.id, listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_WEB_01)), AiMode.CONFIRM_DANGEROUS, false, null, null),
+                m.name, m.vision, listOf("web-01 (nginx)"),
+            )
+        }
         conv.send("web-01 is almost out of disk, please clean up")
         pump(15_000) { conv.ui.value.items.any { it is ChatItem.Tool && it.phase == cn.lemonit.galaxy.app.ToolPhase.AWAITING } }
         c.agents.refreshList()

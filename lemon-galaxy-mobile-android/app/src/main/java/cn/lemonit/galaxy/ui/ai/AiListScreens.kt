@@ -56,7 +56,7 @@ import cn.lemonit.galaxy.app.HostItem
 import cn.lemonit.galaxy.core.bridge.AiMode
 import cn.lemonit.galaxy.core.bridge.AiModel
 import cn.lemonit.galaxy.core.bridge.AiModels
-import cn.lemonit.galaxy.core.bridge.ConversationSummary
+import cn.lemonit.galaxy.app.ConversationListItem
 import cn.lemonit.galaxy.ui.components.ConfirmDialog
 import cn.lemonit.galaxy.ui.components.EmptyState
 import cn.lemonit.galaxy.ui.components.EntryAvatar
@@ -90,14 +90,14 @@ val SELECTABLE_MODES = listOf(AiMode.READ_ONLY, AiMode.CONFIRM_ALL, AiMode.CONFI
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ConversationListScreen(
-    items: List<ConversationSummary>,
+    items: List<ConversationListItem>,
     enabled: Boolean,
     onOpen: (String) -> Unit,
     onNew: () -> Unit,
     onDelete: (String) -> Unit,
     selectedId: String? = null,
 ) {
-    var deleting by remember { mutableStateOf<ConversationSummary?>(null) }
+    var deleting by remember { mutableStateOf<ConversationListItem?>(null) }
     Scaffold(
         topBar = {
             GalaxyTopBar(

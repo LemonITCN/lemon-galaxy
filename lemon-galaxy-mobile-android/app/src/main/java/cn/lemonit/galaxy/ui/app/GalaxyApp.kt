@@ -79,10 +79,13 @@ fun GalaxyApp(container: AppContainer, locked: Boolean, onUnlock: () -> Unit) {
         var restored by remember { mutableStateOf(false) }
         val snackbar = remember { SnackbarHostState() }
         LaunchedEffect(Unit) {
-            container.account.restore()
+            // 内核读本地会话并解密，放到后台线程
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { container.account.restore() }
             restored = true
         }
         LaunchedEffect(signedIn) { if (signedIn) container.onSignedIn() }
+        val locale = LocalConfiguration.current.locales[0]
+        LaunchedEffect(locale) { container.setCoreLocale(locale.language == "zh") }
         LaunchedEffect(Unit) { container.messages.collect { snackbar.showSnackbar(it) } }
         Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize()) {

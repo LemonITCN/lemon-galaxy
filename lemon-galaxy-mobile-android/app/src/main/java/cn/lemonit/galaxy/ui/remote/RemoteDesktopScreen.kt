@@ -81,10 +81,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.lemonit.galaxy.R
 import cn.lemonit.galaxy.core.bridge.InputEvent
-import cn.lemonit.galaxy.core.bridge.MouseButton
+import cn.lemonit.galaxy.core.bridge.PointerButton
 import cn.lemonit.galaxy.core.bridge.PathKind
 import cn.lemonit.galaxy.core.bridge.Platform
-import cn.lemonit.galaxy.core.bridge.SpecialCombo
+import cn.lemonit.galaxy.core.bridge.ComboKey
 import cn.lemonit.galaxy.data.VideoQuality
 import cn.lemonit.galaxy.ui.components.InfoButton
 import cn.lemonit.galaxy.ui.components.StatusDot
@@ -102,7 +102,7 @@ interface RemoteActions {
     fun onDisconnect()
 }
 
-private fun click(button: MouseButton, x: Int, y: Int) = listOf(
+private fun click(button: PointerButton, x: Int, y: Int) = listOf(
     InputEvent.MouseMove(x, y),
     InputEvent.MouseButton(button, true, x, y),
     InputEvent.MouseButton(button, false, x, y),
@@ -144,22 +144,22 @@ fun RemoteDesktopScreen(
                 override fun tap(at: Offset) {
                     if (currentUi.mouseMode) {
                         val (x, y) = cursor()
-                        send(click(MouseButton.LEFT, x, y))
+                        send(click(PointerButton.LEFT, x, y))
                     } else {
                         val (x, y) = remote(at)
-                        send(click(MouseButton.LEFT, x, y))
+                        send(click(PointerButton.LEFT, x, y))
                     }
                 }
 
                 override fun twoFingerTap() {
                     val (x, y) = cursor()
-                    send(click(MouseButton.RIGHT, x, y))
+                    send(click(PointerButton.RIGHT, x, y))
                 }
 
                 override fun longPress(at: Offset) {
                     if (!currentUi.mouseMode) {
                         val (x, y) = remote(at)
-                        send(click(MouseButton.RIGHT, x, y))
+                        send(click(PointerButton.RIGHT, x, y))
                     }
                 }
 
@@ -167,12 +167,12 @@ fun RemoteDesktopScreen(
                     if (currentUi.mouseMode) {
                         if (afterLongPress) {
                             val (x, y) = cursor()
-                            send(listOf(InputEvent.MouseButton(MouseButton.LEFT, true, x, y)))
+                            send(listOf(InputEvent.MouseButton(PointerButton.LEFT, true, x, y)))
                             dragButtonDown = true
                         }
                     } else if (!afterLongPress) {
                         val (x, y) = remote(at)
-                        send(listOf(InputEvent.MouseMove(x, y), InputEvent.MouseButton(MouseButton.LEFT, true, x, y)))
+                        send(listOf(InputEvent.MouseMove(x, y), InputEvent.MouseButton(PointerButton.LEFT, true, x, y)))
                         dragButtonDown = true
                     }
                 }
@@ -195,7 +195,7 @@ fun RemoteDesktopScreen(
                 override fun dragEnd() {
                     if (dragButtonDown) {
                         val (x, y) = cursor()
-                        send(listOf(InputEvent.MouseButton(MouseButton.LEFT, false, x, y)))
+                        send(listOf(InputEvent.MouseButton(PointerButton.LEFT, false, x, y)))
                         dragButtonDown = false
                     }
                 }
@@ -348,6 +348,7 @@ private fun ToolbarPanel(ui: RemoteUi, actions: RemoteActions, onKeyboard: () ->
                         PathKind.DIRECT -> stringResource(R.string.path_direct) to Galaxy.colors.online
                         PathKind.RELAY_UDP -> stringResource(R.string.path_relay_udp) to Galaxy.colors.warning
                         PathKind.RELAY_TCP -> stringResource(R.string.path_relay_tcp) to Galaxy.colors.warning
+                        PathKind.CONNECTING, PathKind.CLOSED -> "—" to Galaxy.colors.offline
                     }
                     StatusDot(color, size = 7.dp)
                     Spacer(Modifier.width(6.dp))
@@ -462,17 +463,17 @@ private fun shortcutsFor(platform: Platform): List<Shortcut> {
             Shortcut(R.string.combo_cmd) { Hid.tap(Hid.GUI) },
             Shortcut(R.string.combo_cmd_tab) { Hid.combo(Hid.GUI, Hid.TAB) },
             Shortcut(R.string.combo_spotlight) { Hid.combo(Hid.GUI, Hid.SPACE) },
-            Shortcut(R.string.combo_lock) { listOf(InputEvent.SpecialCombo(SpecialCombo.LOCK_SCREEN)) },
+            Shortcut(R.string.combo_lock) { listOf(InputEvent.SpecialCombo(ComboKey.LOCK_SCREEN)) },
         ) + common
     } else {
         listOf(
-            Shortcut(R.string.combo_ctrl_alt_del) { listOf(InputEvent.SpecialCombo(SpecialCombo.CTRL_ALT_DEL)) },
-            Shortcut(R.string.combo_win) { Hid.tap(Hid.GUI) },
-            Shortcut(R.string.combo_alt_tab) { Hid.combo(Hid.ALT, Hid.TAB) },
+            Shortcut(R.string.combo_ctrl_alt_del) { listOf(InputEvent.SpecialCombo(ComboKey.CTRL_ALT_DEL)) },
+            Shortcut(R.string.combo_win) { listOf(InputEvent.SpecialCombo(ComboKey.WIN_KEY)) },
+            Shortcut(R.string.combo_alt_tab) { listOf(InputEvent.SpecialCombo(ComboKey.ALT_TAB)) },
             Shortcut(R.string.combo_alt_f4) { Hid.combo(Hid.ALT, Hid.F4) },
-            Shortcut(R.string.combo_task_manager) { listOf(InputEvent.SpecialCombo(SpecialCombo.TASK_MANAGER)) },
-            Shortcut(R.string.combo_show_desktop) { listOf(InputEvent.SpecialCombo(SpecialCombo.SHOW_DESKTOP)) },
-            Shortcut(R.string.combo_lock) { listOf(InputEvent.SpecialCombo(SpecialCombo.LOCK_SCREEN)) },
+            Shortcut(R.string.combo_task_manager) { listOf(InputEvent.SpecialCombo(ComboKey.TASK_MANAGER)) },
+            Shortcut(R.string.combo_show_desktop) { listOf(InputEvent.SpecialCombo(ComboKey.SHOW_DESKTOP)) },
+            Shortcut(R.string.combo_lock) { listOf(InputEvent.SpecialCombo(ComboKey.LOCK_SCREEN)) },
         ) + common
     }
 }

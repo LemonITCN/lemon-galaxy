@@ -6,7 +6,9 @@ import cn.lemonit.galaxy.core.bridge.PathInfo
 import cn.lemonit.galaxy.core.bridge.PeerInfo
 import cn.lemonit.galaxy.core.bridge.PeerListener
 import cn.lemonit.galaxy.core.bridge.PeerSessionInterface
+import cn.lemonit.galaxy.core.bridge.GalaxyException
 import cn.lemonit.galaxy.core.bridge.SecretPrompt
+import cn.lemonit.galaxy.core.bridge.SshClientInterface
 import cn.lemonit.galaxy.core.bridge.SshSessionInterface
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -65,7 +67,7 @@ class ConnectionManager(
     }
 
     suspend fun peer(deviceId: String): PeerHandle = mutex.withLock {
-        peers[deviceId]?.takeIf { !it.closed }?.let { return it }
+        peers[deviceId]?.takeIf { !it.closed && !it.session.isClosed() }?.let { return it }
         val h = PeerHandle(deviceId, client.connect(deviceId), ::updatePath)
         peers[deviceId] = h
         updatePath(deviceId, h.path.value)
@@ -74,12 +76,20 @@ class ConnectionManager(
 
     fun existingPeer(deviceId: String): PeerHandle? = peers[deviceId]?.takeIf { !it.closed }
 
+    /** 界面语言的「暂不支持 SSH 直连」文字，由容器设置。 */
+    var sshUnsupportedMessage: String = "SSH"
+
+    /** 当前内核是否支持 SSH 直连（galaxy-ffi 还没导出 connect_ssh 时为 false）。 */
+    val sshSupported: Boolean get() = client is SshClientInterface
+
     suspend fun ssh(hostId: String, title: String?): SshHandle = mutex.withLock {
         ssh[hostId]?.takeIf { !it.closed }?.let { return it }
+        val sshClient = client as? SshClientInterface
+            ?: throw GalaxyException.Other(sshUnsupportedMessage)
         val prompt = object : SecretPrompt {
             override fun ask(prompt: String, echo: Boolean): String? = prompts.ask(prompt, echo, title)
         }
-        val h = SshHandle(hostId, client.connectSsh(hostId, prompt))
+        val h = SshHandle(hostId, sshClient.connectSsh(hostId, prompt))
         ssh[hostId] = h
         h
     }
@@ -90,12 +100,12 @@ class ConnectionManager(
     }
 
     fun disconnect(deviceId: String) {
-        peers.remove(deviceId)?.session?.close()
+        peers.remove(deviceId)?.session?.disconnect()
         updatePath(deviceId, null)
     }
 
     fun disconnectAll() {
-        peers.values.forEach { runCatching { it.session.close() } }
+        peers.values.forEach { runCatching { it.session.disconnect() } }
         peers.clear()
         _paths.value = emptyMap()
         ssh.values.forEach { runCatching { it.session.close() } }

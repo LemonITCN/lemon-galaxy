@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
+import cn.lemonit.galaxy.core.bridge.EnvVar
 import cn.lemonit.galaxy.core.bridge.TerminalChannelInterface
 import cn.lemonit.galaxy.core.bridge.TerminalOptions
 import cn.lemonit.galaxy.core.bridge.TerminalSessionInfo
@@ -97,12 +98,14 @@ class TerminalTab internal constructor(
             try {
                 val ch = when (target) {
                     is TargetRef.Device -> conn.peer(target.deviceId).session.openTerminal(
-                        TerminalOptions(attachId, null, cols.toUShort(), rows.toUShort()), s,
+                        TerminalOptions(attachId, null, cols.toUShort(), rows.toUShort(), TERMINAL_ENV), s,
                     )
                     is TargetRef.Ssh -> conn.ssh(target.hostId, targetName).session.openTerminal(cols.toUShort(), rows.toUShort(), s)
                 }
                 channel = ch
                 remoteSessionId = ch.sessionId()
+                // 被控端给的会话标题（shell 名），程序用 OSC 设置标题后会被覆盖
+                runCatching { ch.title() }.getOrNull()?.takeIf { it.isNotBlank() && session.title.isNullOrBlank() }?.let { _title.value = it }
                 _status.value = TabStatus.Connected
             } catch (e: Exception) {
                 _status.value = TabStatus.Failed(e.userMessage())
@@ -195,6 +198,9 @@ class TerminalTab internal constructor(
 
     private companion object {
         const val TAG = "Terminal"
+
+        /** Termux 仿真器支持 256 色与真彩色。 */
+        val TERMINAL_ENV = listOf(EnvVar("TERM", "xterm-256color"), EnvVar("COLORTERM", "truecolor"))
     }
 }
 

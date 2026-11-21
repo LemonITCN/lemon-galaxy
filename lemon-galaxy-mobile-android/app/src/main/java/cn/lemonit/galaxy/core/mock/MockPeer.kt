@@ -45,7 +45,7 @@ internal class MockHost(
     val fs = MockFs(if (platform == Platform.MACOS || platform == Platform.WINDOWS) "/Users/$user" else "/home/$user", user, tr)
     val shells = ConcurrentHashMap<String, MockShell>()
     private val seq = AtomicInteger(1)
-    var clipboard: ClipboardData = ClipboardData(tr("来自远端的剪贴板文字", "Clipboard text from the remote"), null)
+    var clipboard: ClipboardData = ClipboardData.Text(tr("来自远端的剪贴板文字", "Clipboard text from the remote"))
 
     fun newShell(): MockShell {
         val id = "${hostname.lowercase()}-${seq.getAndIncrement()}"
@@ -86,6 +86,7 @@ internal class MockPeerSession(
         PathKind.DIRECT -> "[240e:3b0:1c::${(host.id.hashCode() and 0xFFF).toString(16)}]:51820"
         PathKind.RELAY_UDP -> "galaxy.example.com:7443 (UDP)"
         PathKind.RELAY_TCP -> "galaxy.example.com:7443 (TCP)"
+        PathKind.CONNECTING, PathKind.CLOSED -> ""
     }
 
     private val hasGui get() = host.platform == Platform.MACOS || host.platform == Platform.WINDOWS
@@ -96,6 +97,8 @@ internal class MockPeerSession(
         platform = host.platform,
         osVersion = osVersion,
         arch = arch,
+        systemUser = host.user,
+        shell = if (host.platform == Platform.WINDOWS) "powershell" else "/bin/bash",
         permissions = Permissions(view = hasGui, control = hasGui, files = true, terminal = true, clipboard = true, audio = false, aiCap = AiMode.FULL_TRUST),
         capabilities = buildList {
             addAll(listOf("terminal", "files", "exec", "clipboard", "port_forward"))
@@ -110,11 +113,13 @@ internal class MockPeerSession(
         this.listener = listener
     }
 
-    override fun close() {
+    override fun disconnect() {
         closed = true
         ticker.cancel()
         host.shells.values.forEach { if (it.attached) it.sink = null }
     }
+
+    override fun isClosed(): Boolean = closed
 
     override suspend fun openTerminal(options: TerminalOptions, sink: TerminalSink): TerminalChannelInterface {
         delay(250)
@@ -152,7 +157,7 @@ internal class MockPeerSession(
             "whoami" -> "${host.user}\n"
             else -> ""
         }
-        return ExecResult(0, null, out.toByteArray(), ByteArray(0), false, false, 300u)
+        return ExecResult(0, out, "", false, false, 300u)
     }
 
     override suspend fun listDisplays(): List<DisplayInfo> {
@@ -173,7 +178,7 @@ internal class MockPeerSession(
         return core.desktopPreview() ?: throw GalaxyException.Other("no preview")
     }
 
-    override suspend fun clipboardGet(): ClipboardData = host.clipboard
+    override suspend fun clipboardGet(): ClipboardData? = host.clipboard
 
     override suspend fun clipboardSet(data: ClipboardData) {
         host.clipboard = data
@@ -181,19 +186,23 @@ internal class MockPeerSession(
 
     override suspend fun forwardPort(localPort: UShort, remoteHost: String, remotePort: UShort): PortForwardInterface = MockPortForward(localPort)
 
+    override suspend fun wakeOnLan(mac: String) {
+        delay(200)
+    }
+
     companion object {
         fun bytesPerSecond(kind: PathKind): Long = when (kind) {
             PathKind.LAN -> 40L * 1024 * 1024
             PathKind.DIRECT -> 8L * 1024 * 1024
             PathKind.RELAY_UDP -> 3L * 1024 * 1024
-            PathKind.RELAY_TCP -> 1L * 1024 * 1024
+            PathKind.RELAY_TCP, PathKind.CONNECTING, PathKind.CLOSED -> 1L * 1024 * 1024
         }
     }
 }
 
 internal class MockPortForward(private val port: UShort) : PortForwardInterface {
     override fun localPort(): UShort = port
-    override fun close() = Unit
+    override fun stop() = Unit
 }
 
 internal class MockSshSession(private val host: MockHost) : SshSessionInterface {
@@ -210,7 +219,7 @@ internal class MockSshSession(private val host: MockHost) : SshSessionInterface 
 
     override suspend fun exec(request: ExecRequest): ExecResult {
         delay(300)
-        return ExecResult(0, null, ByteArray(0), ByteArray(0), false, false, 300u)
+        return ExecResult(0, "", "", false, false, 300u)
     }
 
     override suspend fun forwardLocal(localPort: UShort, remoteHost: String, remotePort: UShort): PortForwardInterface = MockPortForward(localPort)

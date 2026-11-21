@@ -43,14 +43,20 @@ import cn.lemonit.galaxy.ui.components.InfoButton
 import kotlinx.coroutines.launch
 
 @Composable
-fun ChangePasswordDialog(submit: suspend (String, String) -> Unit, onDone: () -> Unit, onDismiss: () -> Unit) {
+fun ChangePasswordDialog(
+    submit: suspend (String, String, String?) -> Unit,
+    requireTotp: Boolean,
+    onDone: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     var old by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
     var new by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    val ok = old.isNotEmpty() && new.length >= 8 && new == confirm
+    val ok = old.isNotEmpty() && new.length >= 8 && new == confirm && (!requireTotp || code.length == 6)
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
         title = { Text(stringResource(R.string.settings_change_password)) },
@@ -59,6 +65,16 @@ fun ChangePasswordDialog(submit: suspend (String, String) -> Unit, onDone: () ->
                 PwField(old, { old = it }, stringResource(R.string.cp_current))
                 PwField(new, { new = it }, stringResource(R.string.cp_new), if (new.isNotEmpty() && new.length < 8) stringResource(R.string.password_too_short) else null)
                 PwField(confirm, { confirm = it }, stringResource(R.string.cp_confirm), if (confirm.isNotEmpty() && confirm != new) stringResource(R.string.password_mismatch) else null)
+                if (requireTotp) {
+                    OutlinedTextField(
+                        code, { v -> code = v.filter(Char::isDigit).take(6) },
+                        label = { Text(stringResource(R.string.login_totp_code)) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
@@ -67,7 +83,7 @@ fun ChangePasswordDialog(submit: suspend (String, String) -> Unit, onDone: () ->
                 busy = true
                 scope.launch {
                     try {
-                        submit(old, new)
+                        submit(old, new, code.takeIf { requireTotp })
                         onDone()
                         onDismiss()
                     } catch (e: Exception) {

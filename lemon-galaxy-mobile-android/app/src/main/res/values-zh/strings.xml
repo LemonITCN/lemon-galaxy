@@ -153,6 +153,7 @@
     <string name="assist_connect">连接</string>
     <string name="assist_info">未登录账号的设备会显示设备码和验证码。验证码只显示在对方屏幕上，不经过服务器。连接时需要对方点「允许」。</string>
     <string name="secret_prompt_title">需要输入</string>
+    <string name="ssh_unsupported">SSH 直连需要新版内核支持，目前请先通过某台设备的终端访问这台主机。</string>
     <string name="host_key_title">未知主机</string>
 
     <!-- 终端 -->

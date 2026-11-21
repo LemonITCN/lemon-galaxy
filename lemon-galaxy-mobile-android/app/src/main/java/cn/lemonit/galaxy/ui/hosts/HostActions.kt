@@ -70,7 +70,7 @@ fun HostItem.Device.reachable() = device.online || device.lanSeen
 
 /** 点设备 / 主机弹出的操作面板内容（底部弹层与平板详情栏共用）。 */
 @Composable
-fun HostActionsContent(item: HostItem, onAction: (HostAction) -> Unit, modifier: Modifier = Modifier) {
+fun HostActionsContent(item: HostItem, onAction: (HostAction) -> Unit, modifier: Modifier = Modifier, sshSupported: Boolean = true) {
     Column(modifier.fillMaxWidth().padding(bottom = 16.dp)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             val (icon, status) = avatarFor(item)
@@ -118,10 +118,11 @@ fun HostActionsContent(item: HostItem, onAction: (HostAction) -> Unit, modifier:
                     )
                 }
             }
-            is HostItem.Ssh -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ActionTile(Icons.Rounded.Terminal, stringResource(R.string.action_terminal), true) { onAction(HostAction.TERMINAL) }
-                ActionTile(Icons.Rounded.FolderOpen, stringResource(R.string.action_files), true) { onAction(HostAction.FILES) }
-                ActionTile(Icons.Rounded.AutoAwesome, stringResource(R.string.action_ai), true) { onAction(HostAction.AI) }
+            is HostItem.Ssh -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                ActionTile(Icons.Rounded.Terminal, stringResource(R.string.action_terminal), sshSupported) { onAction(HostAction.TERMINAL) }
+                ActionTile(Icons.Rounded.FolderOpen, stringResource(R.string.action_files), sshSupported) { onAction(HostAction.FILES) }
+                ActionTile(Icons.Rounded.AutoAwesome, stringResource(R.string.action_ai), sshSupported) { onAction(HostAction.AI) }
+                if (!sshSupported) InfoButton(stringResource(R.string.ssh_unsupported))
             }
             is HostItem.Rdp -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 ActionTile(Icons.Rounded.Tv, stringResource(R.string.action_remote_desktop), false) {}

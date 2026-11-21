@@ -3,11 +3,9 @@ package cn.lemonit.galaxy.core.mock
 import cn.lemonit.galaxy.core.bridge.AgentConversationInterface
 import cn.lemonit.galaxy.core.bridge.AgentListener
 import cn.lemonit.galaxy.core.bridge.AgentMessage
-import cn.lemonit.galaxy.core.bridge.AgentRole
 import cn.lemonit.galaxy.core.bridge.AgentTargetKind
 import cn.lemonit.galaxy.core.bridge.AiMode
 import cn.lemonit.galaxy.core.bridge.AiModels
-import cn.lemonit.galaxy.core.bridge.ApprovalDecision
 import cn.lemonit.galaxy.core.bridge.AgentTarget
 import cn.lemonit.galaxy.core.bridge.ClientListener
 import cn.lemonit.galaxy.core.bridge.ClientState
@@ -16,7 +14,7 @@ import cn.lemonit.galaxy.core.bridge.ConversationSummary
 import cn.lemonit.galaxy.core.bridge.CoreConfig
 import cn.lemonit.galaxy.core.bridge.DeviceInfo
 import cn.lemonit.galaxy.core.bridge.GalaxyClientInterface
-import cn.lemonit.galaxy.core.bridge.GalaxyClientProposedInterface
+import cn.lemonit.galaxy.core.bridge.SshClientInterface
 import cn.lemonit.galaxy.core.bridge.GalaxyCore
 import cn.lemonit.galaxy.core.bridge.GalaxyException
 import cn.lemonit.galaxy.core.bridge.ImageData
@@ -39,7 +37,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -74,6 +71,10 @@ class MockCore(private val assets: (String) -> ByteArray) : GalaxyCore {
         this.config = config
     }
 
+    override fun coreSetLocale(locale: String) {
+        config = config?.copy(locale = locale)
+    }
+
     override fun newGalaxyClient(store: SecureStore, listener: ClientListener): GalaxyClientInterface = MockClient(this, store, listener)
 }
 
@@ -81,7 +82,7 @@ internal class MockClient(
     private val core: MockCore,
     private val store: SecureStore,
     private val listener: ClientListener,
-) : GalaxyClientInterface, GalaxyClientProposedInterface {
+) : GalaxyClientInterface, SshClientInterface {
     private val scope = core.scope
     private fun tr(zh: String, en: String) = core.tr(zh, en)
 
@@ -93,9 +94,9 @@ internal class MockClient(
     private val vault = ConcurrentHashMap<String, VaultEntry>().apply { MockData.vault(System.currentTimeMillis()).forEach { put(it.id, it) } }
     private val hosts = ConcurrentHashMap<String, MockHost>()
     private val conversations = ConcurrentHashMap<String, MockConversation>()
-    private val foreground = MutableStateFlow(true)
     private var totpEnabled = false
     private var seeded = false
+    @Volatile private var lanDiscovery = false
 
     private fun setState(s: ClientState) {
         state = s
@@ -130,7 +131,7 @@ internal class MockClient(
             totpEnabled = true
         }
         this.server = ServerInfo(server, "LemonGalaxy", "0.1.0")
-        this.user = UserInfo(3u, name, displayName(name), aiEnabled = true)
+        this.user = UserInfo(3u, name, displayName(name), aiEnabled = true, totpEnabled = totpEnabled)
         if (name.startsWith("new")) {
             pendingFirstLogin = true
             setState(ClientState.LOGGED_OUT)
@@ -157,7 +158,13 @@ internal class MockClient(
         finishLogin()
     }
 
-    override suspend fun changePassword(oldPassword: String, newPassword: String) {
+    override fun deviceId(): String = MockData.DEV_SELF
+
+    override fun setLanDiscovery(active: Boolean) {
+        lanDiscovery = active
+    }
+
+    override suspend fun changePassword(oldPassword: String, newPassword: String, totp: String?) {
         delay(800)
         if (oldPassword == "wrong") throw GalaxyException.Auth("invalid_credentials", tr("原密码不正确", "Current password is incorrect"))
         if (newPassword.length < 8) throw GalaxyException.Other(tr("新密码至少 8 位", "New password must be at least 8 characters"))
@@ -177,7 +184,7 @@ internal class MockClient(
         val lines = saved.split('\n')
         if (lines.size < 2) return false
         server = ServerInfo(lines[0], "LemonGalaxy", "0.1.0")
-        user = UserInfo(3u, lines[1], displayName(lines[1]), aiEnabled = true)
+        user = UserInfo(3u, lines[1], displayName(lines[1]), aiEnabled = true, totpEnabled = totpEnabled)
         setState(ClientState.ONLINE)
         return true
     }
@@ -288,19 +295,15 @@ internal class MockClient(
         AgentTargetKind.SSH_HOST -> MockTarget(t.id, (vault[t.id]?.data as? VaultData.SshHost)?.label ?: t.id, Platform.LINUX)
     }
 
-    override fun newConversation(config: ConversationConfig, listener: AgentListener): AgentConversationInterface {
+    override suspend fun newConversation(config: ConversationConfig, listener: AgentListener): AgentConversationInterface {
         val model = MockData.models().firstOrNull { it.id == config.modelId }?.name ?: config.modelId
         val c = MockConversation(
             MockConversation.newId(), config, model, config.targets.map(::targetOf), listener, scope, core.zh,
-            core::desktopPreview, foreground,
+            core::desktopPreview,
         )
         conversations[c.id()] = c
         return c
     }
-
-    // ---------- 补充接口（ffi.md 未定义） ----------
-
-    override suspend fun totpEnabled(): Boolean = totpEnabled
 
     override suspend fun totpSetup(): TotpSetup {
         delay(300)
@@ -312,30 +315,31 @@ internal class MockClient(
         delay(300)
         if (code != "123456") throw GalaxyException.Auth("totp_invalid", tr("验证码不正确（模拟：123456）", "Incorrect code (mock: 123456)"))
         totpEnabled = true
+        user = user?.copy(totpEnabled = true)
     }
 
     override suspend fun totpDisable(code: String) {
         delay(300)
         if (code != "123456") throw GalaxyException.Auth("totp_invalid", tr("验证码不正确（模拟：123456）", "Incorrect code (mock: 123456)"))
         totpEnabled = false
+        user = user?.copy(totpEnabled = false)
     }
 
-    override fun conversations(): List<ConversationSummary> {
+    override fun listConversations(): List<ConversationSummary> {
         seedConversations()
         return conversations.values.map { it.summary() }.sortedByDescending { it.updatedAt }
     }
 
-    override fun openConversation(id: String, listener: AgentListener): AgentConversationInterface? {
+    override suspend fun openConversation(id: String, config: ConversationConfig, listener: AgentListener): AgentConversationInterface {
         seedConversations()
-        return conversations[id]?.also { it.listener = listener }
+        val c = conversations[id] ?: throw GalaxyException.NotFound(tr("对话不存在", "Conversation not found"))
+        c.listener = listener
+        c.config = config.copy(title = c.title)
+        return c
     }
 
     override fun deleteConversation(id: String) {
         conversations.remove(id)?.stop()
-    }
-
-    override fun setForeground(foreground: Boolean) {
-        this.foreground.value = foreground
     }
 
     /** 预置两段历史对话，列表页一打开就有内容。 */
@@ -348,8 +352,8 @@ internal class MockClient(
         }
         val t0 = MockData.NOW - 3 * 3600_000L
         val c1 = MockConversation(
-            "seed-nginx", ConversationConfig(1u, "glm-5.2", listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_WEB_01)), AiMode.CONFIRM_DANGEROUS, false),
-            "GLM-5.2", listOf(MockTarget(MockData.DEV_WEB_01, "web-01 (nginx)", Platform.LINUX)), noop, scope, core.zh, core::desktopPreview, foreground,
+            "seed-nginx", ConversationConfig(1u, "glm-5.2", listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_WEB_01)), AiMode.CONFIRM_DANGEROUS, false, null, null),
+            "GLM-5.2", listOf(MockTarget(MockData.DEV_WEB_01, "web-01 (nginx)", Platform.LINUX)), noop, scope, core.zh, core::desktopPreview,
         )
         val call = ToolCallView(
             "seed-call-1", "run_command", MockData.DEV_WEB_01, "web-01 (nginx)", "sudo systemctl reload nginx",
@@ -358,32 +362,27 @@ internal class MockClient(
         )
         c1.seed(
             listOf(
-                AgentMessage("u1", AgentRole.USER, tr("nginx 改了配置，帮我检查并重新加载", "I changed the nginx config, please check it and reload"), null, null, null, null, t0),
-                AgentMessage("a1", AgentRole.ASSISTANT, tr("先检查配置语法。", "Checking the configuration syntax first."), null, null, null, null, t0 + 2000),
-                AgentMessage(
-                    "t1", AgentRole.TOOL, "", null,
+                AgentMessage.User(tr("nginx 改了配置，帮我检查并重新加载", "I changed the nginx config, please check it and reload")),
+                AgentMessage.Assistant("a1", tr("先检查配置语法。", "Checking the configuration syntax first."), ""),
+                AgentMessage.Tool(
                     ToolCallView("seed-call-0", "run_command", MockData.DEV_WEB_01, "web-01 (nginx)", "sudo nginx -t", "{}", RiskLevel.DANGEROUS, listOf(tr("sudo 提权执行", "Runs with sudo")), tr("检查配置语法", "Validate syntax"), null),
                     ToolResultView(true, tr("完成，退出码 0", "Done, exit code 0"), "nginx: the configuration file /etc/nginx/nginx.conf syntax is ok\nnginx: configuration file /etc/nginx/nginx.conf test is successful", null, false),
-                    ApprovalDecision.AllowOnce, t0 + 9000,
                 ),
-                AgentMessage(
-                    "t2", AgentRole.TOOL, "", null, call,
-                    ToolResultView(true, tr("完成，退出码 0", "Done, exit code 0"), "", null, false), ApprovalDecision.AllowOnce, t0 + 15000,
-                ),
-                AgentMessage("a2", AgentRole.ASSISTANT, tr("配置检查通过，nginx 已重新加载。", "The configuration is valid and nginx has been reloaded."), null, null, null, null, t0 + 16000),
+                AgentMessage.Tool(call, ToolResultView(true, tr("完成，退出码 0", "Done, exit code 0"), "", null, false)),
+                AgentMessage.Assistant("a2", tr("配置检查通过，nginx 已重新加载。", "The configuration is valid and nginx has been reloaded."), ""),
             ),
             tr("nginx 改了配置，帮我检查并重新加载", "I changed the nginx config, please check it and reload"),
             t0 + 16000,
         )
         val t1 = MockData.NOW - 26 * 3600_000L
         val c2 = MockConversation(
-            "seed-mac", ConversationConfig(1u, "kimi-k2.6", listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_BUILD_MAC)), AiMode.CONFIRM_ALL, false),
-            "Kimi K2.6", listOf(MockTarget(MockData.DEV_BUILD_MAC, "Build Mac", Platform.MACOS)), noop, scope, core.zh, core::desktopPreview, foreground,
+            "seed-mac", ConversationConfig(1u, "kimi-k2.6", listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_BUILD_MAC)), AiMode.CONFIRM_ALL, false, null, null),
+            "Kimi K2.6", listOf(MockTarget(MockData.DEV_BUILD_MAC, "Build Mac", Platform.MACOS)), noop, scope, core.zh, core::desktopPreview,
         )
         c2.seed(
             listOf(
-                AgentMessage("u2", AgentRole.USER, tr("看看 Xcode 为什么卡住了", "Why is Xcode stuck?"), null, null, null, null, t1),
-                AgentMessage("a3", AgentRole.ASSISTANT, tr("Xcode 正在索引，占用 CPU 较高，等它完成即可。", "Xcode is indexing and using a lot of CPU; it should finish shortly."), null, null, null, null, t1 + 30000),
+                AgentMessage.User(tr("看看 Xcode 为什么卡住了", "Why is Xcode stuck?")),
+                AgentMessage.Assistant("a3", tr("Xcode 正在索引，占用 CPU 较高，等它完成即可。", "Xcode is indexing and using a lot of CPU; it should finish shortly."), ""),
             ),
             tr("看看 Xcode 为什么卡住了", "Why is Xcode stuck?"),
             t1 + 30000,
