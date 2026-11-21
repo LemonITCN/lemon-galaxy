@@ -249,6 +249,10 @@ async fn password_start(State(st): State<St>, UserAny(s): UserAny, Json(req): Js
     if !st.rate.check(&format!("pw:{}", s.user_id), 10, 60) {
         return Err(AppError::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited").lang(s.lang));
     }
+    // 改密码必须用 10 分钟内刚登录（验证过旧密码）的会话，被盗的长期令牌改不了密码
+    if !s.restricted && galaxy_proto::now_ms() - s.created_at > 10 * 60_000 {
+        return Err(AppError::new(StatusCode::UNAUTHORIZED, "unauthorized").detail("请重新输入旧密码").lang(s.lang));
+    }
     let resp = st
         .keys
         .opaque

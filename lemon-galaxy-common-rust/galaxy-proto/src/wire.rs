@@ -7,6 +7,8 @@ pub const SERVER_MAGIC: [u8; 4] = [0, b'L', b'G', b'S'];
 pub const DISCO_MAGIC: [u8; 4] = [0, b'L', b'G', b'D'];
 pub const LAN_QUERY_MAGIC: [u8; 4] = [0, b'L', b'G', b'Q'];
 pub const LAN_REPLY_MAGIC: [u8; 4] = [0, b'L', b'G', b'R'];
+/// 离线局域网连接请求（服务器不可达时主控端直接请求被控端）
+pub const LAN_CONNECT_MAGIC: [u8; 4] = [0, b'L', b'G', b'C'];
 
 pub const LAN_MULTICAST_V4: Ipv4Addr = Ipv4Addr::new(239, 255, 71, 71);
 pub const LAN_MULTICAST_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x4c47);
@@ -17,6 +19,7 @@ pub enum PacketClass {
     Disco,
     LanQuery,
     LanReply,
+    LanConnect,
     /// 不是自有包，交给 QUIC
     Quic,
     Junk,
@@ -38,6 +41,7 @@ pub fn classify(b: &[u8]) -> PacketClass {
         DISCO_MAGIC => PacketClass::Disco,
         LAN_QUERY_MAGIC => PacketClass::LanQuery,
         LAN_REPLY_MAGIC => PacketClass::LanReply,
+        LAN_CONNECT_MAGIC => PacketClass::LanConnect,
         _ => PacketClass::Junk,
     }
 }
@@ -333,9 +337,62 @@ impl LanReply {
     }
 }
 
+/// 离线局域网连接请求。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LanConnect {
+    pub conn_id: [u8; 16],
+    pub target: [u8; 16],
+    pub controller: [u8; 16],
+    /// 主控端魔法套接字端口
+    pub reply_port: u16,
+    pub mac: [u8; 16],
+}
+
+impl LanConnect {
+    pub fn mac_input(conn_id: &[u8; 16], target: &[u8; 16], controller: &[u8; 16], reply_port: u16) -> Vec<u8> {
+        let mut v = vec![b'c'];
+        v.extend_from_slice(conn_id);
+        v.extend_from_slice(target);
+        v.extend_from_slice(controller);
+        v.extend_from_slice(&reply_port.to_be_bytes());
+        v
+    }
+    pub fn encode(&self) -> Vec<u8> {
+        let mut o = Vec::with_capacity(72);
+        o.extend_from_slice(&LAN_CONNECT_MAGIC);
+        o.push(1);
+        o.extend_from_slice(&self.conn_id);
+        o.extend_from_slice(&self.target);
+        o.extend_from_slice(&self.controller);
+        o.extend_from_slice(&self.reply_port.to_be_bytes());
+        o.extend_from_slice(&self.mac);
+        o
+    }
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        if b.len() < 5 + 48 + 2 + 16 || b[..4] != LAN_CONNECT_MAGIC || b[4] != 1 {
+            return None;
+        }
+        Some(Self {
+            conn_id: b[5..21].try_into().ok()?,
+            target: b[21..37].try_into().ok()?,
+            controller: b[37..53].try_into().ok()?,
+            reply_port: u16::from_be_bytes([b[53], b[54]]),
+            mac: b[55..71].try_into().ok()?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_connect() {
+        let c = LanConnect { conn_id: [1; 16], target: [2; 16], controller: [3; 16], reply_port: 4321, mac: [9; 16] };
+        let e = c.encode();
+        assert_eq!(classify(&e), PacketClass::LanConnect);
+        assert_eq!(LanConnect::decode(&e), Some(c));
+    }
 
     #[test]
     fn server_packets() {

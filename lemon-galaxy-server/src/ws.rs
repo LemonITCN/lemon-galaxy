@@ -116,7 +116,8 @@ async fn run_ws(st: St, sock: WebSocket, ip: IpAddr, q: WsQuery) -> anyhow::Resu
     if assist && !kind.can_host() {
         anyhow::bail!("该类设备不能被协助");
     }
-    let accounts = if assist { vec![] } else { active_accounts(&st, device_id).await };
+    // 已登录账号的设备也可以同时开临时协助：账号在线状态照常保留
+    let accounts = active_accounts(&st, device_id).await;
     if !assist && accounts.is_empty() {
         let _ = sink.send(Message::Text(WsMsg::Error { code: "no_account".into(), message: String::new() }.to_json().into())).await;
         anyhow::bail!("设备没有有效账号");

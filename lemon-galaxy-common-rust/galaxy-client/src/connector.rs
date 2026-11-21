@@ -46,7 +46,88 @@ impl Connector {
     }
 
     pub async fn connect(self: &Arc<Self>, device: DeviceId) -> Result<Arc<PeerSession>> {
+        if !self.signal.is_connected() && !self.signal.wait_connected(Duration::from_secs(2)).await {
+            // 服务器不可达：局域网离线连接
+            return self.connect_offline(device).await;
+        }
         self.establish(Some(device), ConnMode::Control, None).await
+    }
+
+    /// 服务器不可达时直接在局域网里连接（双方凭本地缓存的账号公钥与设备证书认证，没有服务器票据）。
+    pub async fn connect_offline(self: &Arc<Self>, device: DeviceId) -> Result<Arc<PeerSession>> {
+        let conn_id = galaxy_proto::ConnId::random();
+        let tag = galaxy_crypto::conn_tag(&conn_id.0);
+        let peer = self.ms.add_peer(device, tag, None);
+        if let Some(seen) = self.lan.lookup(&device, Duration::from_secs(600)) {
+            let c: Vec<Candidate> = seen.addrs.iter().map(|a| Candidate { addr: a.to_string(), kind: CandidateKind::Lan }).collect();
+            self.ms.add_candidates(&peer, &c);
+        }
+        let (stop_tx, stop_rx) = watch::channel(false);
+        {
+            let mut lan_rx = self.lan.subscribe();
+            let ms = self.ms.clone();
+            let peer = peer.clone();
+            let mut stop = stop_rx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        m = lan_rx.recv() => match m {
+                            Ok(s) if s.device == device => {
+                                let c: Vec<Candidate> = s.addrs.iter().map(|a| Candidate { addr: a.to_string(), kind: CandidateKind::Lan }).collect();
+                                ms.add_candidates(&peer, &c);
+                                ms.ping_all(&peer).await;
+                            }
+                            Ok(_) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(_) => break,
+                        },
+                        r = stop.changed() => if r.is_err() || *stop.borrow() { break },
+                    }
+                }
+            });
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            for _ in 0..4 {
+                me.lan.connect_request(me.lan_key, device, me.identity.device_id, conn_id.0).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        });
+        self.ms.spawn_prober(peer.clone(), stop_rx.clone());
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+        while !self.ms.has_path(&peer) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if !self.ms.has_path(&peer) {
+            let _ = stop_tx.send(true);
+            return Err(ClientError::Network("连不上服务器，局域网内也没有找到该设备".into()));
+        }
+        let conn = match tokio::time::timeout(Duration::from_secs(10), self.ep.connect(peer.virt, "lemon-galaxy").map_err(|e| ClientError::Network(e.to_string()))?).await {
+            Ok(Ok(c)) => c,
+            _ => {
+                let _ = stop_tx.send(true);
+                return Err(ClientError::Network("局域网连接失败".into()));
+            }
+        };
+        let account_pk = self.account_pubkey;
+        let verify = move |h: &Hello| -> std::result::Result<Option<galaxy_proto::cert::DeviceCert>, String> {
+            let blob = h.cert.as_ref().ok_or("对方没有提供设备证书")?;
+            let cert = galaxy_crypto::verify_device_cert(&account_pk, blob).map_err(|_| "对方证书不属于本账号".to_string())?;
+            if cert.device_id != device || cert.device_pubkey != h.device_pubkey || !cert.kind.can_host() {
+                return Err("对方证书与设备不符".into());
+            }
+            Ok(Some(cert))
+        };
+        let est = match handshake::controller(&conn, &self.identity.key, Some(self.cert.clone()), None, None, verify).await {
+            Ok(e) => e,
+            Err(e) => {
+                conn.close(1u32.into(), b"auth");
+                let _ = stop_tx.send(true);
+                return Err(e.into());
+            }
+        };
+        tracing::info!("局域网离线连接 {} 成功", device.short());
+        Ok(PeerSession::new(conn, est.ack, device, None, (est.send, est.recv), self.ms.clone(), peer, stop_tx, None))
     }
 
     pub async fn connect_assist(self: &Arc<Self>, device_code: &str, code: &str) -> Result<Arc<PeerSession>> {

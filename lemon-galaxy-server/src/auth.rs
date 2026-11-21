@@ -150,6 +150,7 @@ impl FromRequestParts<St> for AdminAny {
 
 #[derive(Clone)]
 pub struct UserSession {
+    pub created_at: i64,
     pub user_id: u64,
     pub username: String,
     pub device_id: galaxy_proto::DeviceId,
@@ -182,7 +183,7 @@ async fn load_user_session(parts: &mut Parts, st: &St) -> Result<UserSession, Ap
         .call(move |c| {
             let r = c
                 .query_row(
-                    "SELECT s.user_id, u.username, s.device_id, s.restricted, s.last_used_at, u.disabled
+                    "SELECT s.user_id, u.username, s.device_id, s.restricted, s.last_used_at, u.disabled, s.created_at
                      FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?1",
                     params![th2],
                     |r| {
@@ -193,11 +194,12 @@ async fn load_user_session(parts: &mut Parts, st: &St) -> Result<UserSession, Ap
                             r.get::<_, i64>(3)?,
                             r.get::<_, i64>(4)?,
                             r.get::<_, i64>(5)?,
+                            r.get::<_, i64>(6)?,
                         ))
                     },
                 )
                 .optional()?;
-            if let Some((_, _, _, _, last, _)) = &r {
+            if let Some((_, _, _, _, last, _, _)) = &r {
                 if now - *last > 60_000 {
                     c.execute("UPDATE sessions SET last_used_at = ?1 WHERE token_hash = ?2", params![now, th2])?;
                 }
@@ -205,7 +207,7 @@ async fn load_user_session(parts: &mut Parts, st: &St) -> Result<UserSession, Ap
             Ok(r)
         })
         .await?;
-    let (uid, username, dev, restricted, last, disabled) = row.ok_or_else(|| AppError::unauthorized().lang(ctx.lang))?;
+    let (uid, username, dev, restricted, last, disabled, created_at) = row.ok_or_else(|| AppError::unauthorized().lang(ctx.lang))?;
     if disabled != 0 {
         return Err(AppError::new(StatusCode::FORBIDDEN, "disabled").lang(ctx.lang));
     }
@@ -213,7 +215,7 @@ async fn load_user_session(parts: &mut Parts, st: &St) -> Result<UserSession, Ap
         return Err(AppError::unauthorized().lang(ctx.lang));
     }
     let device_id = galaxy_proto::DeviceId::from_slice(&dev).ok_or_else(|| AppError::unauthorized())?;
-    Ok(UserSession { user_id: uid as u64, username, device_id, restricted: restricted != 0, token_hash: th, ip: ctx.ip, lang: ctx.lang })
+    Ok(UserSession { created_at, user_id: uid as u64, username, device_id, restricted: restricted != 0, token_hash: th, ip: ctx.ip, lang: ctx.lang })
 }
 
 /// 已完成首次改密码的用户会话。

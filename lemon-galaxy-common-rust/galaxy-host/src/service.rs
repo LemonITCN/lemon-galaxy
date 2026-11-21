@@ -85,7 +85,8 @@ struct Pending {
     conn_id: ConnId,
     mode: ConnMode,
     from_user: Option<UserBrief>,
-    ticket: SignedBlob,
+    /// 离线局域网连接没有票据
+    ticket: Option<SignedBlob>,
     at: Instant,
     stop: watch::Sender<bool>,
 }
@@ -137,7 +138,6 @@ impl HostService {
         ms.set_server(cfg.server.resolve());
         let ep = galaxy_net::quic::endpoint(ms.clone(), true)?;
         let lan_keys = Arc::new(RwLock::new(state.active().map(|a| galaxy_crypto::lan_key(&a.account_pubkey)).collect()));
-        galaxy_net::lan::spawn_responder(ms.clone(), identity.device_id, lan_keys.clone());
         let (ai_stop, _) = watch::channel(0u64);
         let me = Arc::new(Self {
             cfg,
@@ -156,6 +156,14 @@ impl HostService {
             public_ip: RwLock::new(String::new()),
             ai_stop,
         });
+        // 局域网发现与离线连接请求
+        let weak = Arc::downgrade(&me);
+        let on_connect: galaxy_net::lan::OnLanConnect = Arc::new(move |ctl, conn_id, addr| {
+            if let Some(h) = weak.upgrade() {
+                h.offline_incoming(ctl, conn_id, addr);
+            }
+        });
+        galaxy_net::lan::spawn_responder_with(me.ms.clone(), me.identity.device_id, me.lan_keys.clone(), Some(on_connect));
         me.save();
         me.refresh_server_key().await;
         me.restart_signal();
@@ -496,7 +504,7 @@ impl HostService {
                 let Ok(token) = <[u8; 16]>::try_from(relay_token.as_slice()) else { return };
                 let peer = self.ms.add_peer(from_device, galaxy_crypto::conn_tag(&conn_id.0), Some(token));
                 let (stop, stop_rx) = watch::channel(false);
-                if let Some(old) = self.pending.lock().insert(from_device, Pending { conn_id, mode, from_user, ticket: SignedBlob { data: ticket, sig: ticket_sig }, at: Instant::now(), stop }) {
+                if let Some(old) = self.pending.lock().insert(from_device, Pending { conn_id, mode, from_user, ticket: Some(SignedBlob { data: ticket, sig: ticket_sig }), at: Instant::now(), stop }) {
                     let _ = old.stop.send(true);
                 }
                 // 候选
@@ -573,6 +581,25 @@ impl HostService {
             }
             _ => {}
         }
+    }
+
+    /// 服务器不可达时，主控端经局域网直接发来的连接请求。被控端在线时不接受（必须走服务器授权）。
+    fn offline_incoming(self: &Arc<Self>, controller: DeviceId, conn_id: [u8; 16], addr: std::net::SocketAddr) {
+        if self.online() || !self.state.read().remote_enabled {
+            return;
+        }
+        let cid = ConnId(conn_id);
+        if self.pending.lock().get(&controller).map(|p| p.conn_id == cid).unwrap_or(false) {
+            return;
+        }
+        let peer = self.ms.add_peer(controller, galaxy_crypto::conn_tag(&conn_id), None);
+        self.ms.add_candidates(&peer, &[Candidate { addr: addr.to_string(), kind: CandidateKind::Lan }]);
+        let (stop, stop_rx) = watch::channel(false);
+        if let Some(old) = self.pending.lock().insert(controller, Pending { conn_id: cid, mode: ConnMode::Control, from_user: None, ticket: None, at: Instant::now(), stop }) {
+            let _ = old.stop.send(true);
+        }
+        tracing::info!("局域网离线连接请求：{}", controller.short());
+        self.ms.spawn_prober(peer, stop_rx);
     }
 
     pub fn send(&self, m: WsMsg) {
@@ -673,7 +700,7 @@ impl HostService {
         if acct.revoked.contains(&cert.device_id) {
             return Err("该设备已被吊销".into());
         }
-        let ticket = hello.ticket.as_ref().or(pending.map(|p| &p.ticket));
+        let ticket = hello.ticket.as_ref().or(pending.and_then(|p| p.ticket.as_ref()));
         let online = self.online();
         match ticket {
             Some(t) if !st.server_sign_pubkey.is_empty() => {

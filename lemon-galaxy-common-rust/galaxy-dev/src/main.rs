@@ -190,13 +190,16 @@ async fn connect(dir: &Path, id: &Identity, target: Option<&str>, assist: Option
     let (api, s, _secrets) = load(dir, id)?;
     let server = ServerAddr::parse(&s.server).map_err(anyhow::Error::msg)?;
     let signal = SignalClient::start(server.clone(), id.clone(), Some(s.token.clone()), None);
-    anyhow::ensure!(signal.wait_connected(Duration::from_secs(10)).await, "连不上服务器信令");
+    if !signal.wait_connected(Duration::from_secs(5)).await {
+        eprintln!("连不上服务器，尝试局域网离线连接");
+    }
     let ms = galaxy_net::MagicSock::bind(0)?;
     let ep = galaxy_net::quic::endpoint(ms.clone(), false)?;
     let pk: [u8; 32] = s.account_pubkey.as_slice().try_into()?;
     let c = Connector::new(ms, ep, signal, id.clone(), server, pk, s.cert.clone());
     let session = match assist {
         Some((dc, code)) => c.connect_assist(dc, code).await?,
+        None if target.map(|t| t.len() == 32).unwrap_or(false) => c.connect(DeviceId::from_hex(target.unwrap()).unwrap()).await?,
         None => {
             let resp: galaxy_proto::api::ListResp<galaxy_proto::api::ClientDevice> = api.get("/devices").await?;
             let t = target.unwrap_or("");

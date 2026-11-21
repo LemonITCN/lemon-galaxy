@@ -4,7 +4,7 @@
 //! 查询与回应都用 `lan_key = HKDF(账号公钥)` 做 HMAC，同网络的陌生设备构造不出查询，也认不出回应。
 
 use crate::magicsock::MagicSock;
-use galaxy_proto::wire::{LanQuery, LanReply, LAN_MULTICAST_V4, LAN_MULTICAST_V6};
+use galaxy_proto::wire::{LanConnect, LanQuery, LanReply, LAN_MULTICAST_V4, LAN_MULTICAST_V6};
 use galaxy_proto::{DeviceId, LAN_PORT};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
@@ -34,10 +34,18 @@ fn reuse_udp(addr: SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
     tokio::net::UdpSocket::from_std(s.into())
 }
 
+/// 离线连接请求的回调：(主控端设备, 连接 ID, 主控端魔法套接字地址)。
+pub type OnLanConnect = Arc<dyn Fn(DeviceId, [u8; 16], SocketAddr) + Send + Sync>;
+
 /// 被控端：监听局域网查询并回应。`keys` 为本机登录的各账号的 lan_key，可随登录变化更新。
 pub fn spawn_responder(ms: Arc<MagicSock>, device_id: DeviceId, keys: Arc<RwLock<Vec<[u8; 32]>>>) {
+    spawn_responder_with(ms, device_id, keys, None)
+}
+
+pub fn spawn_responder_with(ms: Arc<MagicSock>, device_id: DeviceId, keys: Arc<RwLock<Vec<[u8; 32]>>>, on_connect: Option<OnLanConnect>) {
     let ms4 = ms.clone();
     let keys4 = keys.clone();
+    let oc4 = on_connect.clone();
     tokio::spawn(async move {
         let sock = match reuse_udp(SocketAddr::from(([0, 0, 0, 0], LAN_PORT))) {
             Ok(s) => s,
@@ -48,7 +56,7 @@ pub fn spawn_responder(ms: Arc<MagicSock>, device_id: DeviceId, keys: Arc<RwLock
         };
         let mut joined: Vec<Ipv4Addr> = vec![];
         let mut last_join = Instant::now() - Duration::from_secs(3600);
-        responder_loop(&sock, &ms4, device_id, &keys4, |s| {
+        responder_loop(&sock, &ms4, device_id, &keys4, oc4.as_ref(), |s| {
             if last_join.elapsed() > Duration::from_secs(30) {
                 last_join = Instant::now();
                 for i in crate::ifaces::list() {
@@ -72,7 +80,7 @@ pub fn spawn_responder(ms: Arc<MagicSock>, device_id: DeviceId, keys: Arc<RwLock
         };
         let mut joined: Vec<u32> = vec![];
         let mut last_join = Instant::now() - Duration::from_secs(3600);
-        responder_loop(&sock, &ms, device_id, &keys, |s| {
+        responder_loop(&sock, &ms, device_id, &keys, on_connect.as_ref(), |s| {
             if last_join.elapsed() > Duration::from_secs(30) {
                 last_join = Instant::now();
                 for i in crate::ifaces::list() {
@@ -93,6 +101,7 @@ async fn responder_loop<F: FnMut(&tokio::net::UdpSocket)>(
     ms: &Arc<MagicSock>,
     device_id: DeviceId,
     keys: &Arc<RwLock<Vec<[u8; 32]>>>,
+    on_connect: Option<&OnLanConnect>,
     mut rejoin: F,
 ) {
     let mut buf = vec![0u8; 2048];
@@ -101,7 +110,33 @@ async fn responder_loop<F: FnMut(&tokio::net::UdpSocket)>(
         rejoin(sock);
         let r = tokio::time::timeout(Duration::from_secs(30), sock.recv_from(&mut buf)).await;
         let Ok(Ok((n, from))) = r else { continue };
-        let Some(q) = LanQuery::decode(&buf[..n]) else { continue };
+        // 离线连接请求：校验后通知被控端建立路径，并像查询一样回应地址
+        let q = if let Some(c) = LanConnect::decode(&buf[..n]) {
+            if c.target != device_id.0 {
+                continue;
+            }
+            let input = LanConnect::mac_input(&c.conn_id, &c.target, &c.controller, c.reply_port);
+            if !keys.read().iter().any(|k| mac_ok(k, &input, &c.mac)) {
+                continue;
+            }
+            let ctl_addr = match from {
+                SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+                    Some(v4) => SocketAddr::new(IpAddr::V4(v4), c.reply_port),
+                    None => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), c.reply_port, 0, v6.scope_id())),
+                },
+                SocketAddr::V4(v4) => SocketAddr::new(IpAddr::V4(*v4.ip()), c.reply_port),
+            };
+            if let Some(cb) = on_connect {
+                cb(DeviceId(c.controller), c.conn_id, ctl_addr);
+            }
+            // 用 conn_id 当 nonce 回应，主控端据此拿到被控端地址
+            let key = keys.read().iter().copied().find(|k| mac_ok(k, &input, &c.mac)).unwrap_or([0; 32]);
+            let mac = galaxy_crypto::lan_mac(&key, &LanQuery::mac_input(&c.conn_id, &c.target, c.reply_port));
+            LanQuery { nonce: c.conn_id, target: c.target, reply_port: c.reply_port, mac }
+        } else {
+            let Some(q) = LanQuery::decode(&buf[..n]) else { continue };
+            q
+        };
         if q.target != [0u8; 16] && q.target != device_id.0 {
             continue;
         }
@@ -205,6 +240,26 @@ impl LanDiscovery {
         }
         let pkt = LanQuery { nonce, target: tgt, reply_port, mac }.encode();
         send_query(&pkt).await;
+    }
+
+    /// 离线局域网连接请求（服务器不可达时用）。回应会像查询一样进入 `seen` 并触发通知。
+    pub async fn connect_request(&self, lan_key: [u8; 32], target: DeviceId, controller: DeviceId, conn_id: [u8; 16]) {
+        let reply_port = self.ms.port();
+        let mac = galaxy_crypto::lan_mac(&lan_key, &LanConnect::mac_input(&conn_id, &target.0, &controller.0, reply_port));
+        {
+            let mut p = self.pending.lock();
+            p.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(30));
+            p.insert(conn_id, (lan_key, Instant::now()));
+        }
+        let pkt = LanConnect { conn_id, target: target.0, controller: controller.0, reply_port, mac }.encode();
+        send_query(&pkt).await;
+        // 之前见过的地址直接单播一份
+        let known: Vec<SocketAddr> = self.seen.read().get(&target).map(|s| s.addrs.clone()).unwrap_or_default();
+        if let Ok(s) = reuse_udp(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))).or_else(|_| reuse_udp(SocketAddr::from(([0, 0, 0, 0], 0)))) {
+            for a in known {
+                let _ = s.send_to(&pkt, SocketAddr::new(a.ip(), LAN_PORT)).await;
+            }
+        }
     }
 
     pub fn lookup(&self, d: &DeviceId, max_age: Duration) -> Option<LanSeen> {
