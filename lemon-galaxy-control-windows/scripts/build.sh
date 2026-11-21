@@ -35,7 +35,7 @@ TARGET="${TARGET:-x86_64-pc-windows-msvc}"
 REL="$ROOT/target/$TARGET/release"
 NAME="LemonGalaxy-$VERSION-windows-x64"
 DIST="$WIN/dist/$NAME"
-echo "LemonGalaxy Windows 主控端 $VERSION（构建 $BUILD，Rust 目标 $TARGET）"
+echo "LemonGalaxy Windows 主控端 ${VERSION}（构建 ${BUILD}，Rust 目标 ${TARGET}）"
 
 # Windows 路径（PowerShell、dotnet 参数用）
 winpath() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else echo "$1"; fi; }

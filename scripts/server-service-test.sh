@@ -47,7 +47,7 @@ fw_port() { # 防火墙规则放行的端口（没有规则为空）
 }
 https_ok() { curl -sk --max-time 5 "https://127.0.0.1:$1/api/v1/info" | grep -q '"version"'; }
 
-step "安装服务（端口 $PORT）"
+step "安装服务（端口 ${PORT}）"
 "${SUDO[@]}" "$SRV" install-service --port "$PORT" --public-host 127.0.0.1 | tee "$WORK/install.txt" || fail "安装失败"
 grep -q "客户端填写的服务器地址：127.0.0.1:$PORT#" "$WORK/install.txt" || fail "没有打印客户端地址"
 grep -q "/setup?token=" "$WORK/install.txt" || fail "没有打印初始化网址"
@@ -63,7 +63,7 @@ fi
 "${SUDO[@]}" "$SRV" status | tee "$WORK/status.txt"
 grep -q "运行中" "$WORK/status.txt" || fail "status 没有显示运行中"
 
-step "只改端口再装一次（$PORT2，对外地址沿用）"
+step "只改端口再装一次（${PORT2}，对外地址沿用）"
 "${SUDO[@]}" "$SRV" install-service --port "$PORT2" | tee "$WORK/install2.txt" || fail "再次安装失败"
 grep -q "客户端填写的服务器地址：127.0.0.1:$PORT2#" "$WORK/install2.txt" || fail "端口或对外地址没有更新/沿用"
 service_running || fail "服务没有在运行"

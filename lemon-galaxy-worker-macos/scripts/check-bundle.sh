@@ -23,7 +23,7 @@ if [ -f "$D" ] && plutil -lint -s "$D"; then
   ok "后台服务配置存在且格式正确"
   [ "$(raw "$D" Label)" = "cn.lemonit.galaxy.worker.daemon" ] && ok "后台服务 Label 与文件名一致" || bad "后台服务 Label"
   BP="$(raw "$D" BundleProgram)"
-  [ "$BP" = "Contents/MacOS/$EXE" ] && [ -x "$APP/$BP" ] && ok "BundleProgram 指向包内主程序（$BP）" || bad "BundleProgram：$BP"
+  [ "$BP" = "Contents/MacOS/$EXE" ] && [ -x "$APP/$BP" ] && ok "BundleProgram 指向包内主程序（${BP}）" || bad "BundleProgram：$BP"
   json "$D" ProgramArguments | grep -q '"--daemon"' && ok "后台服务参数含 --daemon" || bad "后台服务参数"
   json "$D" AssociatedBundleIdentifiers | grep -q "\"$BID\"" && ok "后台服务关联本应用（登录项里显示应用名）" || bad "AssociatedBundleIdentifiers"
   [ "$(raw "$D" KeepAlive)" = "true" ] && [ "$(raw "$D" RunAtLoad)" = "true" ] && ok "后台服务开机启动、退出即重启" || bad "KeepAlive / RunAtLoad"
@@ -45,7 +45,7 @@ if codesign --verify --strict --deep "$APP" 2>/dev/null; then ok "签名有效�
 INFO="$(codesign -dv "$APP" 2>&1 || true)"
 ID="$(printf '%s\n' "$INFO" | sed -n 's/^Identifier=//p')"
 TEAM="$(printf '%s\n' "$INFO" | sed -n 's/^TeamIdentifier=//p')"
-[ "$ID" = "$BID" ] && ok "签名标识 $ID（团队 ${TEAM:-无}）" || bad "签名标识 $ID"
+[ "$ID" = "$BID" ] && ok "签名标识 ${ID}（团队 ${TEAM:-无}）" || bad "签名标识 $ID"
 printf '%s\n' "$INFO" | grep -q 'flags=.*runtime' && ok "Hardened Runtime" || bad "没有 Hardened Runtime"
 if [ "$TEAM" = "not set" ] || [ -z "$TEAM" ]; then
   echo "  [提示] 临时签名：每次重新编译系统授权都会失效，SMAppService 登记后台服务也可能被拒绝；正式测试请用开发者证书签名"
@@ -57,6 +57,6 @@ else
   bad "launchd 配置没有被签名封存"
 fi
 ARCHS="$(lipo -archs "$APP/Contents/MacOS/$EXE" 2>/dev/null || true)"
-case "$ARCHS" in *arm64*x86_64*|*x86_64*arm64*) ok "通用二进制（$ARCHS）" ;; *) echo "  [提示] 主程序架构：$ARCHS" ;; esac
+case "$ARCHS" in *arm64*x86_64*|*x86_64*arm64*) ok "通用二进制（${ARCHS}）" ;; *) echo "  [提示] 主程序架构：$ARCHS" ;; esac
 
 if [ "$FAIL" = 0 ]; then echo "包检查通过"; else echo "包检查失败" >&2; exit 1; fi
