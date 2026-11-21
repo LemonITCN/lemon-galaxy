@@ -7,6 +7,8 @@
 
 # CoreProvider 通过反射加载真内核适配层
 -keep class cn.lemonit.galaxy.core.rust.** { *; }
+# 内核导出的 JNI 函数按包名、类名、方法名对应（galaxy-ffi src/android.rs），不能混淆
+-keep class cn.lemonit.galaxy.core.rust.NativeInit { native <methods>; }
 
 # kotlinx.serialization：终端配色 JSON
 -keepattributes *Annotation*, InnerClasses

@@ -407,12 +407,14 @@ class ScreenshotTest {
         override fun onDisconnect() = Unit
     }
 
-    private fun remote(dark: Boolean, toolbar: Boolean, keyboard: Boolean, name: String, privacy: Boolean = false) {
+    private fun remote(dark: Boolean, toolbar: Boolean, keyboard: Boolean, name: String, privacy: Boolean = false, soundOn: Boolean = true) {
         val bytes = context.assets.open("mock/desktop_preview.jpg").use { it.readBytes() }
         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size).asImageBitmap()
         shot(name, dark) {
             RemoteDesktopScreen(
-                ui = Fixtures.remote(zh).let { if (privacy) it.copy(privacySupported = true, privacyAllowed = true, privacyOn = true) else it },
+                ui = Fixtures.remote(zh)
+                    .let { if (privacy) it.copy(privacySupported = true, privacyAllowed = true, privacyOn = true) else it }
+                    .copy(audioOn = soundOn),
                 actions = noRemoteActions,
                 video = { m -> Image(bmp, null, contentScale = ContentScale.FillBounds, modifier = m) },
                 initialToolbarOpen = toolbar,
@@ -427,6 +429,10 @@ class ScreenshotTest {
     /** 隐私屏已开：工具栏开关高亮 */
     @Test @Config(qualifiers = PHONE_LAND_ZH)
     fun remotePrivacyZhDark() = remote(true, toolbar = true, keyboard = false, name = "remote_privacy", privacy = true)
+
+    /** 声音已关：开关不高亮、图标为静音 */
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remoteSoundOffEnLight() = remote(false, toolbar = true, keyboard = false, name = "remote_sound_off", soundOn = false)
 
     @Test @Config(qualifiers = PHONE_LAND_EN)
     fun remoteKeyboardEnLight() = remote(false, toolbar = false, keyboard = true, name = "remote_keyboard")

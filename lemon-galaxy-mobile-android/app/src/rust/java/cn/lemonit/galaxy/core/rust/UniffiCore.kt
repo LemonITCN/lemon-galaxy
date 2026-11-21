@@ -1,10 +1,12 @@
 package cn.lemonit.galaxy.core.rust
 
+import android.content.Context
 import cn.lemonit.galaxy.core.bridge.AgentConversationInterface
 import cn.lemonit.galaxy.core.bridge.AgentListener
 import cn.lemonit.galaxy.core.bridge.AgentMessage
 import cn.lemonit.galaxy.core.bridge.AiMode
 import cn.lemonit.galaxy.core.bridge.AiModels
+import cn.lemonit.galaxy.core.bridge.AudioPlaybackInterface
 import cn.lemonit.galaxy.core.bridge.ApprovalDecision
 import cn.lemonit.galaxy.core.bridge.ClientListener
 import cn.lemonit.galaxy.core.bridge.ClientState
@@ -50,6 +52,7 @@ import cn.lemonit.galaxy.core.bridge.VideoSink
 import uniffi.galaxy_ffi.AgentConversation as FAgentConversation
 import uniffi.galaxy_ffi.AgentEvent as FAgentEvent
 import uniffi.galaxy_ffi.AgentListener as FAgentListener
+import uniffi.galaxy_ffi.AudioPlayback as FAudioPlayback
 import uniffi.galaxy_ffi.ClientListener as FClientListener
 import uniffi.galaxy_ffi.ClientState as FClientState
 import uniffi.galaxy_ffi.DisplayChannel as FDisplayChannel
@@ -71,14 +74,20 @@ import uniffi.galaxy_ffi.VideoSink as FVideoSink
 
 /**
  * 真内核（galaxy-ffi，uniffi 0.32 生成的 uniffi.galaxy_ffi.*）到界面接口（core.bridge）的适配层。
- * CoreProvider 在 BuildConfig.USE_MOCK_CORE = false 时通过反射创建它（无参构造）。
+ * CoreProvider 在 BuildConfig.USE_MOCK_CORE = false 时通过反射创建它：安卓上用带 Context 的构造（先登记 JavaVM 与 Context，
+ * 内核的声音输出要用），主机 JVM 上的冒烟测试用无参构造。
  *
  * 约定：
  *  - 内核的 suspend 函数在内核自己的线程池执行，这里直接 await；
  *  - 内核回调可能在任意内核线程触发，这里原样转给界面层的回调（界面层自己切回主线程）；
  *  - 内核抛出的 uniffi GalaxyException 统一换成 core.bridge.GalaxyException（message 已本地化）。
  */
-class UniffiCore : GalaxyCore {
+class UniffiCore() : GalaxyCore {
+    /** 安卓上用：在调用方 coreInit 之前给内核登记 JavaVM 与 Application Context（见 [NativeInit]）。 */
+    constructor(context: Context) : this() {
+        NativeInit.register(context)
+    }
+
     override fun coreVersion(): String = uniffi.galaxy_ffi.coreVersion()
 
     override fun coreInit(config: CoreConfig) = uniffi.galaxy_ffi.coreInit(config.toFfi())
@@ -227,6 +236,29 @@ internal class UniffiPeer(private val p: FPeerSession) : PeerSessionInterface {
 
     override suspend fun wakeOnLan(mac: String) = ffi { p.wakeOnLan(mac) }
     override suspend fun setPrivacy(on: Boolean) = ffi { p.setPrivacy(on) }
+    override suspend fun startAudio(volume: Float): AudioPlaybackInterface = ffi { UniffiAudio(p.startAudio(volume)) }
+}
+
+/** 停止后立即释放内核对象（不等 GC），之后的调用都是空操作。 */
+internal class UniffiAudio(private val a: FAudioPlayback) : AudioPlaybackInterface {
+    private var closed = false
+
+    @Synchronized override fun setVolume(volume: Float) {
+        if (!closed) a.setVolume(volume)
+    }
+
+    @Synchronized override fun setMuted(muted: Boolean) {
+        if (!closed) a.setMuted(muted)
+    }
+
+    @Synchronized override fun isActive(): Boolean = !closed && a.isActive()
+
+    @Synchronized override fun stop() {
+        if (closed) return
+        closed = true
+        a.stop()
+        a.close()
+    }
 }
 
 internal class UniffiSsh(private val s: FSshSession) : SshSessionInterface {

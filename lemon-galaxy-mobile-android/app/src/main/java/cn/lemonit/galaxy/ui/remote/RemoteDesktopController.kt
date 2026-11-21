@@ -3,6 +3,7 @@ package cn.lemonit.galaxy.ui.remote
 import android.view.Surface
 import cn.lemonit.galaxy.app.ConnectionManager
 import cn.lemonit.galaxy.app.userMessage
+import cn.lemonit.galaxy.core.bridge.AudioPlaybackInterface
 import cn.lemonit.galaxy.core.bridge.ClipboardData
 import cn.lemonit.galaxy.core.bridge.DisplayChannelInterface
 import cn.lemonit.galaxy.core.bridge.DisplayInfo
@@ -12,6 +13,7 @@ import cn.lemonit.galaxy.core.bridge.PathInfo
 import cn.lemonit.galaxy.core.bridge.Platform
 import cn.lemonit.galaxy.core.bridge.VideoCodec
 import cn.lemonit.galaxy.data.VideoQuality
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -109,6 +111,11 @@ data class RemoteUi(
     val privacyAllowed: Boolean = false,
     val privacyOn: Boolean = false,
     val privacyBusy: Boolean = false,
+    /** 对端能力里有 "audio"（对方给了听声音的权限）：工具栏显示声音开关 */
+    val audioSupported: Boolean = false,
+    /** 正在本机播放被控端的声音 */
+    val audioOn: Boolean = false,
+    val audioBusy: Boolean = false,
 ) {
     val display: DisplayInfo? get() = displays.firstOrNull { it.id == displayId }
     val remoteW: Int get() = display?.width?.toInt() ?: videoW
@@ -123,10 +130,22 @@ class RemoteDesktopController(
     private val scope: CoroutineScope,
     quality: VideoQuality,
     mouseMode: Boolean,
+    /** 设置里的声音开关：画面打开后自动开始 */
+    audioWanted: Boolean = false,
+    /** 开始播放声音失败（参数是原因），界面用提示条显示 */
+    private val onAudioError: (String) -> Unit = {},
 ) {
     private val _ui = MutableStateFlow(RemoteUi(title, platform, quality = quality, mouseMode = mouseMode))
     val ui: StateFlow<RemoteUi> = _ui.asStateFlow()
     @Volatile private var channel: DisplayChannelInterface? = null
+
+    // 声音：以下状态都只在主线程（scope 是 Main）读写
+    private var audioWanted = audioWanted
+    private var audio: AudioPlaybackInterface? = null
+    /** 每次开始或停止加一：开到一半被关掉、切后台或离开时，迟到的结果直接停掉丢弃 */
+    private var audioGen = 0
+    private var foreground = true
+    private var stopped = false
 
     val decoder = VideoDecoder(
         requestKeyframe = { channel?.requestKeyframe() },
@@ -144,11 +163,19 @@ class RemoteDesktopController(
                         path = peer.path.value,
                         privacySupported = "privacy" in peer.info.capabilities,
                         privacyAllowed = peer.info.permissions.control,
+                        audioSupported = "audio" in peer.info.capabilities,
                     )
                 }
                 scope.launch { peer.path.collect { p -> _ui.update { it.copy(path = p) } } }
-                // 会话结束：被控端已自动关掉隐私屏，开关复位
-                scope.launch { peer.closedReason.collect { r -> if (r != null) _ui.update { it.copy(privacyOn = false) } } }
+                // 会话结束：被控端已自动关掉隐私屏，开关复位；声音通道随会话失效，停掉本机播放
+                scope.launch {
+                    peer.closedReason.collect { r ->
+                        if (r != null) {
+                            _ui.update { it.copy(privacyOn = false) }
+                            stopAudio()
+                        }
+                    }
+                }
                 val displays = peer.session.listDisplays()
                 val first = displays.firstOrNull { it.primary } ?: displays.firstOrNull()
                     ?: throw IllegalStateException("no display")
@@ -170,6 +197,8 @@ class RemoteDesktopController(
             DisplayOptions(displayId, q.maxFps, q.bitrateKbps, VideoDecoder.supportedCodecs(), viewOnly = false),
             decoder,
         )
+        // 画面打开后按设置开始播放声音（已在播放时不重复开）
+        if (audioWanted) startAudio()
     }
 
     fun switchDisplay(id: UInt) {
@@ -202,6 +231,60 @@ class RemoteDesktopController(
         }
     }
 
+    /** 用户点声音开关（调用方负责记住选择）。 */
+    fun setAudio(on: Boolean) {
+        audioWanted = on
+        if (on) startAudio() else stopAudio()
+    }
+
+    /** 切到后台先停掉声音，回到前台按开关重新开始。 */
+    fun setForeground(fg: Boolean) {
+        if (fg == foreground) return
+        foreground = fg
+        if (!fg) {
+            stopAudio()
+        } else if (audioWanted && channel != null) {
+            startAudio()
+        }
+    }
+
+    private fun startAudio() {
+        val s = _ui.value
+        if (!s.audioSupported || s.audioBusy || audio != null || !foreground || stopped) return
+        val gen = ++audioGen
+        _ui.update { it.copy(audioBusy = true) }
+        scope.launch {
+            val result = try {
+                Result.success(conn.peer(deviceId).session.startAudio(1f))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+            if (gen != audioGen) {
+                // 等待期间被关掉了：这一路不要了
+                result.getOrNull()?.stop()
+                return@launch
+            }
+            _ui.update { it.copy(audioBusy = false) }
+            result
+                .onSuccess { a ->
+                    audio = a
+                    _ui.update { it.copy(audioOn = true) }
+                }
+                .onFailure { e -> e.userMessage().takeIf { it.isNotEmpty() }?.let(onAudioError) }
+        }
+    }
+
+    /** 停止本机播放（不改设置里的开关）。 */
+    private fun stopAudio() {
+        audioGen++
+        val a = audio
+        audio = null
+        _ui.update { it.copy(audioOn = false, audioBusy = false) }
+        a?.stop()
+    }
+
     fun setSurface(s: Surface?) = decoder.setSurface(s)
 
     fun send(e: InputEvent) {
@@ -225,6 +308,8 @@ class RemoteDesktopController(
     }
 
     fun stop() {
+        stopped = true
+        stopAudio()
         // 离开远程桌面时关掉隐私屏（同一会话可能还被终端、文件用着，被控端不会自动关）
         if (_ui.value.privacyOn) {
             conn.existingPeer(deviceId)?.let { p -> scope.launch { runCatching { p.session.setPrivacy(false) } } }

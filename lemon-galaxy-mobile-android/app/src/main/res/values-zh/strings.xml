@@ -266,12 +266,14 @@
     <string name="rd_privacy_on_toast">已开启隐私屏：对方屏幕已黑屏，本地键鼠已停用</string>
     <string name="rd_privacy_off_toast">已关闭隐私屏</string>
     <string name="rd_privacy_failed">隐私屏切换失败：%1$s</string>
+    <string name="rd_sound">声音</string>
+    <string name="rd_sound_failed">无法播放远端声音：%1$s</string>
     <string name="rd_connecting">正在连接画面…</string>
     <string name="rd_failed">无法打开远程画面</string>
     <string name="rd_mode">操作方式</string>
     <string name="rd_mode_touch">触控</string>
     <string name="rd_mode_mouse">鼠标</string>
-    <string name="rd_mode_info">触控：点哪里就点击哪里，长按为右键，拖动为按住拖拽。\n鼠标：像触控板一样移动光标；单指轻点为左键，双指轻点为右键，双指拖动为滚轮，长按后移动为拖拽。\n双指捏合缩放画面。放大后，触控模式下双指拖动平移画面，鼠标模式下画面跟随光标。</string>
+    <string name="rd_mode_info">触控：点哪里就点击哪里，长按为右键，拖动为按住拖拽。\n鼠标：像触控板一样移动光标；单指轻点为左键，双指轻点为右键，双指拖动为滚轮，长按后移动为拖拽。\n双指捏合缩放画面。放大后，触控模式下双指拖动平移画面，鼠标模式下画面跟随光标。\n声音（设备支持时）：在本机播放被控端的声音，开关状态会被记住。</string>
     <string name="rd_display">屏幕</string>
     <string name="rd_quality">画质</string>
     <string name="quality_auto">自动</string>

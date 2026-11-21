@@ -42,7 +42,8 @@ object CoreProvider {
             MockCore(assets = { name -> context.assets.open(name).use { it.readBytes() } })
         } else {
             val cls = Class.forName(RUST_ADAPTER)
-            cls.getDeclaredConstructor().newInstance() as GalaxyCore
+            // 带 Context 的构造先给内核登记 JavaVM 与 Application Context（声音输出要用），之后才 coreInit
+            cls.getDeclaredConstructor(Context::class.java).newInstance(context) as GalaxyCore
         }
         instance.coreInit(configFor(context))
         return instance

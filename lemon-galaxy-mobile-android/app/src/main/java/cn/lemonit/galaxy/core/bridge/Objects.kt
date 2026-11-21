@@ -126,6 +126,19 @@ interface PeerSessionInterface {
 
     /** 隐私屏：被控端本地屏幕黑掉、本地键鼠失效；本会话结束时自动关闭。能力列表里有 "privacy" 才支持。 */
     suspend fun setPrivacy(on: Boolean)
+
+    /** 开始收听被控端的系统声音，内核用本机默认输出（AAudio）播放。能力列表里有 "audio" 才支持。[volume] 0..1。 */
+    suspend fun startAudio(volume: Float): AudioPlaybackInterface
+}
+
+/** 正在播放的远端声音。 */
+interface AudioPlaybackInterface {
+    fun setVolume(volume: Float)
+    fun setMuted(muted: Boolean)
+    fun isActive(): Boolean
+
+    /** 停止收听并关闭输出设备（可重复调用）。 */
+    fun stop()
 }
 
 interface PeerListener {

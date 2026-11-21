@@ -81,6 +81,9 @@ val buildRustTasks = rustAbis.map { a ->
         environment("AR_$ccKey", ndkBin.resolve("llvm-ar").path)
         environment("ANDROID_NDK_HOME", ndkDir.path)
         environment("ANDROID_NDK_ROOT", ndkDir.path)
+        // 内核里的 libopus（opusic-sys）用 CMake 编译：靠 ANDROID_NDK_HOME 找 NDK 的 android.toolchain.cmake，
+        // 这里再给出 API 级别（与 minSdk 一致），否则按 NDK 最低级别编
+        environment("ANDROID_PLATFORM", "android-$minSdkLevel")
     }
 }
 

@@ -21,6 +21,7 @@ import cn.lemonit.galaxy.core.bridge.TerminalSink
 import cn.lemonit.galaxy.core.bridge.TransferListener
 import cn.lemonit.galaxy.core.bridge.VaultData
 import cn.lemonit.galaxy.core.bridge.VaultEntry
+import cn.lemonit.galaxy.core.mock.MockAudioPlayback
 import cn.lemonit.galaxy.core.mock.MockCore
 import cn.lemonit.galaxy.core.mock.MockData
 import cn.lemonit.galaxy.core.platform.MemorySecureStore
@@ -212,6 +213,32 @@ class MockCoreTest {
         assertEquals("127.0.0.1", t.host)
         assertTrue(t.forwardId.isNotEmpty())
         client.closeRdp(t.forwardId)
+    }
+
+    @Test
+    fun audioOnlyOnDevicesThatAllowIt() = runBlocking<Unit> {
+        client.login(server, "alice", "pw", null)
+        val pc = client.connect(MockData.DEV_OFFICE_PC)
+        assertTrue("audio" in pc.info().capabilities)
+        val a = pc.startAudio(0.6f)
+        assertTrue(a.isActive())
+        a.setVolume(2f)
+        a.setMuted(true)
+        val m = a as MockAudioPlayback
+        assertEquals(1f, m.volume)
+        assertTrue(m.muted)
+        a.stop()
+        a.stop()
+        assertFalse(a.isActive())
+        // 没有画面的 Linux 被控端：能力里没有 audio，硬开也报错
+        val web = client.connect(MockData.DEV_WEB_01)
+        assertFalse("audio" in web.info().capabilities)
+        try {
+            web.startAudio(1f)
+            fail("audio started on a device without the capability")
+        } catch (e: GalaxyException.Permission) {
+            assertTrue(e.message.orEmpty().isNotEmpty())
+        }
     }
 
     @Test

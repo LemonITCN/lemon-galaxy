@@ -1,6 +1,7 @@
 package cn.lemonit.galaxy.core.mock
 
 import cn.lemonit.galaxy.core.bridge.AiMode
+import cn.lemonit.galaxy.core.bridge.AudioPlaybackInterface
 import cn.lemonit.galaxy.core.bridge.ClipboardData
 import cn.lemonit.galaxy.core.bridge.DisplayChannelInterface
 import cn.lemonit.galaxy.core.bridge.DisplayInfo
@@ -31,6 +32,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
@@ -100,10 +102,10 @@ internal class MockPeerSession(
         arch = arch,
         systemUser = host.user,
         shell = if (host.platform == Platform.WINDOWS) "powershell" else "/bin/bash",
-        permissions = Permissions(view = hasGui, control = hasGui, files = true, terminal = true, clipboard = true, audio = false, aiCap = AiMode.FULL_TRUST),
+        permissions = Permissions(view = hasGui, control = hasGui, files = true, terminal = true, clipboard = true, audio = hasGui, aiCap = AiMode.FULL_TRUST),
         capabilities = buildList {
             addAll(listOf("terminal", "files", "exec", "clipboard", "port_forward"))
-            if (hasGui) addAll(listOf("display", "input", "screenshot", "ui_tree", "privacy"))
+            if (hasGui) addAll(listOf("display", "input", "screenshot", "ui_tree", "privacy", "audio"))
         },
         path = currentPath,
     )
@@ -196,6 +198,12 @@ internal class MockPeerSession(
         if (!hasGui) throw GalaxyException.Permission(host.tr("被控端不支持隐私屏", "The remote device does not support the privacy screen"))
     }
 
+    override suspend fun startAudio(volume: Float): AudioPlaybackInterface {
+        delay(150)
+        if (!hasGui) throw GalaxyException.Permission(host.tr("被控端不能听声音", "Sound is not available on the remote device"))
+        return MockAudioPlayback(volume)
+    }
+
     companion object {
         fun bytesPerSecond(kind: PathKind): Long = when (kind) {
             PathKind.LAN -> 40L * 1024 * 1024
@@ -203,6 +211,38 @@ internal class MockPeerSession(
             PathKind.RELAY_UDP -> 3L * 1024 * 1024
             PathKind.RELAY_TCP, PathKind.CONNECTING, PathKind.CLOSED -> 1L * 1024 * 1024
         }
+    }
+}
+
+/** 模拟远端声音：不出声，只记下音量、静音与是否在播。 */
+internal class MockAudioPlayback(volume: Float) : AudioPlaybackInterface {
+    @Volatile var volume: Float = volume.coerceIn(0f, 1f)
+        private set
+    @Volatile var muted = false
+        private set
+    private val active = AtomicBoolean(true)
+
+    init {
+        playing.incrementAndGet()
+    }
+
+    override fun setVolume(volume: Float) {
+        this.volume = volume.coerceIn(0f, 1f)
+    }
+
+    override fun setMuted(muted: Boolean) {
+        this.muted = muted
+    }
+
+    override fun isActive(): Boolean = active.get()
+
+    override fun stop() {
+        if (active.getAndSet(false)) playing.decrementAndGet()
+    }
+
+    companion object {
+        /** 还没停的模拟声音路数（测试核对界面有没有漏停）。 */
+        val playing = AtomicInteger()
     }
 }
 

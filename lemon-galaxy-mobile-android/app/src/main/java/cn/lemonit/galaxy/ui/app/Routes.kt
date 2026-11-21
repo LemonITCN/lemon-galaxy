@@ -32,6 +32,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.compose.LifecycleStartEffect
 import cn.lemonit.galaxy.R
 import cn.lemonit.galaxy.app.AgentTargetOf
 import cn.lemonit.galaxy.app.AppContainer
@@ -434,6 +435,8 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
         RemoteDesktopController(
             deviceId, data.deviceName(deviceId), device?.platform ?: Platform.WINDOWS,
             container.connections, container.scope, prefs.defaultQuality, prefs.remoteMouseMode,
+            audioWanted = prefs.remoteAudio,
+            onAudioError = { msg -> container.toast(context.getString(R.string.rd_sound_failed, msg)) },
         ).also { it.start() }
     }
     val ui by controller.ui.collectAsState()
@@ -459,6 +462,11 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
             controller.stop()
         }
     }
+    // 声音只在前台播放：切后台停掉，回来按开关重新开始
+    LifecycleStartEffect(controller) {
+        controller.setForeground(true)
+        onStopOrDispose { controller.setForeground(false) }
+    }
 
     RemoteDesktopScreen(
         ui = ui,
@@ -476,6 +484,10 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
                         container.toast(context.getString(R.string.rd_privacy_failed, e.userMessage()))
                     }
                 }
+            }
+            override fun onSound(on: Boolean) {
+                container.settings.update { it.copy(remoteAudio = on) }
+                controller.setAudio(on)
             }
             override fun onClipboardSend() {
                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

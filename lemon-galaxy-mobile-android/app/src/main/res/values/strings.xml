@@ -268,12 +268,14 @@
     <string name="rd_privacy_on_toast">Privacy screen on: the remote screen is blank and its local keyboard and mouse are disabled</string>
     <string name="rd_privacy_off_toast">Privacy screen off</string>
     <string name="rd_privacy_failed">Could not switch the privacy screen: %1$s</string>
+    <string name="rd_sound">Sound</string>
+    <string name="rd_sound_failed">Could not play the remote sound: %1$s</string>
     <string name="rd_connecting">Connecting to the display…</string>
     <string name="rd_failed">Could not open the display</string>
     <string name="rd_mode">Input</string>
     <string name="rd_mode_touch">Touch</string>
     <string name="rd_mode_mouse">Mouse</string>
-    <string name="rd_mode_info">Touch: tap where you want to click, long-press to right-click, drag to drag.\nMouse: move the pointer like a trackpad. One-finger tap = left click, two-finger tap = right click, two-finger drag = scroll, long-press then move = drag.\nPinch to zoom. While zoomed in, two-finger drag pans in touch mode; in mouse mode the view follows the pointer.</string>
+    <string name="rd_mode_info">Touch: tap where you want to click, long-press to right-click, drag to drag.\nMouse: move the pointer like a trackpad. One-finger tap = left click, two-finger tap = right click, two-finger drag = scroll, long-press then move = drag.\nPinch to zoom. While zoomed in, two-finger drag pans in touch mode; in mouse mode the view follows the pointer.\nSound (when the device supports it): plays the device\'s sound on this phone; your choice is remembered.</string>
     <string name="rd_display">Display</string>
     <string name="rd_quality">Quality</string>
     <string name="quality_auto">Auto</string>

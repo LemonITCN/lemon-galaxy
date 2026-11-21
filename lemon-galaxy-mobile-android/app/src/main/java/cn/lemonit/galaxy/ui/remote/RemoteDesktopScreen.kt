@@ -31,6 +31,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.automirrored.rounded.KeyboardBackspace
 import androidx.compose.material.icons.automirrored.rounded.KeyboardReturn
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.HighQuality
@@ -105,6 +107,9 @@ interface RemoteActions {
 
     /** 隐私屏开关（对端能力里有 "privacy" 时才显示）。 */
     fun onPrivacy(on: Boolean) = Unit
+
+    /** 声音开关（对端能力里有 "audio" 时才显示）。 */
+    fun onSound(on: Boolean) = Unit
 }
 
 private fun click(button: PointerButton, x: Int, y: Int) = listOf(
@@ -374,6 +379,14 @@ private fun ToolbarPanel(ui: RemoteUi, actions: RemoteActions, onKeyboard: () ->
                 ToolButton(Icons.Rounded.Keyboard, stringResource(R.string.rd_keyboard)) { onKeyboard() }
                 ShortcutsButton(ui.platform, actions)
                 ClipboardButton(actions)
+                if (ui.audioSupported) {
+                    ToolButton(
+                        if (ui.audioOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.AutoMirrored.Rounded.VolumeOff,
+                        stringResource(R.string.rd_sound),
+                        active = ui.audioOn,
+                        enabled = !ui.audioBusy,
+                    ) { actions.onSound(!ui.audioOn) }
+                }
                 if (ui.privacySupported) {
                     ToolButton(
                         if (ui.privacyOn) Icons.Rounded.VisibilityOff else Icons.Outlined.VisibilityOff,

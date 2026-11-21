@@ -78,6 +78,9 @@ object Fixtures {
         videoW = 1280,
         videoH = 720,
         path = PathInfo(PathKind.RELAY_UDP, 46u, "galaxy.example.com:7443"),
+        // 声音默认开
+        audioSupported = true,
+        audioOn = true,
     )
 
     val models = AiModels(true, AiMode.FULL_TRUST, MockData.models())

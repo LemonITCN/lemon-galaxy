@@ -43,6 +43,8 @@ data class Prefs(
     val defaultQuality: VideoQuality = VideoQuality.AUTO,
     val defaultAiMode: AiMode = AiMode.CONFIRM_DANGEROUS,
     val remoteMouseMode: Boolean = false,
+    /** 远程桌面播放被控端声音（默认开，记住用户的选择） */
+    val remoteAudio: Boolean = true,
     val terminalInputBox: Boolean = false,
     val lastServer: String = "",
     val lastUsername: String = "",
@@ -69,6 +71,7 @@ class AppSettings(private val sp: SharedPreferences?) {
             defaultQuality = VideoQuality.of(p.getString("default_quality", null)),
             defaultAiMode = runCatching { AiMode.valueOf(p.getString("default_ai_mode", null) ?: "") }.getOrDefault(d.defaultAiMode),
             remoteMouseMode = p.getBoolean("remote_mouse_mode", d.remoteMouseMode),
+            remoteAudio = p.getBoolean("remote_audio", d.remoteAudio),
             terminalInputBox = p.getBoolean("terminal_input_box", d.terminalInputBox),
             lastServer = p.getString("last_server", null) ?: "",
             lastUsername = p.getString("last_username", null) ?: "",
@@ -88,6 +91,7 @@ class AppSettings(private val sp: SharedPreferences?) {
             putString("default_quality", n.defaultQuality.key)
             putString("default_ai_mode", n.defaultAiMode.name)
             putBoolean("remote_mouse_mode", n.remoteMouseMode)
+            putBoolean("remote_audio", n.remoteAudio)
             putBoolean("terminal_input_box", n.terminalInputBox)
             putString("last_server", n.lastServer)
             putString("last_username", n.lastUsername)
