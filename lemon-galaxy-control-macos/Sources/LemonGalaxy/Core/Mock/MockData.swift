@@ -112,7 +112,11 @@ enum MockData {
 
     static func capabilities(for d: DeviceInfo) -> [String] {
         var c = ["terminal", "files", "exec", "port_forward"]
-        if d.platform == .windows || d.platform == .macos { c += ["display", "input", "clipboard", "screenshot", "ui_tree", "privacy"] }
+        if d.platform == .windows || d.platform == .macos {
+            c += ["display", "input", "clipboard", "screenshot", "ui_tree", "privacy"]
+            // 被控端按账号权限过滤能力：没给声音权限时不报 audio
+            if permissions(for: d).audio { c.append("audio") }
+        }
         return c
     }
 

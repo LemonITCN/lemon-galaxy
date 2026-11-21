@@ -69,6 +69,11 @@ let package = Package(
                 .linkedFramework("IOKit"),
                 .linkedLibrary("resolv"),
                 .linkedLibrary("iconv"),
+                // 远端声音播放（cpal）；Opus 编解码已静态编进内核
+                .linkedFramework("AudioToolbox"),
+                // CoreAudio 弱链接：cpal 引用了 macOS 14.2 才有的 AudioHardwareCreateProcessTap 等，
+                // 强链接时 macOS 13 一启动就因找不到符号退出；弱链接后这些符号在旧系统上为空，cpal 不会去调
+                .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "CoreAudio"]),
             ]
         ),
     ] + extraTargets,

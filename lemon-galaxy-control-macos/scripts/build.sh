@@ -97,7 +97,7 @@ echo "签名：$( [ "$IDENTITY" = "-" ] && echo 临时签名 || security find-id
 #   - 不需要 allow-jit / allow-unsigned-executable-memory：Rust 内核静态链接，没有 JIT。
 #   - 不需要 disable-library-validation：不加载第三方动态库。
 #   - 不声明 keychain-access-groups：Developer ID 分发没有描述文件，声明了无法启动；没有它时钥匙串自动退回传统钥匙串。
-#   - 以后加远端声音（采集麦克风 / 系统声音）时再加 com.apple.security.device.audio-input。
+#   - 不需要 com.apple.security.device.audio-input：远端声音用 ScreenCaptureKit 采系统声音，靠「屏幕录制」授权；以后要采麦克风时才加。
 codesign --force --options runtime $TS --entitlements Packaging/LemonGalaxy.entitlements --sign "$IDENTITY" "$APP"
 codesign --verify --strict "$APP"
 echo "$APP"

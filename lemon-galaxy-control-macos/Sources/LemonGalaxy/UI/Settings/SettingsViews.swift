@@ -461,6 +461,7 @@ struct ConnectionSettings: View {
                 }
                 ToggleRow(label: loc("settings.connection.h265"), isOn: $settings.preferH265, info: loc("settings.connection.h265.info"))
                 ToggleRow(label: loc("remote.clipboard"), isOn: $settings.clipboardSync)
+                ToggleRow(label: loc("settings.connection.audio"), isOn: $settings.remoteAudio, info: loc("settings.connection.audio.info"))
             }
             SettingsSection(title: loc("settings.connection.terminal")) {
                 ToggleRow(label: loc("settings.connection.reattach"), isOn: $settings.reattachTerminals, info: loc("settings.connection.reattach.info"))

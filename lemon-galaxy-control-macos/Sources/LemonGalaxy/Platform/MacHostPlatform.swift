@@ -9,26 +9,42 @@ import Carbon.HIToolbox
 ///   - 截屏：ScreenCaptureKit → VideoToolbox H.264/H.265 低延迟硬件编码 → Annex B → EncodedFrameSink
 ///   - 输入：CGEvent 注入鼠标、滚轮、键盘（HID 用法码 → 虚拟键码）、输入法文字（Unicode 字符串事件）
 ///   - 截图、辅助功能控件树（JSON）、剪贴板（文字 / 图片 / 文件）
+///   - 系统声音：ScreenCaptureKit 只采声音（画面部分最小化后丢弃）→ 交错浮点 PCM → AudioPcmSink
+///   - 隐私屏：每块屏幕盖一个黑色无边框窗口（从截屏里排除）+ 会话级事件拦截丢掉本地键鼠，只放行自己注入的事件
 /// 内核在自己的线程上调用这些方法；需要「屏幕录制」「辅助功能」授权，见 Permissions。
 final class MacHostPlatform: HostPlatform, @unchecked Sendable {
     private let lock = NSLock()
     private var captures: [UInt32: ScreenCapture] = [:]
     private var lastDisplay: UInt32 = CGMainDisplayID()
     private let injector = InputInjector()
+    private var audio: AudioCapture?
+    private let privacy = PrivacyScreen()
 
     init() {
         DisplayNames.refresh()
-        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             DisplayNames.refresh()
+            // 隐私屏开着时屏幕增减或分辨率变化：重新铺满
+            MainActor.assumeIsolated { self?.privacy.screensChanged() }
         }
+    }
+
+    deinit {
+        privacy.turnOff()
+        audio?.stop()
     }
 
     // MARK: 能力（内核据此告诉主控端能用什么）
 
     func capabilities() -> [String] {
         var caps = ["clipboard"]
-        if SystemPermissions.screenRecordingGranted { caps += ["display", "screenshot"] }
-        if SystemPermissions.accessibilityGranted { caps += ["input", "ui_tree"] }
+        let screen = SystemPermissions.screenRecordingGranted
+        let ax = SystemPermissions.accessibilityGranted
+        // 系统声音也走 ScreenCaptureKit，只要「屏幕录制」授权
+        if screen { caps += ["display", "screenshot", "audio"] }
+        if ax { caps += ["input", "ui_tree"] }
+        // 隐私屏：拦截本地键鼠要「辅助功能」；没有画面时开隐私屏没有意义
+        if screen && ax { caps.append("privacy") }
         return caps
     }
 
@@ -67,8 +83,26 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
             sem.signal()
         }
         sem.wait()
-        if started == nil { lock.locked { captures[displayId] = nil } }
+        if started == nil {
+            lock.locked { if captures[displayId] === cap { captures[displayId] = nil } }
+        } else if privacy.isOn {
+            // 启动期间隐私屏刚铺上的黑窗口可能没赶上这次的排除列表，补一次
+            Task.detached { await cap.refreshFilter(content: nil) }
+        }
         return started
+    }
+
+    /// 隐私屏窗口出现后，把它们从所有正在进行的截屏里排除（等到它们出现在可共享内容里，最多约 0.5 秒）
+    func refreshCaptureFilters(expecting ids: Set<CGWindowID>) async {
+        let caps = lock.locked { Array(captures.values) }
+        guard !caps.isEmpty else { return }
+        var content: SCShareableContent?
+        for _ in 0..<15 {
+            content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            if let c = content, ids.isSubset(of: Set(c.windows.map(\.windowID))) { break }
+            try? await Task.sleep(nanoseconds: 30_000_000)
+        }
+        for c in caps { await c.refreshFilter(content: content) }
     }
 
     func stopCapture(displayId: UInt32) {
@@ -93,13 +127,15 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
     func screenshot(displayId: UInt32, maxWidth: UInt32, maxHeight: UInt32) -> ImageData? {
         guard SystemPermissions.screenRecordingGranted else { return nil }
         var image: CGImage?
+        // 隐私屏的黑窗口不进截图
+        let hidden = privacy.windowIds
         if #available(macOS 14.0, *) {
             let sem = DispatchSemaphore(value: 0)
             Task.detached {
                 do {
                     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
                     if let d = content.displays.first(where: { $0.displayID == displayId }) ?? content.displays.first {
-                        let filter = SCContentFilter(display: d, excludingWindows: [])
+                        let filter = SCContentFilter(display: d, excludingWindows: content.windows.filter { hidden.contains($0.windowID) })
                         let cfg = SCStreamConfiguration()
                         let scale = CGFloat(filter.pointPixelScale)
                         cfg.width = Int(CGFloat(d.width) * scale)
@@ -111,6 +147,9 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
                 sem.signal()
             }
             sem.wait()
+        } else if let cover = privacy.windowId(display: displayId) {
+            // macOS 13：隐私屏在最上层，取它下面的所有窗口合成的画面
+            image = CGWindowListCreateImage(CGDisplayBounds(displayId), .optionOnScreenBelowWindow, cover, [.bestResolution])
         } else {
             image = CGDisplayCreateImage(displayId)
         }
@@ -168,6 +207,46 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
         case .files(let paths): pb.writeObjects(paths.map { URL(fileURLWithPath: $0) as NSURL })
         }
     }
+
+    // MARK: 隐私屏
+
+    /// 开：先装好本地键鼠拦截（做不到就返回 false，不铺黑窗口），再异步铺黑窗口；关：全部撤掉。
+    /// 不同步等主线程（内核线程调用，主线程可能正等内核）。
+    func setPrivacy(on: Bool) -> Bool {
+        guard on else {
+            privacy.turnOff()
+            return true
+        }
+        guard SystemPermissions.screenRecordingGranted, SystemPermissions.accessibilityGranted else { return false }
+        return privacy.turnOn { [weak self] ids in await self?.refreshCaptureFilters(expecting: ids) }
+    }
+
+    // MARK: 系统声音
+
+    func startAudio(sink: AudioPcmSink) -> Bool {
+        guard SystemPermissions.screenRecordingGranted else { return false }
+        stopAudio()
+        let cap = AudioCapture(sink: sink)
+        lock.locked { audio = cap }
+        let sem = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var ok = false
+        Task.detached {
+            ok = await cap.start()
+            sem.signal()
+        }
+        sem.wait()
+        if !ok { lock.locked { if audio === cap { audio = nil } } }
+        return ok
+    }
+
+    func stopAudio() {
+        let cap = lock.locked { () -> AudioCapture? in
+            let a = audio
+            audio = nil
+            return a
+        }
+        cap?.stop()
+    }
 }
 
 // MARK: - ScreenCaptureKit 截屏 + 编码
@@ -191,9 +270,7 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             guard let d = content.displays.first(where: { $0.displayID == displayId }) else { return nil }
-            // 不把自己的提示条录进去
-            let own = content.windows.filter { $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier }
-            let filter = SCContentFilter(display: d, excludingWindows: own)
+            let filter = Self.filter(display: d, content: content)
             let cfg = SCStreamConfiguration()
             let scale = displayScale(displayId)
             var w = Int(CGFloat(d.width) * scale), h = Int(CGFloat(d.height) * scale)
@@ -232,6 +309,26 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// 不把自己的窗口（被控提示条、隐私屏黑窗口）录进去
+    static func filter(display: SCDisplay, content: SCShareableContent) -> SCContentFilter {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let own = content.windows.filter { $0.owningApplication?.processID == pid }
+        return SCContentFilter(display: display, excludingWindows: own)
+    }
+
+    /// 按最新的窗口列表更新排除名单（隐私屏刚铺上黑窗口时）；content 为空时自己取（含还没显示出来的窗口）
+    func refreshFilter(content: SCShareableContent?) async {
+        guard let s = stream else { return }
+        do {
+            let c: SCShareableContent
+            if let content { c = content } else { c = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) }
+            guard let d = c.displays.first(where: { $0.displayID == displayId }) else { return }
+            try await s.updateContentFilter(Self.filter(display: d, content: c))
+        } catch {
+            NSLog("LemonGalaxy: 更新截屏排除窗口失败 %@", String(describing: error))
+        }
+    }
+
     func stop() {
         let s = stream
         stream = nil
@@ -259,10 +356,321 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
+// MARK: - 系统声音
+
+/// 用 ScreenCaptureKit 采系统声音（不含本进程自己放的声音：主控端正在播放的远端声音不会再传回去）。
+/// ScreenCaptureKit 必须带一个屏幕过滤器，画面部分设成 2×2、每秒 1 帧，收到就丢，不影响正在进行的截屏。
+final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    private let sink: AudioPcmSink
+    private let lock = NSLock()
+    private var scStream: SCStream?
+    private var stopped = false
+    private var restarts = 0
+    private let queue = DispatchQueue(label: "galaxy.audio", qos: .userInitiated)
+
+    init(sink: AudioPcmSink) { self.sink = sink }
+
+    func start() async -> Bool {
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let d = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first else { return false }
+            let cfg = SCStreamConfiguration()
+            cfg.capturesAudio = true
+            cfg.excludesCurrentProcessAudio = true
+            cfg.sampleRate = 48_000
+            cfg.channelCount = 2
+            cfg.width = 2
+            cfg.height = 2
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+            cfg.showsCursor = false
+            cfg.queueDepth = 3
+            let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: cfg, delegate: self)
+            // 画面输出也要接上，否则 ScreenCaptureKit 每帧都报找不到输出
+            try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+            try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
+            try await s.startCapture()
+            let keep = lock.locked { () -> Bool in
+                guard !stopped else { return false }
+                scStream = s
+                return true
+            }
+            if !keep { try? await s.stopCapture() }
+            return keep
+        } catch {
+            NSLog("LemonGalaxy: 声音采集启动失败 %@", String(describing: error))
+            return false
+        }
+    }
+
+    func stop() {
+        let s = lock.locked { () -> SCStream? in
+            stopped = true
+            defer { scStream = nil }
+            return scStream
+        }
+        if let s { Task { try? await s.stopCapture() } }
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .audio, sampleBuffer.isValid, !lock.locked({ stopped }),
+              let (pcm, rate, channels) = Self.interleavedPCM(sampleBuffer) else { return }
+        sink.push(pcm: pcm, sampleRate: rate, channels: channels)
+    }
+
+    /// 中断（主屏幕换了等）：隔 1 秒重开；重开失败或连续中断 5 次就放弃（对方可以关掉声音再打开）
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        NSLog("LemonGalaxy: 声音采集中断 %@", String(describing: error))
+        let retry = lock.locked { () -> Bool in
+            guard !stopped, scStream === stream, restarts < 5 else { return false }
+            restarts += 1
+            scStream = nil
+            return true
+        }
+        guard retry else { return }
+        Task.detached { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard let self, !self.lock.locked({ self.stopped }) else { return }
+            if await self.start() { self.lock.locked { self.restarts = 0 } }
+        }
+    }
+
+    /// CMSampleBuffer（ScreenCaptureKit 给的一般是非交错 Float32）→ 交错 Float32 小端字节、采样率、声道数
+    static func interleavedPCM(_ sb: CMSampleBuffer) -> (Data, UInt32, UInt32)? {
+        guard let asbd = sb.formatDescription?.audioStreamBasicDescription, asbd.mFormatID == kAudioFormatLinearPCM else { return nil }
+        let channels = Int(asbd.mChannelsPerFrame)
+        let frames = sb.numSamples
+        let flags = asbd.mFormatFlags
+        let isFloat = flags & kAudioFormatFlagIsFloat != 0
+        let bits = Int(asbd.mBitsPerChannel)
+        guard channels > 0, frames > 0, asbd.mSampleRate > 0, flags & kAudioFormatFlagIsBigEndian == 0,
+              (isFloat && bits == 32) || (!isFloat && bits == 16 && flags & kAudioFormatFlagIsSignedInteger != 0) else { return nil }
+        let nonInterleaved = flags & kAudioFormatFlagIsNonInterleaved != 0
+        let width = bits / 8
+        func sample(_ p: UnsafeMutableRawPointer, _ i: Int) -> Float {
+            isFloat ? p.loadUnaligned(fromByteOffset: i * 4, as: Float.self) : Float(p.loadUnaligned(fromByteOffset: i * 2, as: Int16.self)) / 32768
+        }
+        var out = [Float](repeating: 0, count: frames * channels)
+        do {
+            try sb.withAudioBufferList { list, _ in
+                out.withUnsafeMutableBufferPointer { dst in
+                    if nonInterleaved {
+                        // 每个声道一块缓冲
+                        for (c, buf) in list.enumerated() where c < channels {
+                            guard let p = buf.mData else { continue }
+                            for f in 0..<min(frames, Int(buf.mDataByteSize) / width) { dst[f * channels + c] = sample(p, f) }
+                        }
+                    } else if let buf = list.first, let p = buf.mData {
+                        for i in 0..<min(frames * channels, Int(buf.mDataByteSize) / width) { dst[i] = sample(p, i) }
+                    }
+                }
+            }
+        } catch {
+            return nil
+        }
+        // arm64 与 x86_64 都是小端，Float 数组的内存就是内核要的格式
+        let data = out.withUnsafeBufferPointer { Data(buffer: $0) }
+        return (data, UInt32(asbd.mSampleRate.rounded()), UInt32(channels))
+    }
+}
+
+// MARK: - 隐私屏
+
+/// 隐私屏：每块屏幕盖一个最高层的黑色无边框窗口，本地键鼠由 LocalInputBlocker 拦掉。
+/// 黑窗口从截屏里排除（ScreenCapture.filter 排除本进程的窗口），对方照常看到真实画面；
+/// 窗口不接收鼠标，远端注入的点击穿过它落到下面的应用。开关可在任何线程调用，窗口只在主线程增删。
+final class PrivacyScreen: @unchecked Sendable {
+    static let windowIdentifier = "galaxy.privacy-screen"
+    private let lock = NSLock()
+    /// 开、关整体串行（两个会话同时开关时不交错）
+    private let opLock = NSLock()
+    private var on = false
+    /// 每次重铺窗口加一：旧的「排除完再显示」回调发现编号变了就不再动窗口
+    private var serial = 0
+    private var displayWindows: [CGDirectDisplayID: CGWindowID] = [:]
+    private var refresh: (@Sendable (Set<CGWindowID>) async -> Void)?
+    private let blocker = LocalInputBlocker()
+    /// 只在主线程读写
+    private var windows: [NSWindow] = []
+
+    var isOn: Bool { lock.locked { on } }
+    /// 黑窗口的窗口号（任何线程可读，截图时排除）
+    var windowIds: Set<CGWindowID> { lock.locked { Set(displayWindows.values) } }
+    func windowId(display: CGDirectDisplayID) -> CGWindowID? { lock.locked { displayWindows[display] } }
+
+    /// refresh：黑窗口出现后把它们从正在进行的截屏里排除，排除完才让窗口变黑可见，对方画面不会闪黑
+    func turnOn(refresh: @escaping @Sendable (Set<CGWindowID>) async -> Void) -> Bool {
+        opLock.lock(); defer { opLock.unlock() }
+        if isOn { return true }
+        // 先装好本地键鼠拦截，做不到就整个不开
+        guard blocker.start() else { return false }
+        let s = lock.locked { () -> Int in
+            on = true
+            self.refresh = refresh
+            serial += 1
+            return serial
+        }
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.layout(serial: s) } }
+        return true
+    }
+
+    func turnOff() {
+        opLock.lock(); defer { opLock.unlock() }
+        blocker.stop()
+        let wasOn = lock.locked { () -> Bool in
+            defer { on = false; refresh = nil; serial += 1; displayWindows = [:] }
+            return on
+        }
+        guard wasOn else { return }
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.removeWindows() } }
+    }
+
+    @MainActor func screensChanged() {
+        guard let s = lock.locked({ () -> Int? in
+            guard on else { return nil }
+            serial += 1
+            return serial
+        }) else { return }
+        layout(serial: s)
+    }
+
+    @MainActor private func layout(serial s: Int) {
+        guard lock.locked({ on && serial == s }) else { return }
+        removeWindows()
+        var map: [CGDirectDisplayID: CGWindowID] = [:]
+        for screen in NSScreen.screens {
+            let w = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            w.isReleasedWhenClosed = false
+            w.backgroundColor = .black
+            w.isOpaque = true
+            w.hasShadow = false
+            w.animationBehavior = .none
+            w.ignoresMouseEvents = true
+            w.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
+            w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+            w.setAccessibilityIdentifier(Self.windowIdentifier)
+            // 先透明铺上，等从截屏里排除后再变黑
+            w.alphaValue = 0
+            w.setFrame(screen.frame, display: false)
+            w.orderFrontRegardless()
+            windows.append(w)
+            if let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+                map[n.uint32Value] = CGWindowID(w.windowNumber)
+            }
+        }
+        let ids = Set(windows.map { CGWindowID($0.windowNumber) })
+        let refresh = lock.locked { () -> (@Sendable (Set<CGWindowID>) async -> Void)? in
+            displayWindows = map
+            return self.refresh
+        }
+        Task.detached {
+            await refresh?(ids)
+            await MainActor.run { self.reveal(serial: s) }
+            // 兜底：万一第一次没等到窗口出现在可共享内容里，变黑之后再排除一次
+            if self.lock.locked({ self.on && self.serial == s }) { await refresh?(ids) }
+        }
+    }
+
+    @MainActor private func reveal(serial s: Int) {
+        guard lock.locked({ on && serial == s }) else { return }
+        for w in windows { w.alphaValue = 1 }
+    }
+
+    @MainActor private func removeWindows() {
+        for w in windows {
+            w.orderOut(nil)
+            w.close()
+        }
+        windows.removeAll()
+    }
+}
+
+/// 会话级事件拦截：丢掉本地键盘、鼠标、触控板事件，只放行带 InputInjector.marker 的（远端注入的）事件。
+/// 跑在自己的线程上，主线程卡住也不影响；系统因超时停用拦截时立刻重新启用。需要「辅助功能」授权。
+final class LocalInputBlocker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var port: CFMachPort?
+    private var running = false
+
+    private static let mask: CGEventMask = {
+        let types: [CGEventType] = [.keyDown, .keyUp, .flagsChanged, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+                                    .otherMouseDown, .otherMouseUp, .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+                                    .scrollWheel, .tabletPointer, .tabletProximity]
+        var m = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << CGEventMask($1.rawValue)) }
+        // 系统按键（亮度、音量、媒体键）与触控板手势没有 CGEventType 名字，按 NSEvent.EventType 原值
+        let more: [NSEvent.EventType] = [.systemDefined, .gesture, .magnify, .swipe, .rotate, .beginGesture, .endGesture, .smartMagnify, .pressure]
+        for t in more { m |= CGEventMask(1) << CGEventMask(t.rawValue) }
+        return m
+    }()
+
+    /// 装好拦截返回 true；没有「辅助功能」授权等原因装不上返回 false
+    func start() -> Bool {
+        if lock.locked({ running }) { return true }
+        let sem = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var ok = false
+        let thread = Thread { [self] in
+            let info = Unmanaged.passUnretained(self).toOpaque()
+            guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                              eventsOfInterest: Self.mask, callback: localInputTapCallback, userInfo: info) else {
+                sem.signal()
+                return
+            }
+            let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+            let loop = CFRunLoopGetCurrent()
+            CFRunLoopAddSource(loop, source, .commonModes)
+            CGEvent.tapEnable(tap: tap, enable: true)
+            lock.locked { port = tap; running = true }
+            ok = true
+            sem.signal()
+            // stop() 把 running 置 false 后最多 0.25 秒退出并拆掉拦截
+            while lock.locked({ running && port === tap }) {
+                _ = CFRunLoopRunInMode(.defaultMode, 0.25, false)
+            }
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFRunLoopRemoveSource(loop, source, .commonModes)
+            CFMachPortInvalidate(tap)
+        }
+        thread.name = "galaxy.privacy.input"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+        sem.wait()
+        return ok
+    }
+
+    func stop() {
+        let tap = lock.locked { () -> CFMachPort? in
+            defer { running = false; port = nil }
+            return port
+        }
+        // 立刻停用，线程随后自己清理退出
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+    }
+
+    fileprivate func reenable() {
+        if let tap = lock.locked({ port }) { CGEvent.tapEnable(tap: tap, enable: true) }
+    }
+}
+
+private func localInputTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, userInfo: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
+    switch type {
+    case .tapDisabledByTimeout, .tapDisabledByUserInput:
+        if let userInfo { Unmanaged<LocalInputBlocker>.fromOpaque(userInfo).takeUnretainedValue().reenable() }
+        return Unmanaged.passUnretained(event)
+    default:
+        // 远端注入的事件带标记，放行；本机键盘、鼠标、触控板的一律丢掉
+        return event.getIntegerValueField(.eventSourceUserData) == InputInjector.marker ? Unmanaged.passUnretained(event) : nil
+    }
+}
+
 // MARK: - 输入注入
 
 final class InputInjector {
-    private let source = CGEventSource(stateID: .hidSystemState)
+    /// 注入的事件都带这个标记（kCGEventSourceUserData），隐私屏的事件拦截据此只放行远端操作
+    static let marker: Int64 = 0x4C47_414C_5859   // "LGALXY"
+    private let source: CGEventSource? = {
+        let s = CGEventSource(stateID: .hidSystemState)
+        s?.userData = InputInjector.marker
+        return s
+    }()
     private var buttonsDown: Set<PointerButton> = []
     private var lastPoint = CGPoint.zero
     private var lastClick: (PointerButton, Date, CGPoint, Int64)?
@@ -400,6 +808,8 @@ struct AXTreeExporter {
             var windows: [[String: Any]] = []
             for w in children(el, attr: kAXWindowsAttribute) {
                 guard count < maxNodes else { break }
+                // 隐私屏的黑窗口不算界面内容
+                if attr(w, kAXIdentifierAttribute) as? String == PrivacyScreen.windowIdentifier { continue }
                 if let node = walk(w, depth: 0, count: &count, bounds: bounds, scale: scale) { windows.append(node) }
             }
             if !windows.isEmpty {

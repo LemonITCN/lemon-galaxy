@@ -544,6 +544,30 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
             throw GalaxyError.Permission(detail: client.zh ? "没有控制权限" : "No control permission")
         }
     }
+
+    override func startAudio(volume: Float) async throws -> AudioPlayback {
+        await client.delay(150)
+        guard MockData.capabilities(for: device).contains("audio") else {
+            throw GalaxyError.Permission(detail: client.zh ? "对方没有给你听声音的权限" : "The remote owner has not granted audio access")
+        }
+        return MockAudioPlayback(volume: volume)
+    }
+}
+
+/// 模拟的远端声音：不出声，只记住音量与静音，供界面与 selftest 核对
+final class MockAudioPlayback: AudioPlayback, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
+    private let lock = NSLock()
+    private var _volume: Float
+    private var _muted = false
+    private var active = true
+    var volume: Float { lock.locked { _volume } }
+    var muted: Bool { lock.locked { _muted } }
+    init(volume: Float) { _volume = volume; super.init(noHandle: NoHandle()) }
+    override func setVolume(volume: Float) { lock.locked { _volume = min(max(volume, 0), 1) } }
+    override func setMuted(muted: Bool) { lock.locked { _muted = muted } }
+    override func isActive() -> Bool { lock.locked { active } }
+    override func stop() { lock.locked { active = false } }
 }
 
 final class MockPortForward: PortForward, @unchecked Sendable {

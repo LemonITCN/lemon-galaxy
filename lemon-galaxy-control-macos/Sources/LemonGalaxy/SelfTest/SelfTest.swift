@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CoreMedia
 
 /// --selftest <输出目录> [--scale 2] [--only 名称片段]
 /// 用模拟内核把主要界面离屏渲染成 PNG：浅色 / 深色 × 中文 / 英文。
@@ -55,6 +56,7 @@ enum SelfTest {
         LocalFileSource.homeOverride = fakeHome.path
         defer { try? FileManager.default.removeItem(at: fakeHome.deletingLastPathComponent()) }
         RemoteVideoNSView.snapshotMode = true
+        checkAudioConversion()
 
         let langs = (arg("--lang").map { [$0] }) ?? ["zh-Hans", "en"]
         let themes = (arg("--theme").map { [$0] }) ?? ["light", "dark"]
@@ -81,6 +83,72 @@ enum SelfTest {
     }
 
     // MARK: 工具
+
+    /// 被控端声音采集的格式转换（不碰音频设备）：ScreenCaptureKit 常见的非交错 Float32，以及交错 Int16，
+    /// 都应转成内核要的交错 Float32 小端字节
+    static func checkAudioConversion() {
+        func make(channels: [[Float]], interleaved: Bool, int16: Bool) -> CMSampleBuffer? {
+            let n = channels.count, frames = channels[0].count, width = int16 ? 2 : 4
+            var flags: AudioFormatFlags = kAudioFormatFlagIsPacked | (int16 ? kAudioFormatFlagIsSignedInteger : kAudioFormatFlagIsFloat)
+            if !interleaved { flags |= kAudioFormatFlagIsNonInterleaved }
+            let frameBytes = UInt32(interleaved ? width * n : width)
+            var asbd = AudioStreamBasicDescription(mSampleRate: 44_100, mFormatID: kAudioFormatLinearPCM, mFormatFlags: flags,
+                                                   mBytesPerPacket: frameBytes, mFramesPerPacket: 1, mBytesPerFrame: frameBytes,
+                                                   mChannelsPerFrame: UInt32(n), mBitsPerChannel: UInt32(width * 8), mReserved: 0)
+            var fmt: CMAudioFormatDescription?
+            guard CMAudioFormatDescriptionCreate(allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil,
+                                                 extensions: nil, formatDescriptionOut: &fmt) == noErr, let fmt else { return nil }
+            var sb: CMSampleBuffer?
+            var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 44_100), presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
+            guard CMSampleBufferCreate(allocator: nil, dataBuffer: nil, dataReady: false, makeDataReadyCallback: nil, refcon: nil, formatDescription: fmt,
+                                       sampleCount: frames, sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 0,
+                                       sampleSizeArray: nil, sampleBufferOut: &sb) == noErr, let sb else { return nil }
+            // 每块缓冲的原始字节
+            var blocks: [Data] = []
+            func bytes(_ v: Float) -> Data {
+                if int16 { var x = Int16(v * 32767); return Data(bytes: &x, count: 2) }
+                var x = v
+                return Data(bytes: &x, count: 4)
+            }
+            if interleaved {
+                var d = Data()
+                for f in 0..<frames { for c in 0..<n { d.append(bytes(channels[c][f])) } }
+                blocks = [d]
+            } else {
+                blocks = channels.map { ch in ch.reduce(into: Data()) { $0.append(bytes($1)) } }
+            }
+            let list = AudioBufferList.allocate(maximumBuffers: blocks.count)
+            defer { free(list.unsafeMutablePointer) }
+            var raws: [UnsafeMutableRawPointer] = []
+            defer { raws.forEach { $0.deallocate() } }
+            for (i, d) in blocks.enumerated() {
+                let raw = UnsafeMutableRawPointer.allocate(byteCount: d.count, alignment: 16)
+                d.copyBytes(to: raw.assumingMemoryBound(to: UInt8.self), count: d.count)
+                raws.append(raw)
+                list[i] = AudioBuffer(mNumberChannels: interleaved ? UInt32(n) : 1, mDataByteSize: UInt32(d.count), mData: raw)
+            }
+            guard CMSampleBufferSetDataBufferFromAudioBufferList(sb, blockBufferAllocator: nil, blockBufferMemoryAllocator: nil, flags: 0,
+                                                                 bufferList: list.unsafePointer) == noErr else { return nil }
+            return sb
+        }
+        let left: [Float] = [0.5, -0.25, 0.125, 0], right: [Float] = [-0.5, 0.25, -0.125, 0.75]
+        let want = zip(left, right).flatMap { [$0, $1] }
+        for (name, interleaved, int16) in [("非交错 Float32", false, false), ("交错 Int16", true, true)] {
+            guard let sb = make(channels: [left, right], interleaved: interleaved, int16: int16) else {
+                problems.append("声音格式转换（\(name)）：构造样本失败")
+                continue
+            }
+            guard let (data, rate, ch) = AudioCapture.interleavedPCM(sb) else {
+                problems.append("声音格式转换（\(name)）：转换失败")
+                continue
+            }
+            let got = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+            let tol: Float = int16 ? 0.001 : 0
+            if rate != 44_100 || ch != 2 || got.count != want.count || zip(got, want).contains(where: { abs($0 - $1) > tol }) {
+                problems.append("声音格式转换（\(name)）结果不对：\(rate) Hz \(ch) 声道 \(got)")
+            }
+        }
+    }
 
     /// 本机一侧用的假主目录（文件名、时间都固定）
     static func makeFakeHome() -> URL {
@@ -340,6 +408,9 @@ enum SelfTest {
         app.openRemoteDesktop(deviceId: "dev-office")
         if let r = app.activeTab as? RemoteDesktopModel {
             wait("远程画面解码", timeout: 8) { r.framesDecoded > 0 }
+            // 对方支持声音、设置默认打开：画面开起来后自动开始收听
+            if !r.audioSupported { problems.append("模拟的 Windows 设备应支持声音") }
+            wait("远端声音自动开始") { r.audioOn && !r.audioBusy }
             pump(0.3)
             r.measuredFps = 30
             r.measuredKbps = 8_400
@@ -352,6 +423,25 @@ enum SelfTest {
             wait("隐私屏开启") { r.privacyOn && !r.privacyBusy }
             shot("\(prefix)-41-remote-privacy", app, window: window, host: host, settle: 0.2)
             app.toast = nil
+        }
+        // 声音开关：关掉（记进设置）、截图、再打开并调音量
+        if let r = app.activeTab as? RemoteDesktopModel {
+            r.setAudio(false)
+            if r.audioOn || r.audio != nil || settings.remoteAudio { problems.append("关闭声音后状态不对") }
+            shot("\(prefix)-42-remote-audio-off", app, window: window, host: host, settle: 0.2)
+            r.setAudio(true)
+            wait("重新打开声音") { r.audioOn && !r.audioBusy }
+            if !settings.remoteAudio { problems.append("打开声音没有记进设置") }
+            r.setVolume(0.35)
+            if let m = r.audio as? MockAudioPlayback {
+                if abs(m.volume - 0.35) > 0.001 { problems.append("音量没有传给播放对象：\(m.volume)") }
+            } else {
+                problems.append("模拟内核应返回 MockAudioPlayback")
+            }
+            shotView("\(prefix)-43-remote-audio-volume", app, dark: dark, size: CGSize(width: 280, height: 86)) {
+                RemoteAudioVolumePanel(tab: r)
+            }
+            r.setVolume(1)
         }
 
         // 6. AI 智能体

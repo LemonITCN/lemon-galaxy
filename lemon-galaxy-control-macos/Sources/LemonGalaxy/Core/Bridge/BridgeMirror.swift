@@ -798,6 +798,34 @@ public struct RdpTarget: Equatable, Hashable {
 extension RdpTarget: Sendable {}
 #endif
 
+public struct RecordingInfo: Equatable, Hashable {
+    /**
+     * 写出的文件（录像中途被控端分辨率变了会分成几个文件）
+     */
+    public var paths: [String]
+    public var durationMs: UInt64
+    public var bytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 写出的文件（录像中途被控端分辨率变了会分成几个文件）
+         */paths: [String], durationMs: UInt64, bytes: UInt64) {
+        self.paths = paths
+        self.durationMs = durationMs
+        self.bytes = bytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RecordingInfo: Sendable {}
+#endif
+
 public struct ServerInfo: Equatable, Hashable {
     public var address: String
     public var name: String
@@ -1772,6 +1800,30 @@ public protocol AgentListener: AnyObject, Sendable {
     
 }
 
+public protocol AudioPcmSinkProtocol: AnyObject, Sendable {
+    
+    /**
+     * `pcm` 是交错排列的 32 位浮点样本（小端），采样率与声道数随系统。
+     */
+    func push(pcm: Data, sampleRate: UInt32, channels: UInt32) 
+    
+}
+
+public protocol AudioPlaybackProtocol: AnyObject, Sendable {
+    
+    func isActive()  -> Bool
+    
+    func setMuted(muted: Bool) 
+    
+    func setVolume(volume: Float) 
+    
+    /**
+     * 停止收听并关闭输出设备。
+     */
+    func stop() 
+    
+}
+
 public protocol ClientListener: AnyObject, Sendable {
     
     func onState(state: ClientState) 
@@ -1786,13 +1838,26 @@ public protocol ClientListener: AnyObject, Sendable {
 
 public protocol DisplayChannelProtocol: AnyObject, Sendable {
     
+    func isRecording()  -> Bool
+    
     func requestKeyframe() 
     
     func sendInput(event: InputEvent) 
     
     func setBitrate(kbps: UInt32) 
     
+    /**
+     * 开始录像到 `path`（.mp4，分片 MP4，H.264 原样写入不重新编码）。`with_audio` 为真时正在收听的声音也一起录。
+     * 从下一个关键帧开始写（会马上请求一个）。
+     */
+    func startRecording(path: String, withAudio: Bool) async throws 
+    
     func stop() 
+    
+    /**
+     * 停止录像。没在录时报错。
+     */
+    func stopRecording() throws  -> RecordingInfo
     
 }
 
@@ -1843,6 +1908,11 @@ public protocol FileClientProtocol: AnyObject, Sendable {
 public protocol GalaxyClientProtocol: AnyObject, Sendable {
     
     func aiModels() async throws  -> AiModels
+    
+    /**
+     * 能不能远程开机：设备离线、能被控、上报过网卡地址（界面据此显示「远程开机」）。
+     */
+    func canWake(deviceId: String)  -> Bool
     
     func changePassword(oldPassword: String, newPassword: String, totp: String?) async throws 
     
@@ -1947,6 +2017,12 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
      */
     func vaultSave(entry: VaultEntry) async throws  -> VaultEntry
     
+    /**
+     * 远程开机：由本机（与目标同一网络时）或同一网络里在线的设备代发唤醒包。
+     * 返回代发设备的名字，空字符串表示本机。目标要在主板 / 网卡设置里开启网络唤醒。
+     */
+    func wakeDevice(deviceId: String) async throws  -> [String]
+    
 }
 
 public protocol HostListener: AnyObject, Sendable {
@@ -1995,7 +2071,19 @@ public protocol HostPlatform: AnyObject, Sendable {
     func clipboardSet(data: ClipboardData) 
     
     /**
-     * 已获得的系统授权对应的能力："display" "screenshot" "input" "ui_tree" "clipboard"
+     * 隐私屏：本机屏幕黑掉、本地键鼠失效，远端照常看到和操作。返回是否做到了（不支持返回 false）。
+     */
+    func setPrivacy(on: Bool)  -> Bool
+    
+    /**
+     * 开始采集系统声音，样本推给 `sink`；不支持或没授权返回 false。同一时间只有一路。
+     */
+    func startAudio(sink: AudioPcmSink)  -> Bool
+    
+    func stopAudio() 
+    
+    /**
+     * 已获得的系统授权对应的能力："display" "screenshot" "input" "ui_tree" "clipboard" "privacy" "audio"
      */
     func capabilities()  -> [String]
     
@@ -2012,6 +2100,8 @@ public protocol HostServiceProtocol: AnyObject, Sendable {
      */
     func disconnectSession(id: String)  -> Bool
     
+    func lockOnEnd()  -> Bool
+    
     func recentEvents(limit: UInt32)  -> [HostEvent]
     
     func respondAssist(requestId: String, allow: Bool) 
@@ -2022,6 +2112,11 @@ public protocol HostServiceProtocol: AnyObject, Sendable {
     func setAssistCode(code: String?) 
     
     func setListener(listener: HostListener) 
+    
+    /**
+     * 远程看过桌面的会话都结束后自动锁屏（默认关）。
+     */
+    func setLockOnEnd(on: Bool) 
     
     func setPlatform(platform: HostPlatform) 
     
@@ -2094,6 +2189,11 @@ public protocol PeerSessionProtocol: AnyObject, Sendable {
      * 隐私屏：被控端本地屏幕黑掉、本地键鼠失效，远端照常操作；本会话结束时自动关闭。能力列表里有 "privacy" 才支持。
      */
     func setPrivacy(on: Bool) async throws 
+    
+    /**
+     * 开始收听被控端的系统声音，用本机默认输出设备播放。能力列表里有 "audio" 才支持。`volume` 0..1。
+     */
+    func startAudio(volume: Float) async throws  -> AudioPlayback
     
     func wakeOnLan(mac: String) async throws 
     
@@ -2308,14 +2408,34 @@ open class AgentConversation: AgentConversationProtocol, @unchecked Sendable {
     open func title()  -> String { bridgeUnimplemented() }
 }
 
+open class AudioPcmSink: AudioPcmSinkProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func push(pcm: Data, sampleRate: UInt32, channels: UInt32) { bridgeUnimplemented() }
+}
+
+open class AudioPlayback: AudioPlaybackProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func isActive()  -> Bool { bridgeUnimplemented() }
+    open func setMuted(muted: Bool) { bridgeUnimplemented() }
+    open func setVolume(volume: Float) { bridgeUnimplemented() }
+    open func stop() { bridgeUnimplemented() }
+}
+
 open class DisplayChannel: DisplayChannelProtocol, @unchecked Sendable {
     public struct NoHandle { public init() {} }
     public init(noHandle: NoHandle) {}
     required public init(unsafeFromHandle handle: UInt64) {}
+    open func isRecording()  -> Bool { bridgeUnimplemented() }
     open func requestKeyframe() { bridgeUnimplemented() }
     open func sendInput(event: InputEvent) { bridgeUnimplemented() }
     open func setBitrate(kbps: UInt32) { bridgeUnimplemented() }
+    open func startRecording(path: String, withAudio: Bool) async throws { bridgeUnimplemented() }
     open func stop() { bridgeUnimplemented() }
+    open func stopRecording() throws  -> RecordingInfo { bridgeUnimplemented() }
 }
 
 open class EncodedFrameSink: EncodedFrameSinkProtocol, @unchecked Sendable {
@@ -2350,6 +2470,7 @@ open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
     public init(noHandle: NoHandle) {}
     required public init(unsafeFromHandle handle: UInt64) {}
     open func aiModels() async throws  -> AiModels { bridgeUnimplemented() }
+    open func canWake(deviceId: String)  -> Bool { bridgeUnimplemented() }
     open func changePassword(oldPassword: String, newPassword: String, totp: String?) async throws { bridgeUnimplemented() }
     open func checkUpdate(component: String, platform: String, arch: String, current: String) async throws  -> UpdateInfo? { bridgeUnimplemented() }
     open func closeRdp(forwardId: String) { bridgeUnimplemented() }
@@ -2381,6 +2502,7 @@ open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
     open func vault()  -> [VaultEntry] { bridgeUnimplemented() }
     open func vaultDelete(id: String) async throws { bridgeUnimplemented() }
     open func vaultSave(entry: VaultEntry) async throws  -> VaultEntry { bridgeUnimplemented() }
+    open func wakeDevice(deviceId: String) async throws  -> [String] { bridgeUnimplemented() }
 }
 
 open class HostService: HostServiceProtocol, @unchecked Sendable {
@@ -2390,10 +2512,12 @@ open class HostService: HostServiceProtocol, @unchecked Sendable {
     open func accounts()  -> [HostAccount] { bridgeUnimplemented() }
     open func disconnectAll() { bridgeUnimplemented() }
     open func disconnectSession(id: String)  -> Bool { bridgeUnimplemented() }
+    open func lockOnEnd()  -> Bool { bridgeUnimplemented() }
     open func recentEvents(limit: UInt32)  -> [HostEvent] { bridgeUnimplemented() }
     open func respondAssist(requestId: String, allow: Bool) { bridgeUnimplemented() }
     open func setAssistCode(code: String?) { bridgeUnimplemented() }
     open func setListener(listener: HostListener) { bridgeUnimplemented() }
+    open func setLockOnEnd(on: Bool) { bridgeUnimplemented() }
     open func setPlatform(platform: HostPlatform) { bridgeUnimplemented() }
     open func setRemoteEnabled(enabled: Bool) { bridgeUnimplemented() }
     open func startAssist() async throws  -> AssistInfo { bridgeUnimplemented() }
@@ -2424,6 +2548,7 @@ open class PeerSession: PeerSessionProtocol, @unchecked Sendable {
     open func screenshot(displayId: UInt32, maxWidth: UInt32) async throws  -> ImageData { bridgeUnimplemented() }
     open func setListener(listener: PeerListener) { bridgeUnimplemented() }
     open func setPrivacy(on: Bool) async throws { bridgeUnimplemented() }
+    open func startAudio(volume: Float) async throws  -> AudioPlayback { bridgeUnimplemented() }
     open func wakeOnLan(mac: String) async throws { bridgeUnimplemented() }
 }
 

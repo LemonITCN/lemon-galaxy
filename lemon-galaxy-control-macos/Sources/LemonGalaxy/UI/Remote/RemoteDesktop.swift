@@ -30,6 +30,12 @@ final class RemoteDesktopModel: TabModel {
     /// 隐私屏：被控端本地屏幕黑掉、本地键鼠失效（对端能力里有 "privacy" 才显示开关）
     @Published var privacyOn = false
     @Published var privacyBusy = false
+    /// 远端声音：对端能力里有 "audio" 才显示开关；开不开记在设置里，打开画面后按设置自动开始
+    @Published var audioOn = false
+    @Published var audioBusy = false
+    @Published var audioVolume: Double
+    private(set) var audio: AudioPlayback?
+    private var closed = false
     private var peerWatch: AnyCancellable?
     let videoView = RemoteVideoNSView()
     private var channel: DisplayChannel?
@@ -48,6 +54,7 @@ final class RemoteDesktopModel: TabModel {
         fps = s.displayFps
         bitrateKbps = s.displayBitrateKbps
         clipboardSync = s.clipboardSync
+        audioVolume = s.remoteAudioVolume
         super.init(app: app, kind: .remote, title: title)
         self.deviceId = deviceId
         videoView.model = self
@@ -107,6 +114,8 @@ final class RemoteDesktopModel: TabModel {
             channel = try await peer.session.openDisplay(options: DisplayOptions(displayId: id, maxFps: UInt32(fps), bitrateKbps: UInt32(bitrateKbps), codecs: codecs, viewOnly: !(peer.info.permissions.control)),
                                                          sink: adapter)
             live = true
+            // 画面开起来之后再开声音（切屏、改帧率重开画面时声音不断）
+            if audio == nil, audioSupported, app?.settings.remoteAudio == true { startAudio() }
         } catch {
             phase = .failed(AppModel.describe(error))
             live = false
@@ -168,12 +177,61 @@ final class RemoteDesktopModel: TabModel {
 
     func special(_ c: ComboKey) { send(.specialCombo(combo: c)) }
 
-    /// 新的会话：被控端的隐私屏随旧会话结束已自动关闭；会话断开时开关复位
+    /// 新的会话：被控端的隐私屏随旧会话结束已自动关闭；会话断开时开关复位、声音停掉（重连打开画面后按设置再开）
     private func watchPeer(_ p: PeerConnection) {
         privacyOn = false
+        stopAudio()
         peerWatch = p.$closedReason.sink { [weak self] reason in
-            if reason != nil { self?.privacyOn = false }
+            if reason != nil {
+                self?.privacyOn = false
+                self?.stopAudio()
+            }
         }
+    }
+
+    // MARK: 远端声音
+
+    var audioSupported: Bool { peer?.info.capabilities.contains("audio") ?? false }
+
+    /// 工具栏开关：记进设置，下次打开远程桌面照此自动开或不开
+    func setAudio(_ on: Bool) {
+        app?.settings.remoteAudio = on
+        if on { startAudio() } else { stopAudio() }
+    }
+
+    func setVolume(_ v: Double) {
+        audioVolume = min(max(v, 0), 1)
+        app?.settings.remoteAudioVolume = audioVolume
+        audio?.setVolume(volume: Float(audioVolume))
+    }
+
+    private func startAudio() {
+        guard let peer, audio == nil, !audioBusy else { return }
+        audioBusy = true
+        let volume = Float(audioVolume)
+        Task {
+            do {
+                let a = try await peer.session.startAudio(volume: volume)
+                // 等待期间标签关了、会话换了或断了、又被关掉了：立刻停
+                if closed || self.peer !== peer || peer.closedReason != nil || app?.settings.remoteAudio != true {
+                    a.stop()
+                } else {
+                    a.setVolume(volume: Float(audioVolume))
+                    audio = a
+                    audioOn = true
+                }
+            } catch {
+                audioOn = false
+                if !closed { app?.showToast(L("remote.audio.failed", AppModel.describe(error)), error: true) }
+            }
+            audioBusy = false
+        }
+    }
+
+    private func stopAudio() {
+        audio?.stop()
+        audio = nil
+        audioOn = false
     }
 
     /// 对端支持隐私屏（能力列表里有 "privacy"）
@@ -225,6 +283,8 @@ final class RemoteDesktopModel: TabModel {
     }
 
     override func close() {
+        closed = true
+        stopAudio()
         // 关掉远程桌面标签时顺手关隐私屏（同一会话可能还被终端、文件标签用着，被控端不会自动关）
         if privacyOn, let peer, peer.closedReason == nil {
             let session = peer.session
@@ -585,6 +645,7 @@ struct RemoteToolbar: View {
             IconButton(icon: tab.clipboardSync ? "doc.on.clipboard.fill" : "doc.on.clipboard", help: loc("remote.clipboard"), active: tab.clipboardSync) {
                 tab.clipboardSync.toggle()
             }
+            if tab.audioSupported { RemoteAudioControl(tab: tab) }
             if tab.privacySupported { privacyToggle }
             Spacer(minLength: 8)
             stats
@@ -668,5 +729,78 @@ struct RemoteToolbar: View {
             .lineLimit(1)
             .fixedSize()
             .help(detail)
+    }
+}
+
+/// 声音开关（与工具栏图标按钮同样式）+ 右侧小箭头弹出音量
+struct RemoteAudioControl: View {
+    @ObservedObject var tab: RemoteDesktopModel
+    @Environment(\.palette) var p
+    @Environment(\.loc) var loc
+    @State private var hover = false
+    @State private var showVolume = false
+
+    var body: some View {
+        let on = tab.audioOn
+        HStack(spacing: 0) {
+            Button { tab.setAudio(!on) } label: {
+                Group {
+                    if tab.audioBusy {
+                        ProgressView().controlSize(.mini).frame(width: 12, height: 12)
+                    } else if on {
+                        // 波纹随音量亮起
+                        Image(systemName: "speaker.wave.3.fill", variableValue: tab.audioVolume).font(.system(size: 12.5, weight: .medium))
+                    } else {
+                        Image(systemName: "speaker.slash").font(.system(size: 12.5, weight: .medium))
+                    }
+                }
+                .frame(width: 26, height: 24)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(tab.audioBusy)
+            .help(loc(on ? "remote.audio.turnOff" : "remote.audio.turnOn"))
+            Button { showVolume.toggle() } label: {
+                Image(systemName: "chevron.down").font(.system(size: 7.5, weight: .bold))
+                    .frame(width: 12, height: 24)
+                    .padding(.trailing, 2)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(loc("remote.audio.volume"))
+            .popover(isPresented: $showVolume, arrowEdge: .bottom) {
+                RemoteAudioVolumePanel(tab: tab)
+            }
+        }
+        .foregroundStyle(on ? p.accent : p.secondaryText)
+        .background(RoundedRectangle(cornerRadius: 6).fill(on ? p.accent.opacity(0.14) : (hover ? p.hover.opacity(2) : .clear)))
+        .onHover { hover = $0 }
+    }
+}
+
+/// 音量弹出层
+struct RemoteAudioVolumePanel: View {
+    @ObservedObject var tab: RemoteDesktopModel
+    @Environment(\.palette) var p
+    @Environment(\.loc) var loc
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(loc("remote.audio.volume")).font(.system(size: 12, weight: .medium)).foregroundStyle(p.text)
+                Spacer()
+                Text(verbatim: "\(Int((tab.audioVolume * 100).rounded()))%")
+                    .font(.system(size: 11.5).monospacedDigit())
+                    .foregroundStyle(p.secondaryText)
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.fill").font(.system(size: 10)).foregroundStyle(p.tertiaryText)
+                Slider(value: Binding(get: { tab.audioVolume }, set: { tab.setVolume($0) }), in: 0...1)
+                    .tint(p.accent)
+                Image(systemName: "speaker.wave.3.fill").font(.system(size: 10)).foregroundStyle(p.tertiaryText)
+            }
+        }
+        .padding(14)
+        .frame(width: 240)
     }
 }

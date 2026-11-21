@@ -216,6 +216,19 @@ private struct Runner {
         } else { failures += 1 }
 
         log("  对端隐私屏能力：\(info.capabilities.contains("privacy") ? "有" : "没有")（冒烟测试不切换，免得把真机屏幕黑掉）")
+        // 远端声音：音量 0 且静音（打开本机默认输出设备但不出声），验证收听、调音量、停止
+        if info.capabilities.contains("audio") {
+            if let a = await step("start_audio（音量 0）", { try await session.startAudio(volume: 0) }) {
+                a.setMuted(muted: true)
+                a.setVolume(volume: 0)
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if !a.isActive() { log("失败 声音播放对象不在活动状态"); failures += 1 }
+                a.stop()
+                if a.isActive() { log("失败 stop 后仍在活动状态"); failures += 1 } else { log("  已收听 1.5 秒并停止") }
+            } else { failures += 1 }
+        } else {
+            log("  对端没有声音能力，跳过收听")
+        }
         session.disconnect()
         failures += await updateCheck(client: client)
         if let ssh {

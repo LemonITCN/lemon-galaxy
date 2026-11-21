@@ -24,6 +24,9 @@ final class AppSettings: ObservableObject {
     @Published var displayBitrateKbps: Int = 12_000 { didSet { save("displayBitrateKbps", displayBitrateKbps) } }
     @Published var preferH265: Bool = true { didSet { save("preferH265", preferH265) } }
     @Published var clipboardSync: Bool = true { didSet { save("clipboardSync", clipboardSync) } }
+    /// 远程桌面里收听对方的声音（对方支持时打开画面后自动开始）与音量 0...1
+    @Published var remoteAudio: Bool = true { didSet { save("remoteAudio", remoteAudio) } }
+    @Published var remoteAudioVolume: Double = 1 { didSet { save("remoteAudioVolume", remoteAudioVolume) } }
     @Published var reattachTerminals: Bool = true { didSet { save("reattachTerminals", reattachTerminals) } }
 
     // AI
@@ -65,6 +68,8 @@ final class AppSettings: ObservableObject {
         displayBitrateKbps = i("displayBitrateKbps") ?? displayBitrateKbps
         preferH265 = b("preferH265") ?? preferH265
         clipboardSync = b("clipboardSync") ?? clipboardSync
+        remoteAudio = b("remoteAudio") ?? remoteAudio
+        remoteAudioVolume = min(max(d("remoteAudioVolume") ?? remoteAudioVolume, 0), 1)
         reattachTerminals = b("reattachTerminals") ?? reattachTerminals
         aiDefaultMode = s("aiDefaultMode") ?? aiDefaultMode
         aiPlanFirst = b("aiPlanFirst") ?? aiPlanFirst
