@@ -585,6 +585,8 @@
   "remote.privacy": "隐私屏（对方屏幕黑屏、本地键鼠失效）",
   "remote.privacy.on": "已开启隐私屏",
   "remote.privacy.off": "已关闭隐私屏",
+  "remote.sound": "声音（在本机播放对方的声音）",
+  "remote.sound.failed": "无法播放远端声音：{0}",
   "settings.connection.h264only": "Windows 主控端用 H.264 软件解码，对方支持 H.265 时也按 H.264 传输。",
   "settings.terminal.behavior": "操作",
   "settings.terminal.copyOnSelect": "选中即复制",

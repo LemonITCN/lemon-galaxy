@@ -463,6 +463,39 @@ internal sealed class MockPeer : ICorePeer
 
     public Task WakeOnLan(string mac) => client.Delay(100);
     public Task SetPrivacy(bool on) => client.Delay(150);
+
+    public async Task<ICoreAudio> StartAudio(float volume)
+    {
+        await client.Delay(150);
+        if (!MockData.Capabilities(device).Contains("audio"))
+            throw new GalaxyException.Permission(client.Zh ? "这台设备不能听声音" : "Sound is not available on this device");
+        return new MockAudio(volume);
+    }
+}
+
+/// <summary>模拟远端声音：不出声，只记下音量、静音与是否在播</summary>
+internal sealed class MockAudio : ICoreAudio
+{
+    /// <summary>还没停的模拟声音路数（自测核对界面有没有漏停）</summary>
+    public static int Playing;
+    private int active = 1;
+    public float Volume { get; private set; }
+    public bool Muted { get; private set; }
+
+    public MockAudio(float volume)
+    {
+        Volume = Math.Max(0f, Math.Min(1f, volume));
+        Interlocked.Increment(ref Playing);
+    }
+
+    public void SetVolume(float volume) => Volume = Math.Max(0f, Math.Min(1f, volume));
+    public void SetMuted(bool muted) => Muted = muted;
+    public bool IsActive() => Volatile.Read(ref active) == 1;
+
+    public void Stop()
+    {
+        if (Interlocked.Exchange(ref active, 0) == 1) Interlocked.Decrement(ref Playing);
+    }
 }
 
 internal sealed class MockSsh : ICoreSsh

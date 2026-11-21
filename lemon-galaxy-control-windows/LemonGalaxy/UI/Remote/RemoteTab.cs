@@ -33,6 +33,10 @@ internal sealed class RemoteTab : TabModel
     /// <summary>隐私屏已开启</summary>
     public bool Privacy;
     public bool PrivacySupported => Peer?.Info.Capabilities.Contains("privacy") == true;
+    /// <summary>正在本机播放被控端的声音</summary>
+    public bool AudioOn;
+    public bool AudioBusy;
+    public bool AudioSupported => Peer?.Info.Capabilities.Contains("audio") == true;
     public Window? FullscreenWindow;
 
     /// <summary>画面元素（常驻，视图重建或进入全屏时挂到新父元素上）</summary>
@@ -53,6 +57,9 @@ internal sealed class RemoteTab : TabModel
     private string? lastClipboard;
     private readonly HashSet<uint> pressed = new();
     private bool imeComposing;
+    private ICoreAudio? audio;
+    /// <summary>每次开始或停止声音加一：开到一半被关掉、断线或关闭标签时，迟到的结果直接停掉丢弃</summary>
+    private int audioGen;
 
     public RemoteTab(AppModel app, string deviceId, string title) : base(app, TabKind.Remote, title)
     {
@@ -79,6 +86,7 @@ internal sealed class RemoteTab : TabModel
     public void Start()
     {
         Phase = RemotePhase.Connecting;
+        StopAudio();
         Notify();
         Ui.Run(async () =>
         {
@@ -86,6 +94,8 @@ internal sealed class RemoteTab : TabModel
             {
                 var p = await App.Peer(DeviceId!);
                 Peer = p;
+                // 会话断了：声音通道随之失效，停掉本机播放
+                p.Watch(this, () => { if (p.ClosedReason != null && ReferenceEquals(Peer, p)) StopAudio(); });
                 Displays = await p.Session.ListDisplays();
                 var first = Displays.FirstOrDefault(d => d.Primary) ?? Displays.FirstOrDefault();
                 if (first == null)
@@ -114,6 +124,7 @@ internal sealed class RemoteTab : TabModel
         Phase = RemotePhase.Failed;
         FailReason = reason;
         Live = false;
+        StopAudio();
         Notify();
     }
 
@@ -135,6 +146,8 @@ internal sealed class RemoteTab : TabModel
             channel = await Peer.Session.OpenDisplay(opts, adapter);
             Live = true;
             Notify();
+            // 画面打开后按设置开始播放声音（已在播放时不重复开）
+            if (App.Settings.RemoteAudio) StartAudio();
         }
         catch (Exception e) { Fail(Fmt.Error(e)); }
     }
@@ -278,6 +291,62 @@ internal sealed class RemoteTab : TabModel
             }
             catch (Exception e) { App.ShowError(e); }
         });
+    }
+
+    /// <summary>工具栏的声音开关：记住选择并立即开始或停止</summary>
+    public void ToggleAudio()
+    {
+        if (AudioBusy) return;
+        var on = !AudioOn;
+        App.Settings.RemoteAudio = on;
+        if (on) StartAudio();
+        else
+        {
+            StopAudio();
+            Notify();
+        }
+    }
+
+    private void StartAudio()
+    {
+        if (closed || audio != null || AudioBusy || Peer == null || !AudioSupported) return;
+        var p = Peer;
+        var gen = ++audioGen;
+        AudioBusy = true;
+        Notify();
+        Ui.Run(async () =>
+        {
+            ICoreAudio? a = null;
+            Exception? error = null;
+            try { a = await p.Session.StartAudio(1f); }
+            catch (Exception e) { error = e; }
+            if (gen != audioGen)
+            {
+                // 等待期间被关掉了：这一路不要了
+                a?.Stop();
+                return;
+            }
+            AudioBusy = false;
+            if (a != null)
+            {
+                audio = a;
+                AudioOn = true;
+            }
+            else if (error != null) App.ShowToast(L.T("remote.sound.failed", Fmt.Error(error)), true);
+            Notify();
+        });
+    }
+
+    /// <summary>停止本机播放（不改设置里的开关）</summary>
+    private void StopAudio()
+    {
+        audioGen++;
+        AudioBusy = false;
+        AudioOn = false;
+        var a = audio;
+        audio = null;
+        try { a?.Stop(); }
+        catch (Exception e) { Log.Error("停止声音失败：" + e.Message); }
     }
 
     private void Send(InputEvent e)
@@ -442,6 +511,7 @@ internal sealed class RemoteTab : TabModel
     public override void Close()
     {
         closed = true;
+        StopAudio();
         try { channel?.Stop(); } catch { }
         channel = null;
         stats?.Stop();
@@ -539,6 +609,7 @@ internal static class RemoteView
             new(L.T("remote.lock"), () => tab.Special(ComboKey.LockScreen)),
         }, L.T("remote.keys")));
         items.Add(K.IconButton("clipboard", L.T("remote.clipboard"), () => { tab.ClipboardSync = !tab.ClipboardSync; tab.Notify(); }, tab.ClipboardSync));
+        if (tab.AudioSupported) items.Add(K.IconButton(tab.AudioOn ? "volume" : "volumeOff", L.T("remote.sound"), tab.ToggleAudio, tab.AudioOn));
         if (tab.PrivacySupported) items.Add(K.IconButton("eyeOff", L.T("remote.privacy"), tab.TogglePrivacy, tab.Privacy));
         items.Add(K.Spacer(8));
         var detail = tab.StreamW > 0 ? $"{tab.StreamW}×{tab.StreamH} · H.264" : "";

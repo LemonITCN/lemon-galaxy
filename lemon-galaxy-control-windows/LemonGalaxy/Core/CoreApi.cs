@@ -81,6 +81,18 @@ internal interface ICorePeer
     Task WakeOnLan(string mac);
     /// <summary>隐私屏：被控端本地屏幕黑掉、本地键鼠失效；能力列表里有 "privacy" 才支持</summary>
     Task SetPrivacy(bool on);
+    /// <summary>收听被控端的系统声音，内核用本机默认输出设备（WASAPI）播放；能力列表里有 "audio" 才支持。volume 0..1</summary>
+    Task<ICoreAudio> StartAudio(float volume);
+}
+
+/// <summary>正在播放的远端声音</summary>
+internal interface ICoreAudio
+{
+    void SetVolume(float volume);
+    void SetMuted(bool muted);
+    bool IsActive();
+    /// <summary>停止收听并关闭输出设备（可重复调用）</summary>
+    void Stop();
 }
 
 internal interface ICoreSsh

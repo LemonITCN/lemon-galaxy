@@ -294,11 +294,25 @@ internal static class SelfTest
         if (app.ActiveTab is RemoteTab remote)
         {
             Wait("远程画面解码", () => remote.FramesDecoded > 0, 10000);
+            // 声音默认开：画面打开后自动开始
+            if (!remote.AudioSupported) Problems.Add("远程桌面：对端能力里没有 audio，工具栏不显示声音开关");
+            else Wait("远端声音开始播放", () => remote.AudioOn, 5000);
             remote.MeasuredFps = 30;
             remote.MeasuredKbps = 8400;
             remote.Notify();
         }
         Capture($"{prefix}-40-remote-desktop", root);
+        if (app.ActiveTab is RemoteTab remote2 && remote2.AudioOn)
+        {
+            // 关掉声音：记进设置、停掉播放（模拟声音少一路），再打开恢复
+            var playing = MockAudio.Playing;
+            remote2.ToggleAudio();
+            if (remote2.AudioOn || app.Settings.RemoteAudio || MockAudio.Playing != playing - 1)
+                Problems.Add($"远程桌面：关掉声音后状态不对（AudioOn={remote2.AudioOn}，设置={app.Settings.RemoteAudio}，播放路数 {playing} → {MockAudio.Playing}）");
+            Capture($"{prefix}-41-remote-sound-off", root);
+            remote2.ToggleAudio();
+            Wait("远端声音重新开始", () => remote2.AudioOn, 5000);
+        }
 
         // 6. AI 智能体
         app.SelectHome(NavSection.Ai);

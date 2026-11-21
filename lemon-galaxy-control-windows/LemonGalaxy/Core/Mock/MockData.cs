@@ -85,6 +85,8 @@ internal static class MockData
         var c = new List<string> { "terminal", "files", "exec", "port_forward" };
         if (d.Platform is Platform.Windows or Platform.Macos) c.AddRange(new[] { "display", "input", "clipboard", "screenshot", "ui_tree" });
         if (d.Platform == Platform.Windows) c.Add("privacy");
+        // 与内核一致：对方给了听声音的权限才有 "audio"
+        if ((d.Platform is Platform.Windows or Platform.Macos) && PermissionsFor(d).Audio) c.Add("audio");
         return c.ToArray();
     }
 

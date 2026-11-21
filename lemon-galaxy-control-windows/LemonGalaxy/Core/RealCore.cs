@@ -82,6 +82,7 @@ internal sealed class RealPeer : ICorePeer
     public async Task<ICorePortForward> ForwardPort(ushort localPort, string remoteHost, ushort remotePort) => new RealForward(await s.ForwardPort(localPort, remoteHost, remotePort));
     public Task WakeOnLan(string mac) => s.WakeOnLan(mac);
     public Task SetPrivacy(bool on) => s.SetPrivacy(on);
+    public async Task<ICoreAudio> StartAudio(float volume) => new RealAudio(await s.StartAudio(volume));
 }
 
 internal sealed class RealSsh : ICoreSsh
@@ -137,6 +138,29 @@ internal sealed class RealTransfer : ICoreTransfer
     public void Cancel() => t.Cancel();
     public void Pause() => t.Pause();
     public void Resume() => t.Resume();
+}
+
+/// <summary>停止时同时释放内核对象（不等终结器）；之后的调用都是空操作</summary>
+internal sealed class RealAudio : ICoreAudio
+{
+    private readonly AudioPlayback a;
+    private bool stopped;
+    public RealAudio(AudioPlayback playback) { a = playback; }
+
+    public void SetVolume(float volume) { lock (a) { if (!stopped) a.SetVolume(volume); } }
+    public void SetMuted(bool muted) { lock (a) { if (!stopped) a.SetMuted(muted); } }
+    public bool IsActive() { lock (a) { return !stopped && a.IsActive(); } }
+
+    public void Stop()
+    {
+        lock (a)
+        {
+            if (stopped) return;
+            stopped = true;
+            a.Stop();
+            a.Dispose();
+        }
+    }
 }
 
 internal sealed class RealDisplay : ICoreDisplay
