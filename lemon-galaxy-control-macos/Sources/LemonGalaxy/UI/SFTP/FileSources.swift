@@ -169,7 +169,7 @@ final class TransferItem: ObservableObject, Identifiable {
     }
 }
 
-final class TransferListenerAdapter: TransferListener {
+final class TransferListenerAdapter: TransferListener, @unchecked Sendable {
     weak var item: TransferItem?
     init(item: TransferItem) { self.item = item }
     func onProgress(done: UInt64, total: UInt64) {

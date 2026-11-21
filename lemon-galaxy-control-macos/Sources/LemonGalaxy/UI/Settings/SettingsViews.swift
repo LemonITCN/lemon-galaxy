@@ -91,6 +91,7 @@ struct AccountSettings: View {
     @State private var totpSetup: TotpSetup?
     @State private var totpCode = ""
     @State private var totpEnabled = false
+    @State private var pwTotp = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -121,6 +122,11 @@ struct AccountSettings: View {
                     FormRow(label: loc("account.confirmPassword"), labelWidth: 160) {
                         SecureField("", text: $confirmPw).fieldStyle(invalid: !confirmPw.isEmpty && confirmPw != newPw).frame(width: 260)
                     }
+                    if totpEnabled {
+                        FormRow(label: loc("account.totpCode"), labelWidth: 160) {
+                            TextField("000000", text: $pwTotp).fieldStyle().frame(width: 120).font(.system(size: 13, design: .monospaced))
+                        }
+                    }
                     HStack {
                         Spacer().frame(width: 172)
                         Button(loc("account.changePassword")) { changePassword() }
@@ -132,16 +138,14 @@ struct AccountSettings: View {
             }
             totpSection
         }
-        .onAppear { totpEnabled = (app.client as? GalaxyClientProposed)?.totpEnabled() ?? false }
+        .onAppear { totpEnabled = app.client.currentUser()?.totpEnabled ?? false }
     }
 
     @ViewBuilder
     private var totpSection: some View {
-        let proposed = app.client as? GalaxyClientProposed
+        let client = app.client
         SettingsSection(title: loc("account.totp"), info: loc("account.totp.info")) {
-            if proposed == nil {
-                Text(loc("account.totp.unsupported")).font(.system(size: 12.5)).foregroundStyle(p.tertiaryText)
-            } else if let setup = totpSetup {
+            if let setup = totpSetup {
                 HStack(alignment: .top, spacing: 18) {
                     if let qr = QRCode.image(setup.otpauthUri) {
                         Image(nsImage: qr).interpolation(.none).resizable().frame(width: 132, height: 132)
@@ -154,7 +158,7 @@ struct AccountSettings: View {
                             TextField("000000", text: $totpCode).fieldStyle().frame(width: 110).font(.system(size: 14, design: .monospaced))
                             Button(loc("account.totp.confirm")) {
                                 Task {
-                                    do { try await proposed?.totpConfirm(code: totpCode); totpEnabled = true; totpSetup = nil; totpCode = "" }
+                                    do { try await client.totpVerify(code: totpCode); totpEnabled = true; totpSetup = nil; totpCode = "" }
                                     catch { app.showError(error) }
                                 }
                             }
@@ -172,13 +176,13 @@ struct AccountSettings: View {
                         TextField(loc("account.totp.codeToDisable"), text: $totpCode).fieldStyle().frame(width: 150)
                         Button(loc("account.totp.disable")) {
                             Task {
-                                do { try await proposed?.totpDisable(code: totpCode); totpEnabled = false; totpCode = "" } catch { app.showError(error) }
+                                do { try await client.totpDisable(code: totpCode); totpEnabled = false; totpCode = "" } catch { app.showError(error) }
                             }
                         }
                         .buttonStyle(SecondaryButtonStyle(destructive: true)).disabled(totpCode.count != 6)
                     } else {
                         Button(loc("account.totp.enable")) {
-                            Task { do { totpSetup = try await proposed?.totpBeginSetup() } catch { app.showError(error) } }
+                            Task { do { totpSetup = try await client.totpSetup() } catch { app.showError(error) } }
                         }
                         .buttonStyle(PrimaryButtonStyle())
                     }
@@ -191,9 +195,9 @@ struct AccountSettings: View {
         busy = true
         Task {
             do {
-                try await app.client.changePassword(oldPassword: oldPw, newPassword: newPw)
+                try await app.client.changePassword(oldPassword: oldPw, newPassword: newPw, totp: pwTotp.isEmpty ? nil : pwTotp)
                 message = (loc("account.passwordChanged"), true)
-                oldPw = ""; newPw = ""; confirmPw = ""
+                oldPw = ""; newPw = ""; confirmPw = ""; pwTotp = ""
             } catch {
                 message = (AppModel.describe(error), false)
             }

@@ -5,10 +5,16 @@ import PackageDescription
 import Foundation
 
 let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
-// Rust 内核（galaxy-ffi）以 xcframework 形式放在 Vendor/ 下：存在才接入，没有就只用模拟内核（MockCore）编译。
-// 接入真内核时同时把 uniffi 生成的 galaxy_ffi.swift 放到 Sources/LemonGalaxy/Core/Generated/，
-// 并删除 Core/Bridge/ 里与之同名的手写类型（见 Core/Bridge/README.md）。
-let hasRealCore = FileManager.default.fileExists(atPath: packageDir + "/Vendor/LemonGalaxyCore.xcframework")
+// Rust 内核（galaxy-ffi）：Vendor/LemonGalaxyCore.xcframework（静态库 + C 头 + modulemap，模块 galaxy_ffiFFI）
+// 加 uniffi 生成的 Sources/LemonGalaxy/Core/Generated/galaxy_ffi.swift，两者都在才接入（仓库根 scripts/build-ffi-apple.sh 生成）。
+// 接入后默认用真内核，--mock / --selftest 仍用模拟内核。
+// 没有内核产物（或设环境变量 LEMONGALAXY_NO_CORE=1）时只编译模拟内核，类型来自 Core/Bridge/BridgeMirror.swift。
+let env = ProcessInfo.processInfo.environment
+let generatedPath = packageDir + "/Sources/LemonGalaxy/Core/Generated/galaxy_ffi.swift"
+let hasGenerated = FileManager.default.fileExists(atPath: generatedPath)
+let hasRealCore = env["LEMONGALAXY_NO_CORE"] != "1"
+    && FileManager.default.fileExists(atPath: packageDir + "/Vendor/LemonGalaxyCore.xcframework")
+    && hasGenerated
 
 var appDependencies: [Target.Dependency] = [
     .product(name: "SwiftTerm", package: "SwiftTerm"),
@@ -16,11 +22,14 @@ var appDependencies: [Target.Dependency] = [
 var appSwiftSettings: [SwiftSetting] = [
     .unsafeFlags(["-Osize"], .when(configuration: .release)),
 ]
+var appExcludes = ["Core/Bridge/README.md", "Core/Generated/README.md"]
 var extraTargets: [Target] = []
 if hasRealCore {
     extraTargets.append(.binaryTarget(name: "LemonGalaxyCore", path: "Vendor/LemonGalaxyCore.xcframework"))
     appDependencies.append("LemonGalaxyCore")
     appSwiftSettings.append(.define("LEMONGALAXY_REAL_CORE"))
+} else if hasGenerated {
+    appExcludes.append("Core/Generated/galaxy_ffi.swift")
 }
 
 let package = Package(
@@ -38,7 +47,7 @@ let package = Package(
             name: "LemonGalaxy",
             dependencies: appDependencies,
             path: "Sources/LemonGalaxy",
-            exclude: ["Core/Bridge/README.md", "Core/Generated/README.md"],
+            exclude: appExcludes,
             swiftSettings: appSwiftSettings,
             linkerSettings: [
                 .linkedFramework("AppKit"),
@@ -50,6 +59,12 @@ let package = Package(
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("Security"),
                 .linkedFramework("Carbon"),
+                // Rust 静态库（galaxy-ffi）用到的系统框架与库
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("SystemConfiguration"),
+                .linkedFramework("IOKit"),
+                .linkedLibrary("resolv"),
+                .linkedLibrary("iconv"),
             ]
         ),
     ] + extraTargets,

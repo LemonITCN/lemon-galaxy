@@ -10,7 +10,8 @@
 #     3. 钥匙串里第一张 Developer ID Application
 #     4. 证书主题含 LemonIT 的 Apple Development
 #     5. 都没有（例如 CI）才临时签名。临时签名的应用每次重新编译，屏幕录制等授权都会失效。
-#   Rust 内核：Vendor/LemonGalaxyCore.xcframework 存在时 Package.swift 自动接入（见 Sources/LemonGalaxy/Core/Bridge/README.md）。
+#   Rust 内核：Vendor/LemonGalaxyCore.xcframework 与 Core/Generated/galaxy_ffi.swift 都在时自动接入并默认使用
+#   （仓库根 scripts/build-ffi-apple.sh 生成）；没有时只编译模拟内核。见 Sources/LemonGalaxy/Core/Bridge/README.md。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG=release

@@ -1,7 +1,8 @@
 import Foundation
 
 /// 模拟远端文件系统：内存里的一棵树。传输按定时器推进进度，文件名含 fail 的传到 60% 失败，用来演示重试。
-final class MockFileClient: FileClient {
+final class MockFileClient: FileClient, @unchecked Sendable {
+    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
     final class Node {
         var name: String
         var kind: FileKind
@@ -123,7 +124,7 @@ final class MockFileClient: FileClient {
     }
 
     private func notFound(_ p: String) -> GalaxyError {
-        .notFound(message: client.zh ? "找不到 \(p)" : "No such file or directory: \(p)")
+        .NotFound(message: client.zh ? "找不到 \(p)" : "No such file or directory: \(p)")
     }
 
     override func home() async throws -> String { await client.delay(60); return homePath }
@@ -145,13 +146,38 @@ final class MockFileClient: FileClient {
         }
     }
 
+    override func realpath(path: String) async throws -> String {
+        await client.delay(40)
+        return try lock.locked {
+            guard let n = node(path) else { throw notFound(path) }
+            return n.linkTarget ?? path
+        }
+    }
+
+    override func search(root: String, pattern: String, content: Bool) async throws -> [FileEntry] {
+        await client.delay(200)
+        return lock.locked {
+            var out: [FileEntry] = []
+            func walk(_ n: Node, _ p: String) {
+                for c in n.children.values {
+                    let cp = (p == "/" ? "" : p) + "/" + c.name
+                    let hit = c.name.localizedCaseInsensitiveContains(pattern) || (content && (c.text?.contains(pattern) ?? false))
+                    if hit { out.append(entry(c, path: cp)) }
+                    if c.kind == .dir, out.count < 200 { walk(c, cp) }
+                }
+            }
+            if let r = node(root) { walk(r, root) }
+            return out
+        }
+    }
+
     override func mkdir(path: String) async throws {
         await client.delay(100)
         try lock.locked {
             let (p, name) = split(path)
             guard let parent = node(p) else { throw notFound(p) }
             guard parent.children[name] == nil else {
-                throw GalaxyError.other(message: client.zh ? "已存在同名文件或文件夹" : "A file or folder with that name already exists")
+                throw GalaxyError.Other(message: client.zh ? "已存在同名文件或文件夹" : "A file or folder with that name already exists")
             }
             parent.children[name] = Node(name, .dir, size: 4096, mode: 0o755, mtime: MockData.now)
         }
@@ -177,7 +203,7 @@ final class MockFileClient: FileClient {
             let (p, name) = split(path)
             guard let parent = node(p), let n = parent.children[name] else { throw notFound(path) }
             if n.kind == .dir, !n.children.isEmpty, !recursive {
-                throw GalaxyError.other(message: client.zh ? "文件夹不是空的" : "The folder is not empty")
+                throw GalaxyError.Other(message: client.zh ? "文件夹不是空的" : "The folder is not empty")
             }
             parent.children[name] = nil
         }
@@ -196,7 +222,7 @@ final class MockFileClient: FileClient {
         return try lock.locked {
             guard let n = node(path) else { throw notFound(path) }
             guard let t = n.text else {
-                throw GalaxyError.other(message: client.zh ? "这不是文本文件" : "This is not a text file")
+                throw GalaxyError.Other(message: client.zh ? "这不是文本文件" : "This is not a text file")
             }
             return String(t.prefix(Int(maxBytes)))
         }
@@ -248,7 +274,8 @@ final class MockFileClient: FileClient {
 }
 
 /// 模拟传输：按约 40 MB/s 推进进度，支持暂停、继续、取消。
-final class MockTransfer: Transfer {
+final class MockTransfer: Transfer, @unchecked Sendable {
+    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
     private let total: UInt64
     private var done: UInt64 = 0
     private var paused = false

@@ -348,11 +348,14 @@ struct SshDetail: View {
                 }
                 if !tags.isEmpty { HStack(spacing: 5) { ForEach(tags, id: \.self) { TagChip(text: $0) } } }
                 HStack(spacing: 12) {
-                    ActionTile(icon: "terminal", title: loc("connect.terminal")) { app.openTerminal(sshHostId: entry.id) }
-                    ActionTile(icon: "folder", title: loc("connect.sftp")) { app.openSFTP(sshHostId: entry.id) }
-                    ActionTile(icon: "wand.and.stars", title: loc("connect.ai"), enabled: app.user?.aiEnabled ?? false) {
+                    ActionTile(icon: "terminal", title: loc("connect.terminal"), enabled: app.sshSupported) { app.openTerminal(sshHostId: entry.id) }
+                    ActionTile(icon: "folder", title: loc("connect.sftp"), enabled: app.sshSupported) { app.openSFTP(sshHostId: entry.id) }
+                    ActionTile(icon: "wand.and.stars", title: loc("connect.ai"), enabled: app.sshSupported && (app.user?.aiEnabled ?? false)) {
                         app.openAI(targets: [AgentTarget(kind: .sshHost, id: entry.id)])
                     }
+                }
+                if !app.sshSupported {
+                    Label(loc("ssh.unsupported"), systemImage: "info.circle").font(.system(size: 12)).foregroundStyle(p.secondaryText)
                 }
                 InfoGrid(rows: [
                     (loc("ssh.address"), "\(host):\(port)"),

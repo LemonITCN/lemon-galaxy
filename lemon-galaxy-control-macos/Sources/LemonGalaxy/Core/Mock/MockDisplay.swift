@@ -3,7 +3,8 @@ import CoreVideo
 
 /// 假远程桌面：本机用 CoreGraphics 画一张「被控端桌面」，经 VideoToolbox 编码成 H.264 Annex B，
 /// 再走 VideoSink（on_config / on_frame / on_cursor）——和真内核推来的数据路径完全一样，界面的解码显示因此能被真实验证。
-final class MockDisplayChannel: DisplayChannel {
+final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
+    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
     private let device: DeviceInfo
     private let display: DisplayInfo
     private weak var sink: VideoSink?
@@ -72,7 +73,7 @@ final class MockDisplayChannel: DisplayChannel {
             case .key(let usage, let down):
                 if down, usage == 0x2A, !self.renderer.typed.isEmpty { self.renderer.typed.removeLast() }
                 if down, usage == 0x28 { self.renderer.typed += "\n" }
-            case .wheel, .specialCombo:
+            case .wheel, .specialCombo, .touch:
                 break
             }
         }

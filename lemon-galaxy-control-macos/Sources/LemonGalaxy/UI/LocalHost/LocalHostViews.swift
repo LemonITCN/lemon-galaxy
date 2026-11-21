@@ -50,7 +50,7 @@ struct LocalHostNav: View {
     private func badge(_ page: LocalHostPage) -> some View {
         switch page {
         case .overview:
-            if !host.status.sessions.isEmpty { Text("\(host.status.sessions.count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(p.accentText).padding(.horizontal, 6).background(Capsule().fill(host.status.aiActive ? p.warning : p.success)) }
+            if !host.status.sessions.isEmpty { Text("\(host.status.sessions.count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(p.accentText).padding(.horizontal, 6).background(Capsule().fill(host.aiActive ? p.warning : p.success)) }
         case .assist:
             if host.status.assist != nil { StatusDot(state: .online, size: 7) }
         case .permissions:
@@ -137,14 +137,14 @@ struct LocalOverview: View {
                      value: host.status.online ? loc("local.state.online") : loc("local.state.offline"),
                      color: host.status.online ? p.success : p.warning)
                 stat(icon: "person.crop.circle", title: loc("local.account"),
-                     value: host.status.accounts.first ?? "—", color: p.text)
+                     value: host.status.accounts.first?.username ?? "—", color: p.text)
             }
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     SectionLabel(text: loc("local.sessions"))
                     Spacer()
                     if !host.status.sessions.isEmpty {
-                        if host.status.aiActive {
+                        if host.aiActive {
                             Button(loc("local.stopAi")) { host.stopAi() }.buttonStyle(SecondaryButtonStyle(destructive: true))
                         }
                         Button(loc("local.disconnectAll")) { host.disconnectAll() }.buttonStyle(PrimaryButtonStyle(destructive: true))
@@ -153,7 +153,7 @@ struct LocalOverview: View {
                 if host.status.sessions.isEmpty {
                     Card { Text(loc("local.noSessions")).font(.system(size: 12.5)).foregroundStyle(p.secondaryText) }
                 } else {
-                    ForEach(host.status.sessions, id: \.sessionId) { s in sessionRow(s) }
+                    ForEach(host.status.sessions, id: \.id) { s in sessionRow(s) }
                 }
             }
             VStack(alignment: .leading, spacing: 10) {
@@ -185,18 +185,20 @@ struct LocalOverview: View {
     private func sessionRow(_ s: HostSessionInfo) -> some View {
         HStack(spacing: 12) {
             ZStack {
-                Circle().fill((s.ai ? p.warning : p.accent).opacity(0.15)).frame(width: 34, height: 34)
-                Image(systemName: s.ai ? "wand.and.stars" : "person.fill").foregroundStyle(s.ai ? p.warning : p.accent)
+                Circle().fill((s.aiActive ? p.warning : p.accent).opacity(0.15)).frame(width: 34, height: 34)
+                Image(systemName: s.aiActive ? "wand.and.stars" : "person.fill").foregroundStyle(s.aiActive ? p.warning : p.accent)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(loc("local.session.who", s.displayName, s.username)).font(.system(size: 13, weight: .medium))
+                Text(s.fromUser).font(.system(size: 13, weight: .medium))
                 HStack(spacing: 6) {
-                    PlatformGlyph(platform: s.fromPlatform, size: 10).foregroundStyle(p.tertiaryText)
+                    Image(systemName: "desktopcomputer").font(.system(size: 10)).foregroundStyle(p.tertiaryText)
                     Text(s.fromDevice).font(.system(size: 11.5)).foregroundStyle(p.secondaryText)
                     Text("·").foregroundStyle(p.tertiaryText)
-                    Text(s.features.map { loc("local.feature." + $0) }.joined(separator: " / ")).font(.system(size: 11.5)).foregroundStyle(p.secondaryText)
+                    Text(loc(s.mode == .assist ? "local.mode.assist" : "local.mode.control")).font(.system(size: 11.5)).foregroundStyle(p.secondaryText)
+                    Text("·").foregroundStyle(p.tertiaryText)
+                    Text(PathBadge.describe(s.path, p: p, loc: loc).0).font(.system(size: 11.5)).foregroundStyle(p.secondaryText)
                 }
-                if let act = host.aiActivity[s.sessionId] {
+                if let act = host.aiActivity[s.id] {
                     Label(act, systemImage: "wand.and.stars").font(.system(size: 11.5)).foregroundStyle(p.warning)
                 }
             }
@@ -216,23 +218,21 @@ struct EventRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: icon).font(.system(size: 11)).foregroundStyle(color).frame(width: 14)
-            Text(Fmt.date(event.time, zh: loc.isChinese)).font(.system(size: 11.5).monospacedDigit()).foregroundStyle(p.tertiaryText).frame(width: 112, alignment: .leading)
+            Text(Fmt.date(event.at, zh: loc.isChinese)).font(.system(size: 11.5).monospacedDigit()).foregroundStyle(p.tertiaryText).frame(width: 112, alignment: .leading)
             if event.ai {
                 Text("AI").font(.system(size: 9.5, weight: .bold)).foregroundStyle(p.warning)
                     .padding(.horizontal, 4).padding(.vertical, 1).background(RoundedRectangle(cornerRadius: 3).fill(p.warning.opacity(0.14)))
             }
-            Text(event.message).font(.system(size: 12.5)).foregroundStyle(p.text).lineLimit(2)
+            Text(loc("local.event." + event.kind) == "local.event." + event.kind ? event.kind : loc("local.event." + event.kind))
+                .font(.system(size: 11.5, weight: .medium)).foregroundStyle(p.secondaryText)
+            Text(event.detail).font(.system(size: 12.5)).foregroundStyle(p.text).lineLimit(2)
             Spacer()
-            if let u = event.user { Text(u).font(.system(size: 11.5)).foregroundStyle(p.secondaryText) }
+            if !event.user.isEmpty { Text(event.user).font(.system(size: 11.5)).foregroundStyle(p.secondaryText) }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
     }
-    private var icon: String {
-        switch event.level { case .info: return "circle.fill"; case .warning: return "exclamationmark.triangle.fill"; case .error: return "xmark.octagon.fill" }
-    }
-    private var color: Color {
-        switch event.level { case .info: return p.tertiaryText.opacity(0.6); case .warning: return p.warning; case .error: return p.danger }
-    }
+    private var icon: String { LocalHostModel.isWarning(event) ? "exclamationmark.triangle.fill" : "circle.fill" }
+    private var color: Color { LocalHostModel.isWarning(event) ? p.warning : p.tertiaryText.opacity(0.6) }
 }
 
 // MARK: 账号与权限
@@ -260,7 +260,11 @@ struct LocalAccounts: View {
                         .overlay(Text(String(a.displayName.prefix(1))).font(.system(size: 14, weight: .semibold)).foregroundStyle(p.accent))
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(a.displayName) (\(a.username))").font(.system(size: 13.5, weight: .semibold))
-                        Text(a.serverAddress.split(separator: "#").first.map(String.init) ?? "").font(.system(size: 11.5)).foregroundStyle(p.tertiaryText)
+                        if a.status == .needsRelogin {
+                            Label(loc("local.account.needsRelogin"), systemImage: "exclamationmark.triangle.fill").font(.system(size: 11.5)).foregroundStyle(p.warning)
+                        } else {
+                            Text(loc("local.account.active")).font(.system(size: 11.5)).foregroundStyle(p.tertiaryText)
+                        }
                     }
                     Spacer()
                     Text(loc("local.controlOnlyOne")).font(.system(size: 11)).foregroundStyle(p.tertiaryText)
@@ -284,10 +288,17 @@ struct LocalAccounts: View {
                     Text(loc("local.perm.aiCap")).font(.system(size: 13))
                     InfoButton(text: loc("local.perm.aiCap.info"))
                     Spacer()
-                    Picker("", selection: Binding(get: { a.policy.permissions.aiCap }, set: { v in host.updatePolicy(a) { $0.permissions.aiCap = v } })) {
+                    Picker("", selection: Binding(get: { a.policy.aiCap }, set: { v in host.updatePolicy(a) { $0.aiCap = v } })) {
                         ForEach([AiMode.off] + AiMode.selectable, id: \.self) { m in Text(loc(m.labelKey)).tag(m) }
                     }
                     .labelsHidden().fixedSize()
+                }
+                HStack(spacing: 10) {
+                    Text(loc("local.perm.notify")).font(.system(size: 13))
+                    InfoButton(text: loc("local.perm.notify.info"))
+                    Spacer()
+                    Toggle("", isOn: Binding(get: { a.policy.notify }, set: { v in host.updatePolicy(a) { $0.notify = v } }))
+                        .toggleStyle(PaletteSwitchStyle(small: true)).labelsHidden()
                 }
                 HStack(spacing: 10) {
                     Text(loc("local.systemUser")).font(.system(size: 13))
@@ -299,12 +310,12 @@ struct LocalAccounts: View {
         }
     }
 
-    private func perm(_ a: HostAccount, _ key: String, _ kp: WritableKeyPath<Permissions, Bool>) -> some View {
+    private func perm(_ a: HostAccount, _ key: String, _ kp: WritableKeyPath<HostPolicy, Bool>) -> some View {
         HStack {
             Image(systemName: permIcon(key)).font(.system(size: 12)).foregroundStyle(p.secondaryText).frame(width: 18)
             Text(loc("local.perm." + key)).font(.system(size: 13))
             Spacer()
-            Toggle("", isOn: Binding(get: { a.policy.permissions[keyPath: kp] }, set: { v in host.updatePolicy(a) { $0.permissions[keyPath: kp] = v } }))
+            Toggle("", isOn: Binding(get: { a.policy[keyPath: kp] }, set: { v in host.updatePolicy(a) { $0[keyPath: kp] = v } }))
                 .toggleStyle(PaletteSwitchStyle(small: true)).labelsHidden()
         }
     }
@@ -342,7 +353,7 @@ struct LocalAssist: View {
                     VStack(alignment: .leading, spacing: 18) {
                         HStack(alignment: .top, spacing: 40) {
                             codeBlock(loc("assist.deviceCode"), Self.group(a.deviceCode, by: 3))
-                            codeBlock(loc("assist.verificationCode"), a.verificationCode)
+                            codeBlock(loc("assist.verificationCode"), a.code)
                             Spacer()
                         }
                         HStack(spacing: 8) {
@@ -351,7 +362,7 @@ struct LocalAssist: View {
                                 .disabled(host.pendingRequest != nil)
                             Button {
                                 NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString("\(a.deviceCode) \(a.verificationCode)", forType: .string)
+                                NSPasteboard.general.setString("\(a.deviceCode) \(a.code)", forType: .string)
                             } label: { Label(loc("common.copy"), systemImage: "doc.on.doc") }
                             .buttonStyle(SecondaryButtonStyle())
                             Spacer()
@@ -519,13 +530,13 @@ struct ControlBannerView: View {
         let p = Palettes.make(settings.palette, dark: true)
         let loc = localization.strings
         let sessions = host.status.sessions
-        let ai = host.status.aiActive
+        let ai = host.aiActive
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle().fill(ai ? p.warning : p.danger).frame(width: 8, height: 8)
                     .shadow(color: (ai ? p.warning : p.danger).opacity(0.8), radius: 4)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(sessions.count == 1 ? loc("banner.controlledBy", sessions[0].displayName) : loc("banner.controlledByMany", sessions.count))
+                    Text(sessions.count == 1 ? loc("banner.controlledBy", sessions[0].fromUser) : loc("banner.controlledByMany", sessions.count))
                         .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
                     if sessions.count == 1 {
                         Text(sessions[0].fromDevice).font(.system(size: 11)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)

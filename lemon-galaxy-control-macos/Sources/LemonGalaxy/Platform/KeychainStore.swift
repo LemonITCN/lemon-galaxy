@@ -3,7 +3,7 @@ import Security
 
 /// docs/ffi.md 1.1 的 SecureStore：macOS 钥匙串。
 /// 服务名 cn.lemonit.galaxy，账户名为内核给的 key；只在本机、首次解锁后可读（不随备份迁移到别的设备）。
-final class KeychainStore: SecureStore {
+final class KeychainStore: SecureStore, @unchecked Sendable {
     static let service = "cn.lemonit.galaxy"
     private let lock = NSLock()
 
@@ -62,7 +62,7 @@ final class KeychainStore: SecureStore {
 }
 
 /// 只在内存里的安全存储：selftest 与模拟内核的演示模式用，不碰钥匙串。
-final class MemorySecureStore: SecureStore {
+final class MemorySecureStore: SecureStore, @unchecked Sendable {
     private var items: [String: Data] = [:]
     private let lock = NSLock()
     func get(key: String) -> Data? { lock.lock(); defer { lock.unlock() }; return items[key] }

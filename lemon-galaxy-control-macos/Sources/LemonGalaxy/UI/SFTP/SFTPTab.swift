@@ -318,9 +318,11 @@ struct FilePaneView: View {
                     Button(app.deviceName(d.id)) { Task { await pane.connect(.device(d.id)) } }
                 }
             }
-            Section(loc("hosts.sshHosts")) {
-                ForEach(app.vault.filter { if case .sshHost = $0.data { return true }; return false }, id: \.id) { e in
-                    Button(app.sshLabel(e.id)) { Task { await pane.connect(.ssh(e.id)) } }
+            if app.sshSupported {
+                Section(loc("hosts.sshHosts")) {
+                    ForEach(app.vault.filter { if case .sshHost = $0.data { return true }; return false }, id: \.id) { e in
+                        Button(app.sshLabel(e.id)) { Task { await pane.connect(.ssh(e.id)) } }
+                    }
                 }
             }
         } label: {

@@ -6,7 +6,7 @@ import AppKit
 final class LocalHostModel: ObservableObject {
     weak var app: AppModel?
     let selfTest: Bool
-    @Published var status = HostStatus(remoteEnabled: true, online: false, accounts: [], sessions: [], aiActive: false, assist: nil)
+    @Published var status = HostStatus(online: false, remoteEnabled: true, deviceId: "", publicIp: "", accounts: [], sessions: [], assist: nil)
     @Published var accounts: [HostAccount] = []
     @Published var events: [HostEvent] = []
     @Published var aiActivity: [String: String] = [:]        // session_id → 正在做什么
@@ -48,7 +48,7 @@ final class LocalHostModel: ObservableObject {
         guard let s = service else { return }
         status = s.status()
         accounts = s.accounts()
-        events = s.recentEvents()
+        events = s.recentEvents(limit: 200)
         ControlBanner.shared.update(self)
         StatusMenu.shared.update(self)
     }
@@ -70,6 +70,14 @@ final class LocalHostModel: ObservableObject {
 
     var needsPermissions: Bool { !screenGranted || !accessibilityGranted }
 
+    /// 有没有 AI 正在操作本机
+    var aiActive: Bool { status.sessions.contains { $0.aiActive } }
+
+    /// 需要醒目标出的事件（被拒绝、认证失败等）
+    static func isWarning(_ e: HostEvent) -> Bool {
+        ["reject", "ai_denied", "denied", "auth_failed", "error"].contains(e.kind) || e.kind.hasSuffix("_failed")
+    }
+
     // MARK: 操作
 
     func setRemoteEnabled(_ on: Bool) {
@@ -84,7 +92,13 @@ final class LocalHostModel: ObservableObject {
     func disconnectAll() { service?.disconnectAll(); aiActivity = [:]; refresh() }
     func stopAi() { service?.stopAi(); aiActivity = [:]; refresh() }
 
-    func startAssist() { _ = service?.startAssist(); refresh() }
+    func startAssist() {
+        guard let service else { return }
+        Task {
+            do { _ = try await service.startAssist() } catch { app?.showError(error) }
+            refresh()
+        }
+    }
     func stopAssist() { service?.stopAssist(); refresh() }
     func refreshCode() { service?.setAssistCode(code: nil); refresh() }
     func applyCustomCode() {
@@ -113,7 +127,8 @@ final class LocalHostModel: ObservableObject {
 
     func received(status s: HostStatus) {
         status = s
-        events = service?.recentEvents() ?? events
+        accounts = s.accounts
+        events = service?.recentEvents(limit: 200) ?? events
         ControlBanner.shared.update(self)
         StatusMenu.shared.update(self)
     }
@@ -139,14 +154,15 @@ final class LocalHostModel: ObservableObject {
     var filteredEvents: [HostEvent] {
         switch eventFilter {
         case "ai": return events.filter(\.ai)
-        case "warning": return events.filter { $0.level != .info }
+        case "warning": return events.filter(Self.isWarning)
         case "all": return events
-        default: return events.filter { $0.category == eventFilter }
+        case "connect": return events.filter { $0.kind == "connect" || $0.kind == "disconnect" || $0.kind == "reject" }
+        default: return events.filter { $0.kind == eventFilter }
         }
     }
 }
 
-final class HostListenerAdapter: HostListener {
+final class HostListenerAdapter: HostListener, @unchecked Sendable {
     weak var owner: LocalHostModel?
     private func main(_ f: @escaping @MainActor (LocalHostModel) -> Void) {
         DispatchQueue.main.async { [weak self] in

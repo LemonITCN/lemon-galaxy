@@ -171,7 +171,7 @@ struct NewConversationPage: View {
                     }
                 }
                 ForEach(hosts, id: \.id) { e in
-                    chip(AgentTarget(kind: .sshHost, id: e.id), name: app.sshLabel(e.id), enabled: true) {
+                    chip(AgentTarget(kind: .sshHost, id: e.id), name: app.sshLabel(e.id), enabled: app.sshSupported) {
                         Text("SSH").font(.system(size: 7.5, weight: .bold))
                     }
                 }

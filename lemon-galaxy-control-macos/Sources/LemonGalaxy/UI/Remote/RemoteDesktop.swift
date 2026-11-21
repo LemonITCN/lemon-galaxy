@@ -98,7 +98,7 @@ final class RemoteDesktopModel: TabModel {
         sinkAdapter = adapter
         let codecs: [VideoCodec] = app?.settings.preferH265 == true ? [.h265, .h264] : [.h264]
         do {
-            channel = try await peer.session.openDisplay(options: DisplayOptions(displayId: id, maxFps: UInt32(fps), bitrateKbps: UInt32(bitrateKbps), codecs: codecs),
+            channel = try await peer.session.openDisplay(options: DisplayOptions(displayId: id, maxFps: UInt32(fps), bitrateKbps: UInt32(bitrateKbps), codecs: codecs, viewOnly: !(peer.info.permissions.control)),
                                                          sink: adapter)
             live = true
         } catch {
@@ -125,6 +125,12 @@ final class RemoteDesktopModel: TabModel {
         framesDecoded += 1
         if phase != .streaming { phase = .streaming }
         videoView.display(pb)
+    }
+
+    /// 被控端结束了画面（对方断开、权限收回、屏幕拔掉等）
+    func displayClosed(_ reason: String) {
+        phase = .failed(reason.isEmpty ? L("remote.closed") : reason)
+        live = false
     }
 
     func cursorMoved(x: Int32, y: Int32, visible: Bool) {
@@ -154,7 +160,7 @@ final class RemoteDesktopModel: TabModel {
         Task { await open(displayId) }
     }
 
-    func special(_ c: SpecialCombo) { send(.specialCombo(combo: c)) }
+    func special(_ c: ComboKey) { send(.specialCombo(combo: c)) }
 
     // MARK: 剪贴板同步（文字）：本机变化推给远端；切回窗口时拉取远端
     private func setupClipboardSync() {
@@ -170,13 +176,13 @@ final class RemoteDesktopModel: TabModel {
         guard pb.changeCount != lastPasteboardChange else { return }
         lastPasteboardChange = pb.changeCount
         guard let text = pb.string(forType: .string) else { return }
-        Task { try? await peer.session.clipboardSet(data: ClipboardData(text: text, image: nil, files: [])) }
+        Task { try? await peer.session.clipboardSet(data: .text(text: text)) }
     }
 
     func pullRemoteClipboard() {
         guard clipboardSync, let peer else { return }
         Task {
-            guard let data = try? await peer.session.clipboardGet(), let text = data.text else { return }
+            guard let data = try? await peer.session.clipboardGet(), case .text(let text) = data else { return }
             let pb = NSPasteboard.general
             if pb.string(forType: .string) != text {
                 pb.clearContents()
@@ -199,7 +205,7 @@ final class RemoteDesktopModel: TabModel {
     }
 }
 
-final class VideoSinkAdapter: VideoSink {
+final class VideoSinkAdapter: VideoSink, @unchecked Sendable {
     private weak var model: RemoteDesktopModel?
     init(model: RemoteDesktopModel) { self.model = model }
     func onConfig(codec: VideoCodec, width: UInt32, height: UInt32) {
@@ -207,6 +213,9 @@ final class VideoSinkAdapter: VideoSink {
     }
     func onFrame(data: Data, ptsUs: UInt64, keyframe: Bool) {
         model?.frameArrived(data, pts: ptsUs, keyframe: keyframe)
+    }
+    func onClosed(reason: String) {
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.model?.displayClosed(reason) } }
     }
     func onCursor(x: Int32, y: Int32, visible: Bool) {
         DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.model?.cursorMoved(x: x, y: y, visible: visible) } }
@@ -305,7 +314,7 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
     override func rightMouseDragged(with event: NSEvent) { mouseMoved(with: event) }
     override func otherMouseDragged(with event: NSEvent) { mouseMoved(with: event) }
 
-    private func button(_ event: NSEvent, _ b: MouseButton, down: Bool) {
+    private func button(_ event: NSEvent, _ b: PointerButton, down: Bool) {
         if down { window?.makeFirstResponder(self) }
         guard let (x, y) = remotePoint(event) else { return }
         model?.send(.mouseButton(button: b, down: down, x: x, y: y))
@@ -317,7 +326,7 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
     override func rightMouseUp(with event: NSEvent) { button(event, .right, down: false) }
     override func otherMouseDown(with event: NSEvent) { button(event, otherButton(event), down: true) }
     override func otherMouseUp(with event: NSEvent) { button(event, otherButton(event), down: false) }
-    private func otherButton(_ e: NSEvent) -> MouseButton { e.buttonNumber == 3 ? .back : e.buttonNumber == 4 ? .forward : .middle }
+    private func otherButton(_ e: NSEvent) -> PointerButton { e.buttonNumber == 3 ? .back : e.buttonNumber == 4 ? .forward : .middle }
 
     override func scrollWheel(with event: NSEvent) {
         // 像素滚动量；触控板的精确滚动直接用，滚轮按行换算
@@ -522,8 +531,9 @@ struct RemoteToolbar: View {
             IconButton(icon: "lock", help: loc("remote.lock")) { tab.special(.lockScreen) }
             Menu {
                 Button("Alt+Tab") { tab.special(.altTab) }
-                Button("Alt+F4") { tab.special(.altF4) }
-                Button("Print Screen") { tab.special(.printScreen) }
+                Button(loc("remote.combo.taskManager")) { tab.special(.taskManager) }
+                Button(loc("remote.combo.winKey")) { tab.special(.winKey) }
+                Button(loc("remote.combo.showDesktop")) { tab.special(.showDesktop) }
                 if tab.platform != .macos {
                     Divider()
                     Toggle(loc("remote.commandAsCtrl"), isOn: $tab.commandAsCtrl)

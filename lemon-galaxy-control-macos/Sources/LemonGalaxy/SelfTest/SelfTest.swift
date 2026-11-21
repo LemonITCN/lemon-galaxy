@@ -356,8 +356,8 @@ enum SelfTest {
         shot("\(prefix)-60-snippets", app, window: window, host: host)
 
         // 8. 本机被控
-        if let mock = app.client.host() as? MockHostService {
-            mock.simulateSession(user: "alice", display: "Alice", device: "OFFICE-PC-07", platform: .windows, ai: true)
+        if let mock = (app.client as? MockGalaxyClient)?.mockHost {
+            mock.simulateSession(user: "alice", device: "OFFICE-PC-07", ai: true)
         }
         wait("被控会话") { !app.host.status.sessions.isEmpty }
         pump(0.4)
@@ -367,7 +367,7 @@ enum SelfTest {
         app.localPage = .accounts
         shot("\(prefix)-71-local-accounts", app, window: window, host: host)
         app.host.startAssist()
-        if let mock = app.client.host() as? MockHostService { mock.simulateAssistRequest() }
+        if let mock = (app.client as? MockGalaxyClient)?.mockHost { mock.simulateAssistRequest() }
         wait("协助请求") { app.host.pendingRequest != nil }
         app.localPage = .assist
         shot("\(prefix)-72-local-assist", app, window: window, host: host)

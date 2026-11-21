@@ -1,4 +1,4 @@
 # uniffi 生成代码
 
-真内核接入时，把 uniffi 为 `galaxy-ffi` 生成的 `galaxy_ffi.swift` 放在这里（与 `Vendor/LemonGalaxyCore.xcframework` 一起）。
-没有它时只编译模拟内核，见 `../Bridge/README.md`。
+`galaxy_ffi.swift` 由仓库根的 `scripts/build-ffi-apple.sh` 生成（与 `Vendor/LemonGalaxyCore.xcframework` 一起），不要手改。
+重新生成后运行 `python3 scripts/gen-bridge-mirror.py` 同步无内核镜像，见 `../Bridge/README.md`。

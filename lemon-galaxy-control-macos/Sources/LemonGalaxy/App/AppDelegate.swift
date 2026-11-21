@@ -19,9 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         StatusMenu.shared.install(app: app)
         showMainWindow()
         // 语言变化时重建菜单（菜单文字不是 SwiftUI，不会自动刷新）
-        Localization.shared.$strings.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] _ in
-            self?.buildMainMenu()
-            StatusMenu.shared.update(self?.app.host)
+        Localization.shared.$strings.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] strings in
+            guard let self else { return }
+            CoreProvider.setLocale(strings.pack.coreLocale, isMock: self.app.core.isMock)
+            self.buildMainMenu()
+            StatusMenu.shared.update(self.app.host)
         }.store(in: &cancellables)
     }
 
@@ -164,7 +166,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     func update(_ host: LocalHostModel?) {
         guard let item, let host else { return }
         let s = host.status
-        let state: IconState = !s.remoteEnabled ? .disabled : s.aiActive ? .ai : !s.sessions.isEmpty ? .controlled : s.online ? .online : .idle
+        let state: IconState = !s.remoteEnabled ? .disabled : host.aiActive ? .ai : !s.sessions.isEmpty ? .controlled : s.online ? .online : .idle
         item.button?.image = Self.icon(state: state)
     }
 
@@ -175,8 +177,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         let s = host.status
         let title: String
         if !s.remoteEnabled { title = L("status.disabled") }
-        else if s.aiActive { title = L("status.ai") }
-        else if !s.sessions.isEmpty { title = L("status.controlled", s.sessions.map(\.displayName).joined(separator: ", ")) }
+        else if host.aiActive { title = L("status.ai") }
+        else if !s.sessions.isEmpty { title = L("status.controlled", s.sessions.map(\.fromUser).joined(separator: ", ")) }
         else if s.online { title = L("status.online") }
         else { title = L("status.offline") }
         let head = NSMenuItem(title: "LemonGalaxy · " + title, action: nil, keyEquivalent: "")
@@ -191,18 +193,18 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         if !s.sessions.isEmpty {
             menu.addItem(make(L("banner.disconnect"), #selector(disconnect)))
         }
-        if s.aiActive { menu.addItem(make(L("banner.stopAi"), #selector(stopAi))) }
+        if host.aiActive { menu.addItem(make(L("banner.stopAi"), #selector(stopAi))) }
         let toggle = make(L("status.allowRemote"), #selector(toggleRemote))
         toggle.state = s.remoteEnabled ? .on : .off
         menu.addItem(toggle)
         if let a = s.assist {
-            let i = NSMenuItem(title: L("status.assistCode", a.deviceCode, a.verificationCode), action: nil, keyEquivalent: "")
+            let i = NSMenuItem(title: L("status.assistCode", a.deviceCode, a.code), action: nil, keyEquivalent: "")
             i.isEnabled = false
             menu.addItem(i)
         }
         menu.addItem(.separator())
         menu.addItem(make(L("status.openMain"), #selector(openMain)))
-        if app.core.isMock, let mock = app.client.host() as? MockHostService {
+        if app.core.isMock, let mock = (app.client as? MockGalaxyClient)?.mockHost {
             let sim = NSMenuItem(title: L("status.simulate"), action: nil, keyEquivalent: "")
             let sub = NSMenu()
             sub.addItem(SimItem(L("status.sim.assist")) { mock.simulateAssistRequest() })

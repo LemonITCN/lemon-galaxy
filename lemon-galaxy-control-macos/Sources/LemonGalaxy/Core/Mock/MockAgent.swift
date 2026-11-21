@@ -2,10 +2,11 @@ import Foundation
 
 /// 模拟 AI 智能体：按脚本流式吐文字、提出工具调用、按权限档位决定是否要确认、等用户回应确认卡片 / 提问 / 密码。
 /// 事件全部走 AgentListener.on_event，和真内核一致。
-final class MockAgentConversation: AgentConversation {
+final class MockAgentConversation: AgentConversation, @unchecked Sendable {
+    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
     private let client: MockGalaxyClient
     private let config: ConversationConfig
-    weak var listener: AgentListener?
+    var listener: AgentListener?
     private let convId: String
     private let lock = NSLock()
     private var history: [AgentMessage] = []
@@ -18,7 +19,7 @@ final class MockAgentConversation: AgentConversation {
     private var allowSimilar: Set<String> = []
     private var promptTokens: UInt64 = 0
     private var completionTokens: UInt64 = 0
-    private var title = ""
+    private var titleText = ""
     private var updatedAt = MockData.now
     private var step: UInt32 = 0
     private let events = DispatchQueue(label: "mock.agent.events")
@@ -28,6 +29,8 @@ final class MockAgentConversation: AgentConversation {
         self.config = config
         self.listener = listener
         self.mode = config.mode
+        self.trustUntil = config.trustMinutes.map { Date().addingTimeInterval(TimeInterval($0) * 60) }
+        self.titleText = config.title ?? ""
         self.convId = "conv-" + UUID().uuidString.prefix(8).lowercased()
         super.init(noPointer: NoPointer())
     }
@@ -35,12 +38,14 @@ final class MockAgentConversation: AgentConversation {
     private var zh: Bool { client.zh }
 
     override func id() -> String { convId }
+    override func title() -> String { lock.locked { titleText } }
+    override func setForeground(foreground: Bool) { if !foreground { stop() } }
     override func messages() -> [AgentMessage] { lock.lock(); defer { lock.unlock() }; return history }
 
     func summary() -> ConversationSummary {
         lock.lock(); defer { lock.unlock() }
-        return ConversationSummary(id: convId, title: title.isEmpty ? (zh ? "新对话" : "New conversation") : title,
-                                   modelName: config.modelId, targets: config.targets, updatedAt: updatedAt)
+        return ConversationSummary(id: convId, title: titleText.isEmpty ? (zh ? "新对话" : "New conversation") : titleText,
+                                   modelId: config.modelId, targetNames: config.targets.map { client.targetName($0) }, updatedAt: updatedAt)
     }
 
     private func emit(_ e: AgentEvent) {
@@ -54,9 +59,9 @@ final class MockAgentConversation: AgentConversation {
 
     private func pause(_ ms: Int) async { await client.delay(ms) }
 
-    override func send(text: String) async throws {
-        lock.locked { if title.isEmpty { title = String(text.prefix(28)) } }
-        record(AgentMessage(id: "u-" + UUID().uuidString.prefix(6), role: .user, text: text, call: nil, result: nil, createdAt: MockData.now))
+    override func send(text: String) {
+        lock.locked { if titleText.isEmpty { titleText = String(text.prefix(28)) } }
+        record(.user(text: text))
         task?.cancel()
         task = Task { [weak self] in
             guard let self else { return }
@@ -81,10 +86,13 @@ final class MockAgentConversation: AgentConversation {
     }
 
     override func setMode(mode: AiMode, trustMinutes: UInt32?) {
-        lock.lock()
-        self.mode = mode
-        trustUntil = trustMinutes.map { Date().addingTimeInterval(TimeInterval($0) * 60) }
-        lock.unlock()
+        let until = trustMinutes.map { Date().addingTimeInterval(TimeInterval($0) * 60) }
+        lock.locked {
+            self.mode = mode
+            trustUntil = until
+        }
+        // 实际档位 = min(界面选择, 管理员上限, 被控端上限)；模拟内核的上限都是完全信任
+        emit(.modeChanged(mode: mode, effective: mode, untilMs: until.map { Int64($0.timeIntervalSince1970 * 1000) }))
     }
 
     override func stop() {
@@ -121,7 +129,7 @@ final class MockAgentConversation: AgentConversation {
         }
         if !chunk.isEmpty { emit(.assistantDelta(messageId: id, text: chunk)); acc += chunk }
         emit(.assistantDone(messageId: id))
-        record(AgentMessage(id: id, role: .assistant, text: acc, call: nil, result: nil, createdAt: MockData.now))
+        record(.assistant(id: id, text: acc, thinking: ""))
         completionTokens += UInt64(acc.count * 2)
         promptTokens += 1_800
         emit(.usage(promptTokens: promptTokens, completionTokens: completionTokens))
@@ -157,7 +165,7 @@ final class MockAgentConversation: AgentConversation {
             let r = ToolResultView(ok: false, summary: risk == .forbidden ? (zh ? "绝对禁止的操作，已拒绝" : "Forbidden operation, refused")
                                    : (zh ? "被拒绝：当前为只读模式" : "Denied: read-only mode"), output: "", image: nil, denied: true)
             emit(.toolFinished(callId: callId, result: r))
-            record(AgentMessage(id: callId, role: .tool, text: "", call: call, result: r, createdAt: MockData.now))
+            record(.tool(call: call, result: r))
             return nil
         }
         if approval == true {
@@ -169,7 +177,7 @@ final class MockAgentConversation: AgentConversation {
                 let r = ToolResultView(ok: false, summary: (zh ? "用户拒绝" : "Denied by user") + (reason.map { (zh ? "：" : ": ") + $0 } ?? ""),
                                        output: "", image: nil, denied: true)
                 emit(.toolFinished(callId: callId, result: r))
-                record(AgentMessage(id: callId, role: .tool, text: "", call: call, result: r, createdAt: MockData.now))
+                record(.tool(call: call, result: r))
                 return nil
             case .allowSimilar:
                 lock.locked { allowSimilar.insert(tool + String(describing: risk)) }
@@ -190,7 +198,7 @@ final class MockAgentConversation: AgentConversation {
         let r = ToolResultView(ok: true, summary: finalCommand == summary ? resultSummary : (zh ? "已执行修改后的命令" : "Ran the edited command"),
                                output: output, image: resultImage, denied: false)
         emit(.toolFinished(callId: callId, result: r))
-        record(AgentMessage(id: callId, role: .tool, text: "", call: call, result: r, createdAt: MockData.now))
+        record(.tool(call: call, result: r))
         return output
     }
 

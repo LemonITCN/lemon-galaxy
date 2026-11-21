@@ -178,7 +178,7 @@ extension AppModel {
     func open(_ n: HostNode) {
         switch n.kind {
         case .device: if let d = n.deviceId { activateDevice(d) }
-        case .ssh: openTerminal(sshHostId: n.id)
+        case .ssh: if sshSupported { openTerminal(sshHostId: n.id) } else { showToast(L("ssh.unsupported"), error: true) }
         case .rdp: openRdp(n.id)
         case .folder: toggleFolder(n.id)
         }
@@ -223,6 +223,8 @@ struct HostsList: View {
             case .knownHosts: KnownHostsList()
             }
         }
+        .onAppear { app.setLanDiscovery(true) }
+        .onDisappear { app.setLanDiscovery(false) }
     }
 
     private var currentFolder: String? {
@@ -442,9 +444,9 @@ struct HostContextMenu: View {
             Button(loc("hosts.rename")) { app.renamingId = node.id }
             Button(node.favorite ? loc("hosts.unfavorite") : loc("hosts.favorite")) { app.toggleFavorite(node.id) }
         case .ssh:
-            Button(loc("connect.terminal")) { app.openTerminal(sshHostId: node.id) }
-            Button(loc("connect.sftp")) { app.openSFTP(sshHostId: node.id) }
-            Button(loc("connect.ai")) { app.openAI(targets: [AgentTarget(kind: .sshHost, id: node.id)]) }
+            Button(loc("connect.terminal")) { app.openTerminal(sshHostId: node.id) }.disabled(!app.sshSupported)
+            Button(loc("connect.sftp")) { app.openSFTP(sshHostId: node.id) }.disabled(!app.sshSupported)
+            Button(loc("connect.ai")) { app.openAI(targets: [AgentTarget(kind: .sshHost, id: node.id)]) }.disabled(!app.sshSupported)
             Divider()
             Button(loc("hosts.edit")) { app.selection = node.id; app.editing = .vault(node.id) }
             Button(loc("hosts.rename")) { app.renamingId = node.id }

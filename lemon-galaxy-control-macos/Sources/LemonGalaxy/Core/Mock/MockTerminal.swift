@@ -34,7 +34,8 @@ final class MockTerminalRegistry {
 }
 
 /// 模拟远端 shell：本地回显、行编辑、几条常用命令的假输出。全部走 TerminalSink 的原始字节，和真内核一样。
-final class MockTerminalChannel: TerminalChannel {
+final class MockTerminalChannel: TerminalChannel, @unchecked Sendable {
+    required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) { fatalError("模拟对象不能由内核指针构造") }
     private let client: MockGalaxyClient
     private let device: DeviceInfo
     private weak var sink: TerminalSink?
@@ -121,6 +122,7 @@ final class MockTerminalChannel: TerminalChannel {
     }
 
     override func sessionId() -> String { id }
+    override func title() -> String { isWindows ? "powershell" : "bash" }
 
     override func write(data: Data) {
         queue.async { [weak self] in self?.handle(Array(data)) }

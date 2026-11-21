@@ -10,29 +10,44 @@ import Carbon.HIToolbox
 ///   - 输入：CGEvent 注入鼠标、滚轮、键盘（HID 用法码 → 虚拟键码）、输入法文字（Unicode 字符串事件）
 ///   - 截图、辅助功能控件树（JSON）、剪贴板（文字 / 图片 / 文件）
 /// 内核在自己的线程上调用这些方法；需要「屏幕录制」「辅助功能」授权，见 Permissions。
-final class MacHostPlatform: HostPlatform {
+final class MacHostPlatform: HostPlatform, @unchecked Sendable {
     private let lock = NSLock()
     private var captures: [UInt32: ScreenCapture] = [:]
     private var lastDisplay: UInt32 = CGMainDisplayID()
     private let injector = InputInjector()
 
+    init() {
+        DisplayNames.refresh()
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
+            DisplayNames.refresh()
+        }
+    }
+
+    // MARK: 能力（内核据此告诉主控端能用什么）
+
+    func capabilities() -> [String] {
+        var caps = ["clipboard"]
+        if SystemPermissions.screenRecordingGranted { caps += ["display", "screenshot"] }
+        if SystemPermissions.accessibilityGranted { caps += ["input", "ui_tree"] }
+        return caps
+    }
+
     // MARK: 屏幕
 
+    /// 只用 CoreGraphics（线程安全）：内核在自己的线程上调用，不能同步等主线程，否则主线程正等内核时会互锁
     func listDisplays() -> [DisplayInfo] {
-        var result: [DisplayInfo] = []
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &ids, &count)
         let main = CGMainDisplayID()
-        let work = { [self] in
-            for s in NSScreen.screens {
-                guard let id = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { continue }
-                let did = id.uint32Value
-                let scale = s.backingScaleFactor
-                let name = s.localizedName
-                result.append(DisplayInfo(id: did, name: name, width: UInt32(s.frame.width * scale), height: UInt32(s.frame.height * scale),
-                                          scale: Float(scale), primary: did == main, isVirtual: isVirtual(did, name: name)))
-            }
+        return ids.prefix(Int(count)).map { id in
+            let b = CGDisplayBounds(id)
+            let scale = displayScale(id)
+            let name = DisplayNames.name(id)
+            return DisplayInfo(id: id, name: name, width: UInt32(b.width * scale), height: UInt32(b.height * scale),
+                               scale: Float(scale), primary: id == main, isVirtual: isVirtual(id, name: name))
         }
-        if Thread.isMainThread { work() } else { DispatchQueue.main.sync(execute: work) }
-        return result
     }
 
     private func isVirtual(_ id: CGDirectDisplayID, name: String) -> Bool {
@@ -40,20 +55,20 @@ final class MacHostPlatform: HostPlatform {
         CGDisplayVendorNumber(id) == 0 && CGDisplayIsBuiltin(id) == 0 || name.lowercased().contains("virtual")
     }
 
-    func startCapture(displayId: UInt32, options: CaptureOptions, sink: EncodedFrameSink) -> Bool {
-        guard SystemPermissions.screenRecordingGranted else { return false }
+    func startCapture(displayId: UInt32, options: CaptureOptions, sink: EncodedFrameSink) -> CaptureStarted? {
+        guard SystemPermissions.screenRecordingGranted else { return nil }
         stopCapture(displayId: displayId)
         let cap = ScreenCapture(displayId: displayId, options: options, sink: sink)
         lock.locked { captures[displayId] = cap; lastDisplay = displayId }
         let sem = DispatchSemaphore(value: 0)
-        var ok = false
+        nonisolated(unsafe) var started: CaptureStarted?
         Task.detached {
-            ok = await cap.start()
+            started = await cap.start()
             sem.signal()
         }
         sem.wait()
-        if !ok { lock.locked { captures[displayId] = nil } }
-        return ok
+        if started == nil { lock.locked { captures[displayId] = nil } }
+        return started
     }
 
     func stopCapture(displayId: UInt32) {
@@ -73,7 +88,7 @@ final class MacHostPlatform: HostPlatform {
 
     // MARK: 截图
 
-    func screenshot(displayId: UInt32, maxWidth: UInt32) -> ImageData? {
+    func screenshot(displayId: UInt32, maxWidth: UInt32, maxHeight: UInt32) -> ImageData? {
         guard SystemPermissions.screenRecordingGranted else { return nil }
         var image: CGImage?
         if #available(macOS 14.0, *) {
@@ -98,13 +113,16 @@ final class MacHostPlatform: HostPlatform {
             image = CGDisplayCreateImage(displayId)
         }
         guard let src = image else { return nil }
-        return Self.encode(src, maxWidth: Int(maxWidth))
+        return Self.encode(src, maxWidth: Int(maxWidth), maxHeight: Int(maxHeight))
     }
 
-    static func encode(_ src: CGImage, maxWidth: Int) -> ImageData? {
+    static func encode(_ src: CGImage, maxWidth: Int, maxHeight: Int = 0) -> ImageData? {
         var img = src
-        if maxWidth > 0, src.width > maxWidth {
-            let w = maxWidth, h = Int(Double(src.height) * Double(maxWidth) / Double(src.width))
+        var k = 1.0
+        if maxWidth > 0, src.width > maxWidth { k = min(k, Double(maxWidth) / Double(src.width)) }
+        if maxHeight > 0, src.height > maxHeight { k = min(k, Double(maxHeight) / Double(src.height)) }
+        if k < 1 {
+            let w = max(1, Int(Double(src.width) * k)), h = max(1, Int(Double(src.height) * k))
             guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                       space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
             ctx.interpolationQuality = .high
@@ -126,27 +144,27 @@ final class MacHostPlatform: HostPlatform {
 
     // MARK: 剪贴板
 
+    /// 一次只取一种内容：文件 > 文字 > 图片
     func clipboardGet() -> ClipboardData? {
         let pb = NSPasteboard.general
-        let text = pb.string(forType: .string)
-        var image: ImageData?
-        if let tiff = pb.data(forType: .tiff) ?? pb.data(forType: .png), let rep = NSBitmapImageRep(data: tiff),
-           let png = rep.representation(using: .png, properties: [:]) {
-            image = ImageData(mime: "image/png", data: png, width: UInt32(rep.pixelsWide), height: UInt32(rep.pixelsHigh))
-        }
         let files = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL])?.map(\.path) ?? []
-        if text == nil && image == nil && files.isEmpty { return nil }
-        return ClipboardData(text: text, image: image, files: files)
+        if !files.isEmpty { return .files(paths: files) }
+        if let text = pb.string(forType: .string) { return .text(text: text) }
+        if let raw = pb.data(forType: .png) ?? pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: raw),
+           let png = rep.representation(using: .png, properties: [:]) {
+            return .image(image: ImageData(mime: "image/png", data: png, width: UInt32(rep.pixelsWide), height: UInt32(rep.pixelsHigh)))
+        }
+        return nil
     }
 
     func clipboardSet(data: ClipboardData) {
         let pb = NSPasteboard.general
         pb.clearContents()
-        var objects: [NSPasteboardWriting] = []
-        if !data.files.isEmpty { objects += data.files.map { URL(fileURLWithPath: $0) as NSURL } }
-        if let img = data.image, let ns = NSImage(data: img.data) { objects.append(ns) }
-        if !objects.isEmpty { pb.writeObjects(objects) }
-        if let t = data.text { pb.setString(t, forType: .string) }
+        switch data {
+        case .text(let t): pb.setString(t, forType: .string)
+        case .image(let img): if let ns = NSImage(data: img.data) { pb.writeObjects([ns]) }
+        case .files(let paths): pb.writeObjects(paths.map { URL(fileURLWithPath: $0) as NSURL })
+        }
     }
 }
 
@@ -167,39 +185,48 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         self.sink = sink
     }
 
-    func start() async -> Bool {
+    func start() async -> CaptureStarted? {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let d = content.displays.first(where: { $0.displayID == displayId }) else { return false }
+            guard let d = content.displays.first(where: { $0.displayID == displayId }) else { return nil }
             // 不把自己的提示条录进去
             let own = content.windows.filter { $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier }
             let filter = SCContentFilter(display: d, excludingWindows: own)
             let cfg = SCStreamConfiguration()
-            let scale = CGFloat(NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayId }?.backingScaleFactor ?? 2)
+            let scale = displayScale(displayId)
             var w = Int(CGFloat(d.width) * scale), h = Int(CGFloat(d.height) * scale)
-            let maxW = Int(options.maxWidth), maxH = Int(options.maxHeight)
-            if maxW > 0, w > maxW { h = h * maxW / w; w = maxW }
-            if maxH > 0, h > maxH { w = w * maxH / h; h = maxH }
+            // 上限 4K：超过时等比缩小（spec 3.1）
+            if w > 3840 { h = h * 3840 / w; w = 3840 }
+            if h > 2400 { w = w * 2400 / h; h = 2400 }
             w &= ~1; h &= ~1
             cfg.width = w
             cfg.height = h
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, min(options.maxFps, 144))))
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            cfg.showsCursor = options.showCursor
+            // 光标画进画面（HostPlatform 没有单独上报光标的通道）
+            cfg.showsCursor = true
             cfg.queueDepth = 4
             cfg.colorSpaceName = CGColorSpace.sRGB
-            guard let enc = VideoEncoder(codec: options.codec, width: w, height: h, fps: Int(options.maxFps), bitrateKbps: Int(options.bitrateKbps),
-                                         output: { [sink] data, pts, key in sink.push(data: data, ptsUs: pts, keyframe: key) }) else { return false }
+            // 按主控端给的顺序挑第一个本机能硬件编码的格式
+            let wanted = options.codecs.isEmpty ? [VideoCodec.h264] : options.codecs
+            var chosen: (VideoEncoder, VideoCodec)?
+            for c in wanted {
+                if let enc = VideoEncoder(codec: c, width: w, height: h, fps: Int(max(1, options.maxFps)), bitrateKbps: Int(options.bitrateKbps),
+                                          output: { [sink] data, pts, key in sink.push(data: data, ptsUs: pts, keyframe: key) }) {
+                    chosen = (enc, c)
+                    break
+                }
+            }
+            guard let (enc, codec) = chosen else { return nil }
             encoder = enc
-            sink.setConfig(codec: options.codec, width: UInt32(w), height: UInt32(h))
             let s = SCStream(filter: filter, configuration: cfg, delegate: self)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
             try await s.startCapture()
             stream = s
-            return true
+            return CaptureStarted(width: UInt32(w), height: UInt32(h), codec: codec)
         } catch {
             NSLog("LemonGalaxy: 截屏启动失败 %@", String(describing: error))
-            return false
+            return nil
         }
     }
 
@@ -234,9 +261,10 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
 final class InputInjector {
     private let source = CGEventSource(stateID: .hidSystemState)
-    private var buttonsDown: Set<MouseButton> = []
+    private var buttonsDown: Set<PointerButton> = []
     private var lastPoint = CGPoint.zero
-    private var lastClick: (MouseButton, Date, CGPoint, Int64)?
+    private var lastClick: (PointerButton, Date, CGPoint, Int64)?
+    private let lock = NSLock()
     private var flags: CGEventFlags = []
 
     /// 被控屏幕像素 → 全局坐标（点）
@@ -247,6 +275,11 @@ final class InputInjector {
     }
 
     func inject(_ e: InputEvent, display: CGDirectDisplayID) {
+        lock.lock(); defer { lock.unlock() }
+        injectLocked(e, display: display)
+    }
+
+    private func injectLocked(_ e: InputEvent, display: CGDirectDisplayID) {
         switch e {
         case .mouseMove(let x, let y):
             let p = globalPoint(x, y, display: display)
@@ -287,13 +320,20 @@ final class InputInjector {
             post(ev)
         case .text(let text):
             typeText(text)
+        case .touch(_, let phase, let x, let y):
+            // 触控模式按单指鼠标处理：按下、拖动、抬起
+            switch phase {
+            case .began: injectLocked(.mouseButton(button: .left, down: true, x: x, y: y), display: display)
+            case .moved: injectLocked(.mouseMove(x: x, y: y), display: display)
+            case .ended, .cancelled: injectLocked(.mouseButton(button: .left, down: false, x: x, y: y), display: display)
+            }
         case .specialCombo(let combo):
             switch combo {
             case .lockScreen: chord([kVK_Control, kVK_Command], kVK_ANSI_Q)
-            case .ctrlAltDel: chord([kVK_Command, kVK_Option], kVK_Escape)      // macOS 上对应「强制退出」
+            case .ctrlAltDel, .taskManager: chord([kVK_Command, kVK_Option], kVK_Escape)      // macOS 上对应「强制退出」
             case .altTab: chord([kVK_Command], kVK_Tab)
-            case .altF4: chord([kVK_Command], kVK_ANSI_Q)
-            case .printScreen: chord([kVK_Command, kVK_Shift], kVK_ANSI_3)
+            case .winKey: chord([kVK_Command], kVK_Space)                                       // 聚焦搜索
+            case .showDesktop: chord([kVK_Command], kVK_F3)
             }
         }
     }
@@ -313,10 +353,10 @@ final class InputInjector {
     }
 
     private func chord(_ mods: [Int], _ key: Int) {
-        for m in mods { inject(.key(hidUsage: HIDKeyMap.macToHID[m] ?? 0, down: true), display: CGMainDisplayID()) }
-        inject(.key(hidUsage: HIDKeyMap.macToHID[key] ?? 0, down: true), display: CGMainDisplayID())
-        inject(.key(hidUsage: HIDKeyMap.macToHID[key] ?? 0, down: false), display: CGMainDisplayID())
-        for m in mods.reversed() { inject(.key(hidUsage: HIDKeyMap.macToHID[m] ?? 0, down: false), display: CGMainDisplayID()) }
+        for m in mods { injectLocked(.key(hidUsage: HIDKeyMap.macToHID[m] ?? 0, down: true), display: CGMainDisplayID()) }
+        injectLocked(.key(hidUsage: HIDKeyMap.macToHID[key] ?? 0, down: true), display: CGMainDisplayID())
+        injectLocked(.key(hidUsage: HIDKeyMap.macToHID[key] ?? 0, down: false), display: CGMainDisplayID())
+        for m in mods.reversed() { injectLocked(.key(hidUsage: HIDKeyMap.macToHID[m] ?? 0, down: false), display: CGMainDisplayID()) }
     }
 
     /// 输入法提交的文字：直接发 Unicode 字符串事件（每个事件最多 20 个 UTF-16 单元）
@@ -410,6 +450,24 @@ struct AXTreeExporter {
         }
         if !kids.isEmpty { node["children"] = kids }
         return node
+    }
+}
+
+/// 显示器名称缓存：NSScreen 只能在主线程读，内核线程上 listDisplays 时读缓存
+enum DisplayNames {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var names: [CGDirectDisplayID: String] = [:]
+
+    static func refresh() {
+        let fresh = Dictionary(NSScreen.screens.compactMap { s -> (CGDirectDisplayID, String)? in
+            guard let n = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            return (n.uint32Value, s.localizedName)
+        }, uniquingKeysWith: { a, _ in a })
+        lock.locked { names = fresh }
+    }
+
+    static func name(_ id: CGDirectDisplayID) -> String {
+        lock.locked { names[id] } ?? (CGDisplayIsBuiltin(id) != 0 ? "Built-in Display" : "Display \(id)")
     }
 }
 

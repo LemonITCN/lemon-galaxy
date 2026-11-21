@@ -105,6 +105,7 @@ final class AppModel: ObservableObject {
         let wantsMock = forceMock || CoreProvider.wantsMock()
         // 模拟内核不碰钥匙串（临时签名的开发包每次重编都会让钥匙串弹授权框）
         let store: SecureStore = (selfTest || wantsMock) ? MemorySecureStore() : KeychainStore()
+        for d in [AppModel.dataDir, AppModel.cacheDir] { try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
         let config = CoreConfig(dataDir: AppModel.dataDir.path, cacheDir: AppModel.cacheDir.path, logLevel: "info", platform: .macos,
                                 deviceKind: .control, appVersion: AppInfo.version, osVersion: AppInfo.osVersion,
                                 hostname: AppInfo.computerName, locale: Localization.shared.strings.pack.coreLocale)
@@ -136,9 +137,21 @@ final class AppModel: ObservableObject {
         reloadDevices()
         reloadVault()
         phase = .main
-        host.attach(client.host())
+        attachHostIfReady()
         ai.reloadSummaries()
         Task { try? await client.refreshDevices() }
+    }
+
+    /// 本机被控服务要等登录上线后内核才给（control 客户端）；上线、重连时都尝试接上
+    func attachHostIfReady() {
+        guard host.service == nil, let h = client.host() else { return }
+        host.attach(h)
+    }
+
+    /// 设备列表页打开期间让内核做局域网发现（protocol.md 第 5 节）
+    func setLanDiscovery(_ active: Bool) {
+        guard phase == .main else { return }
+        client.setLanDiscovery(active: active)
     }
 
     func logout() async {
@@ -154,6 +167,11 @@ final class AppModel: ObservableObject {
     func handleState(_ s: ClientState) {
         clientState = s
         if s == .loggedOut, phase == .main { phase = .login }
+        if s == .online, phase == .main {
+            user = client.currentUser()
+            server = client.server()
+            attachHostIfReady()
+        }
     }
 
     func handleSessionRevoked() {
@@ -252,9 +270,9 @@ final class AppModel: ObservableObject {
     nonisolated static func describe(_ error: Error) -> String {
         if let g = error as? GalaxyError {
             switch g {
-            case .network(let m), .permission(let m), .notFound(let m), .protocol(let m), .other(let m): return m
-            case .auth(_, let m): return m
-            case .cancelled: return L("common.cancelled")
+            case .Network(let m), .Permission(let m), .NotFound(let m), .Protocol(let m), .Other(let m): return m
+            case .Auth(_, let m): return m
+            case .Cancelled: return L("common.cancelled")
             }
         }
         return error.localizedDescription
@@ -263,7 +281,7 @@ final class AppModel: ObservableObject {
     // MARK: 连接池（同一台设备的终端、文件、桌面、AI 共用一条端到端会话）
 
     func peer(_ deviceId: String) async throws -> PeerConnection {
-        if let p = peers[deviceId], p.closedReason == nil { return p }
+        if let p = peers[deviceId], p.closedReason == nil, !p.session.isClosed() { return p }
         let session = try await client.connect(deviceId: deviceId)
         let p = PeerConnection(deviceId: deviceId, session: session)
         peers[deviceId] = p
@@ -272,8 +290,12 @@ final class AppModel: ObservableObject {
 
     func ssh(_ hostId: String) async throws -> SshConnection {
         if let s = sshSessions[hostId], !s.closed { return s }
+        // SSH 直连还不在 galaxy-ffi 里（见 Core/Bridge/Proposed.swift），模拟内核实现了
+        guard let sshClient = client as? GalaxyClientSshProposed else {
+            throw GalaxyError.Other(message: L("ssh.unsupported"))
+        }
         let prompt = SecretPromptBridge(model: self, title: sshLabel(hostId))
-        let session = try await client.connectSsh(hostId: hostId, secretPrompt: prompt)
+        let session = try await sshClient.connectSsh(hostId: hostId, secretPrompt: prompt)
         let c = SshConnection(hostId: hostId, session: session)
         sshSessions[hostId] = c
         return c
@@ -290,7 +312,7 @@ final class AppModel: ObservableObject {
 
     func releaseIfUnused(deviceId: String) {
         guard !tabs.contains(where: { $0.deviceId == deviceId }), let p = peers[deviceId] else { return }
-        p.session.close()
+        p.session.disconnect()
         peers[deviceId] = nil
     }
 
@@ -318,9 +340,9 @@ final class AppModel: ObservableObject {
         for t in tabs { t.close() }
         tabs.removeAll()
         activeTabId = nil
-        for p in peers.values { p.session.close() }
+        for p in peers.values { p.session.disconnect() }
         peers.removeAll()
-        for s in sshSessions.values { s.session.close() }
+        for s in sshSessions.values { s.session.disconnect() }
         sshSessions.removeAll()
     }
 
@@ -377,6 +399,9 @@ final class AppModel: ObservableObject {
         activeTabId = nil
     }
 
+    /// 当前内核能不能 SSH 直连（真内核暂不支持，按钮置灰）
+    var sshSupported: Bool { client is GalaxyClientSshProposed }
+
     func openRdp(_ hostId: String) {
         guard let e = entry(hostId), case .rdpHost(let label, let host, let port, let username, _, let domain, let jump, _, _, _) = e.data else { return }
         Task {
@@ -424,14 +449,14 @@ final class PeerConnection: ObservableObject {
 @MainActor
 final class SshConnection {
     let hostId: String
-    let session: SshSession
+    let session: SshSessionProposed
     var closed = false
-    init(hostId: String, session: SshSession) { self.hostId = hostId; self.session = session }
+    init(hostId: String, session: SshSessionProposed) { self.hostId = hostId; self.session = session }
 }
 
 // MARK: - 回调适配：内核线程 → 主线程
 
-final class ClientListenerAdapter: ClientListener {
+final class ClientListenerAdapter: ClientListener, @unchecked Sendable {
     weak var model: AppModel?
     func onState(state: ClientState) { DispatchQueue.main.async { self.model?.handleState(state) } }
     func onDevicesChanged() { DispatchQueue.main.async { self.model?.reloadDevices() } }
@@ -439,7 +464,7 @@ final class ClientListenerAdapter: ClientListener {
     func onSessionRevoked() { DispatchQueue.main.async { self.model?.handleSessionRevoked() } }
 }
 
-final class PeerListenerAdapter: PeerListener {
+final class PeerListenerAdapter: PeerListener, @unchecked Sendable {
     weak var owner: PeerConnection?
     func onPathChanged(path: PathInfo) { DispatchQueue.main.async { self.owner?.path = path } }
     func onClosed(reason: String) { DispatchQueue.main.async { self.owner?.closedReason = reason } }

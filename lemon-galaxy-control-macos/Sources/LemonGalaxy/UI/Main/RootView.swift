@@ -133,7 +133,7 @@ struct Sidebar: View {
     private func badge(_ s: NavSection) -> some View {
         if s == .local {
             if !host.status.sessions.isEmpty {
-                StatusDot(state: host.status.aiActive ? .busy : .online, size: 7)
+                StatusDot(state: host.aiActive ? .busy : .online, size: 7)
             } else if !host.status.remoteEnabled {
                 Image(systemName: "nosign").font(.system(size: 10)).foregroundStyle(p.tertiaryText)
             }

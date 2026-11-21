@@ -66,9 +66,9 @@ final class TerminalTabModel: TabModel, TerminalViewDelegate {
                 case .device(let id):
                     let p = try await app.peer(id)
                     peer = p
-                    let ch = try await p.session.openTerminal(options: TerminalOptions(attachSession: attach?.id, shell: nil, cols: cols, rows: rows), sink: adapter)
+                    let ch = try await p.session.openTerminal(options: TerminalOptions(attachSession: attach?.id, shell: nil, cols: cols, rows: rows, env: [EnvVar(name: "TERM", value: "xterm-256color")]), sink: adapter)
                     channel = ch
-                    sessionTitle = attach?.title ?? ""
+                    sessionTitle = attach?.title ?? ch.title()
                 case .ssh(let id):
                     let s = try await app.ssh(id)
                     channel = try await s.session.openTerminal(cols: cols, rows: rows, sink: adapter)
@@ -167,7 +167,7 @@ final class TerminalTabModel: TabModel, TerminalViewDelegate {
 }
 
 /// 内核线程 → 主线程；连续到来的输出在主线程合并后一次喂给终端。
-final class TerminalSinkAdapter: TerminalSink {
+final class TerminalSinkAdapter: TerminalSink, @unchecked Sendable {
     private weak var owner: TerminalTabModel?
     private var pending = Data()
     private var scheduled = false
@@ -338,6 +338,8 @@ struct PathBadge: View {
         case .direct: return (loc("path.direct"), p.info, "arrow.left.and.right")
         case .relayUdp: return (loc("path.relayUdp"), p.warning, "arrow.triangle.branch")
         case .relayTcp: return (loc("path.relayTcp"), p.warning, "arrow.triangle.branch")
+        case .connecting: return (loc("path.connecting"), p.tertiaryText, "ellipsis")
+        case .closed: return (loc("path.closed"), p.danger, "xmark")
         }
     }
 }

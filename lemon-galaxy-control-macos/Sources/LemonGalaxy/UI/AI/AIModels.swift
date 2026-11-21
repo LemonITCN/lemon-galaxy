@@ -42,9 +42,9 @@ final class AIHubModel: ObservableObject {
     var selectedModel: AiModel? { models?.items.first { key($0) == draftModel } }
 
     func reloadSummaries() {
-        guard let proposed = app?.client as? GalaxyClientProposed else { summaries = []; return }
-        let open = Set(conversations.map(\.conversationId))
-        summaries = proposed.conversations().filter { !open.contains($0.id) }
+        guard let app else { summaries = []; return }
+        let open = Set(conversations.compactMap(\.conversationId))
+        summaries = app.client.listConversations().filter { !open.contains($0.id) }
     }
 
     func targetName(_ t: AgentTarget) -> String {
@@ -58,37 +58,45 @@ final class AIHubModel: ObservableObject {
 
     var canStart: Bool { selectedModel != nil && !draftTargets.isEmpty && !draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
-    /// 新建对话并发出第一条消息
+    /// 新建对话（内核会先连上所有目标设备）并发出第一条消息
     @discardableResult
     func start() -> AIConversationModel? {
         guard let app, let m = selectedModel, canStart else { return nil }
         app.settings.aiLastModel = draftModel
-        let config = ConversationConfig(providerId: m.providerId, modelId: m.id, targets: draftTargets, mode: draftMode, planFirst: draftPlanFirst)
+        let trust: UInt32? = draftMode == .fullTrust && draftTrustMinutes > 0 ? UInt32(draftTrustMinutes) : nil
+        let prompt = draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let config = ConversationConfig(providerId: m.providerId, modelId: m.id, targets: draftTargets, mode: draftMode, planFirst: draftPlanFirst,
+                                        trustMinutes: trust, title: String(prompt.prefix(40)))
         let tab = AIConversationModel(app: app, config: config, model: m)
         tab.trustMinutes = draftTrustMinutes
-        if draftMode == .fullTrust, draftTrustMinutes > 0 {
-            tab.conversation.setMode(mode: .fullTrust, trustMinutes: UInt32(draftTrustMinutes))
-        }
         conversations.insert(tab, at: 0)
         app.addTab(tab)
-        let prompt = draftPrompt
         draftPrompt = ""
-        tab.send(prompt)
+        tab.create(firstMessage: prompt)
         return tab
     }
 
+    /// 重新打开本机保存的对话。摘要里只有目标名称，按名称找回设备 id（见报告：建议内核在摘要里带目标 id）
     func reopen(_ s: ConversationSummary) {
-        guard let app, let proposed = app.client as? GalaxyClientProposed else { return }
-        let listener = AgentListenerAdapter()
-        guard let conv = try? proposed.openConversation(id: s.id, listener: listener) else { return }
-        let model = models?.items.first { $0.id == s.modelName } ?? AiModel(providerId: 0, providerName: "", id: s.modelName, name: s.modelName,
-                                                                            vision: false, tools: true, contextLength: 0)
-        let config = ConversationConfig(providerId: model.providerId, modelId: model.id, targets: s.targets, mode: app.settings.aiMode, planFirst: false)
-        let tab = AIConversationModel(app: app, config: config, model: model, existing: conv, listener: listener)
+        guard let app else { return }
+        let model = models?.items.first { $0.id == s.modelId }
+            ?? AiModel(providerId: 0, providerName: "", id: s.modelId, name: s.modelId, vision: false, tools: true, contextLength: 0)
+        let targets: [AgentTarget] = s.targetNames.compactMap { name in
+            app.devices.first { $0.hostname == name || app.deviceName($0.id) == name }.map { AgentTarget(kind: .device, id: $0.id) }
+        }
+        let config = ConversationConfig(providerId: model.providerId, modelId: model.id, targets: targets, mode: app.settings.aiMode,
+                                        planFirst: false, trustMinutes: nil, title: s.title)
+        let tab = AIConversationModel(app: app, config: config, model: model)
         tab.title = s.title
-        tab.restoreHistory()
+        tab.savedTargetNames = s.targetNames
         conversations.insert(tab, at: 0)
         app.addTab(tab)
+        tab.open(savedId: s.id)
+        reloadSummaries()
+    }
+
+    func delete(_ s: ConversationSummary) {
+        app?.client.deleteConversation(id: s.id)
         reloadSummaries()
     }
 
@@ -163,13 +171,14 @@ final class SecretRequestModel: ObservableObject, Identifiable {
     init(id: String, prompt: String, targetId: String) { self.id = id; self.prompt = prompt; self.targetId = targetId }
 }
 
-/// 一个 AI 对话标签
+/// 一个 AI 对话标签。内核对象要异步创建（先连上目标设备），创建完成前发出的消息先排队。
 @MainActor
 final class AIConversationModel: TabModel {
-    let conversation: AgentConversation
+    private(set) var conversation: AgentConversation?
     let config: ConversationConfig
     let model: AiModel
     let listener: AgentListenerAdapter
+    @Published var preparing = false
     @Published var items: [ChatItem] = []
     @Published var texts: [String: String] = [:]         // assistant / thinking 消息的累计文字
     @Published var doneMessages: Set<String> = []
@@ -178,42 +187,81 @@ final class AIConversationModel: TabModel {
     @Published var promptTokens: UInt64 = 0
     @Published var completionTokens: UInt64 = 0
     @Published var mode: AiMode
+    @Published var effectiveMode: AiMode?
+    @Published var trustUntil: Date?
     @Published var trustMinutes = 0
     @Published var composer = ""
     @Published var activeSecret: SecretRequestModel?
     @Published var zoomImage: ImageData?
-    var conversationId: String { conversation.id() }
+    var savedTargetNames: [String]?
+    private var pending: [String] = []
+    var conversationId: String? { conversation?.id() }
 
-    init(app: AppModel, config: ConversationConfig, model: AiModel, existing: AgentConversation? = nil, listener: AgentListenerAdapter? = nil) {
+    init(app: AppModel, config: ConversationConfig, model: AiModel) {
         self.config = config
         self.model = model
         self.mode = config.mode
-        let l = listener ?? AgentListenerAdapter()
-        self.listener = l
-        self.conversation = existing ?? app.client.newConversation(config: config, listener: l)
-        super.init(app: app, kind: .ai, title: L("ai.newConversation"))
-        l.owner = self
+        self.listener = AgentListenerAdapter()
+        super.init(app: app, kind: .ai, title: config.title?.isEmpty == false ? config.title! : L("ai.newConversation"))
+        listener.owner = self
     }
 
-    var targetNames: [String] { config.targets.map { app?.ai.targetName($0) ?? $0.id } }
+    var targetNames: [String] { savedTargetNames ?? config.targets.map { app?.ai.targetName($0) ?? $0.id } }
 
-    func send(_ text: String) {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
-        if title == L("ai.newConversation") { title = String(t.prefix(24)) }
-        items.append(.user(id: UUID().uuidString, text: t))
+    /// 新对话：内核建对话（连目标设备）后发出第一条消息
+    func create(firstMessage: String) {
+        appendUser(firstMessage)
+        pending.append(firstMessage)
+        attach { [config, listener] client in try await client.newConversation(config: config, listener: listener) }
+    }
+
+    /// 打开本机保存的对话并恢复历史
+    func open(savedId: String) {
+        attach { [config, listener] client in try await client.openConversation(id: savedId, config: config, listener: listener) }
+    }
+
+    private func attach(_ make: @escaping (GalaxyClient) async throws -> AgentConversation) {
+        guard let client = app?.client else { return }
+        preparing = true
         running = true
         live = true
         Task {
-            do { try await conversation.send(text: t) } catch {
-                items.append(.error(id: UUID().uuidString, text: AppModel.describe(error)))
+            do {
+                let conv = try await make(client)
+                conversation = conv
+                preparing = false
+                if items.isEmpty { restoreHistory() }
+                let t = conv.title()
+                if !t.isEmpty { title = t }
+                let queued = pending
+                pending.removeAll()
+                if queued.isEmpty { running = false }
+                for text in queued { conv.send(text: text) }
+            } catch {
+                preparing = false
                 running = false
+                live = false
+                items.append(.error(id: UUID().uuidString, text: AppModel.describe(error)))
             }
         }
     }
 
+    private func appendUser(_ t: String) {
+        if title == L("ai.newConversation") { title = String(t.prefix(24)) }
+        items.append(.user(id: UUID().uuidString, text: t))
+    }
+
+    func send(_ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        appendUser(t)
+        running = true
+        live = true
+        if let conversation { conversation.send(text: t) } else { pending.append(t) }
+    }
+
     func stop() {
-        conversation.stop()
+        conversation?.stop()
         running = false
         for case .tool(let card) in items where card.decision == .pending {
             card.decision = .denied(nil)
@@ -223,11 +271,11 @@ final class AIConversationModel: TabModel {
     func changeMode(_ m: AiMode, minutes: Int) {
         mode = m
         trustMinutes = minutes
-        conversation.setMode(mode: m, trustMinutes: m == .fullTrust && minutes > 0 ? UInt32(minutes) : nil)
+        conversation?.setMode(mode: m, trustMinutes: m == .fullTrust && minutes > 0 ? UInt32(minutes) : nil)
     }
 
     func decide(_ card: ToolCardModel, _ d: ApprovalDecision) {
-        conversation.decide(callId: card.call.callId, decision: d)
+        conversation?.decide(callId: card.call.callId, decision: d)
         switch d {
         case .allowOnce: card.decision = .approved
         case .allowSimilar: card.decision = .approvedSimilar
@@ -240,38 +288,41 @@ final class AIConversationModel: TabModel {
 
     func answer(_ ask: AskModel, _ text: String) {
         ask.answer = text
-        conversation.answer(questionId: ask.id, answer: text)
+        conversation?.answer(questionId: ask.id, answer: text)
     }
 
     func provideSecret(_ req: SecretRequestModel, _ secret: String) {
         // 密码只交给内核送到被控端，不留在界面状态里，也不进对话历史
-        conversation.provideSecret(requestId: req.id, secret: secret)
+        conversation?.provideSecret(requestId: req.id, secret: secret)
         req.done = true
         activeSecret = nil
     }
 
     func cancelSecret(_ req: SecretRequestModel) {
-        conversation.provideSecret(requestId: req.id, secret: "")
+        conversation?.provideSecret(requestId: req.id, secret: "")
         req.cancelled = true
         activeSecret = nil
     }
 
     func restoreHistory() {
+        guard let conversation else { return }
         for m in conversation.messages() {
-            switch m.role {
-            case .user: items.append(.user(id: m.id, text: m.text))
-            case .assistant:
-                texts[m.id] = m.text
-                doneMessages.insert(m.id)
-                items.append(.assistant(id: m.id))
-            case .tool:
-                guard let call = m.call else { continue }
+            switch m {
+            case .user(let text): items.append(.user(id: UUID().uuidString, text: text))
+            case .assistant(let id, let text, let thinking):
+                if !thinking.isEmpty {
+                    texts[id + "-thinking"] = thinking
+                    items.append(.thinking(id: id + "-thinking"))
+                }
+                texts[id] = text
+                doneMessages.insert(id)
+                items.append(.assistant(id: id))
+            case .tool(let call, let result):
                 let card = ToolCardModel(call: call, needsApproval: false)
-                card.result = m.result
-                card.output = m.result?.output ?? ""
+                card.result = result
+                card.output = result?.output ?? ""
                 card.phase = .finished
                 items.append(.tool(card))
-            case .system: break
             }
         }
     }
@@ -316,19 +367,23 @@ final class AIConversationModel: TabModel {
         case .status(let r, let s):
             running = r
             step = s
+        case .modeChanged(let m, let effective, let until):
+            mode = m
+            effectiveMode = effective
+            trustUntil = until.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) }
         case .error(let m):
             items.append(.error(id: UUID().uuidString, text: m))
         }
     }
 
     override func close() {
-        if running { conversation.stop() }
+        if running { conversation?.stop() }
         app?.ai.conversations.removeAll { $0 === self }
         app?.ai.reloadSummaries()
     }
 }
 
-final class AgentListenerAdapter: AgentListener {
+final class AgentListenerAdapter: AgentListener, @unchecked Sendable {
     weak var owner: AIConversationModel?
     func onEvent(event: AgentEvent) {
         DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.owner?.handle(event) } }
