@@ -30,7 +30,7 @@ const SESSION_KEY: &str = "session.v1";
 const VAULT_CACHE: &str = "vault-cache.v1";
 const DEVICES_CACHE: &str = "devices-cache.v1";
 
-struct StoreBridge(Arc<dyn SecureStore>);
+pub(crate) struct StoreBridge(pub(crate) Arc<dyn SecureStore>);
 impl galaxy_client::identity::SecureStore for StoreBridge {
     fn get(&self, key: &str) -> Option<Vec<u8>> {
         self.0.get(key.to_string())

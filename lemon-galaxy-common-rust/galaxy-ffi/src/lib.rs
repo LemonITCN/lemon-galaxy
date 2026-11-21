@@ -15,6 +15,7 @@ mod screen;
 mod session;
 mod ssh;
 mod types;
+mod worker;
 
 pub use agent::*;
 pub use callbacks::*;
@@ -23,6 +24,7 @@ pub use host::*;
 pub use session::*;
 pub use ssh::{SshInfo, SshSession};
 pub use types::*;
+pub use worker::{WorkerHost, WorkerLoginResult};
 
 use parking_lot::RwLock;
 use std::future::Future;

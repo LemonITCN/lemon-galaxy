@@ -151,6 +151,13 @@ recent_events(limit) -> [HostEvent]
 
 `HostListener`：`on_status`、`on_assist_request(request_id, from_user, from_device)`（弹窗后调 `respond_assist`）、`on_session_started`、`on_session_ended`、`on_ai_activity`。
 
+## 5.1 WorkerHost（纯被控端，如 macOS 被控端）
+
+- `WorkerHost(store)`：数据在 `CoreConfig.data_dir/worker`，设备身份存在传入的 `store`（与主控端分开）。`CoreConfig.device_kind` 用 worker。
+- `device_id()`、`server()`、`start() -> Option<HostService>`（有账号时启动被控服务，应用启动时调一次）、`service()`。
+- `login(server, username, password, totp, new_password, system_user) -> WorkerLoginResult`：`Success{user_id, username}` / `NeedTotp` / `MustChangePassword`（带上相应参数再调一次）。可以登录多个账号，但必须在同一台服务器上。
+- `logout(user_id)`。账号权限、事件、临时协助等用返回的 `HostService`（与 control 的本机被控相同）。
+
 ## 6. 构建
 
 - Apple：`scripts/build-ffi-apple.sh [--debug] [--ios]` 生成 `lemon-galaxy-control-macos/Vendor/LemonGalaxyCore.xcframework` 与 `Sources/LemonGalaxy/Core/Generated/galaxy_ffi.swift`。
