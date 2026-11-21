@@ -45,6 +45,8 @@
 	<string>Find and connect to your devices on the local network, even when the server is unreachable.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Choose photos and videos to upload to a remote device.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Save remote desktop recordings to your photo library.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

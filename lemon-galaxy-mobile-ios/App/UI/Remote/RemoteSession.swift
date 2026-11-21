@@ -33,6 +33,11 @@ final class RemoteSession: ObservableObject, Identifiable {
     /// 远端声音：内核用本机默认输出播放；开关记在设置里（默认开），画面打开后自动开始
     @Published private(set) var audioOn = false
     @Published private(set) var audioBusy = false
+    /// 录像：内核把收到的 H.264（与正在收听的声音）直接封装成 MP4。开始时间非空即录制中
+    @Published private(set) var recordingStartedAt: Date?
+    @Published private(set) var recordingBusy = false
+    /// 停止后要给用户看的录像（弹「已保存」，可分享或存到相册）
+    @Published var savedRecording: SavedRecording?
     let canvas = RemoteCanvasView()
     weak var app: AppModel?
 
@@ -46,6 +51,10 @@ final class RemoteSession: ObservableObject, Identifiable {
     private var audio: AudioPlayback?
     /// 每次开始或停止声音加一：开到一半被关掉、切后台或会话结束时，迟到的结果直接丢弃
     private var audioGeneration = 0
+    /// 正在录像的画面通道（换屏幕、重开画面后就不是当前通道了）
+    private var recordingChannel: DisplayChannel?
+    /// 每次开始或停止录像加一：开始到一半被停掉时，迟到的结果作废
+    private var recordingGeneration = 0
     private var stopped = false
 
     init(app: AppModel, deviceId: String, title: String, platform: Platform) {
@@ -170,7 +179,8 @@ final class RemoteSession: ObservableObject, Identifiable {
                 peer = p
                 closeWatch = p.$closedReason.compactMap { $0 }.receive(on: DispatchQueue.main).sink { [weak self] reason in
                     self?.status = .failed(reason.isEmpty ? L("remote.closed") : reason)
-                    // 会话断了，声音通道也随之失效
+                    // 会话断了，声音通道也随之失效；录像收尾（内核还留着已写的部分）
+                    self?.stopRecording(.dropped)
                     self?.stopAudio()
                 }
                 displays = try await p.session.listDisplays()
@@ -187,6 +197,8 @@ final class RemoteSession: ObservableObject, Identifiable {
 
     private func open(_ id: UInt32) async {
         guard let peer else { return }
+        // 关画面时内核会自动结束录像但不返回结果：先自己停，拿到文件
+        stopRecording(.reopen)
         channel?.stop()
         channel = nil
         displayId = id
@@ -208,8 +220,13 @@ final class RemoteSession: ObservableObject, Identifiable {
         adapter.onCursorMove = { [weak self] x, y, visible in
             DispatchQueue.main.async { self?.canvas.remoteCursor(x, y, visible: visible) }
         }
-        adapter.onClose = { [weak self] reason in
-            DispatchQueue.main.async { self?.status = .failed(reason.isEmpty ? L("remote.closed") : reason) }
+        adapter.onClose = { [weak self, weak adapter] reason in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.status = .failed(reason.isEmpty ? L("remote.closed") : reason)
+                // 只收当前画面的录像（换屏幕后旧通道迟到的关闭不算）
+                if let adapter, self.sinkAdapter === adapter { self.stopRecording(.dropped) }
+            }
         }
         sinkAdapter = adapter
         do {
@@ -246,6 +263,87 @@ final class RemoteSession: ObservableObject, Identifiable {
     func send(_ events: [InputEvent]) {
         guard let channel, !viewOnly else { return }
         for e in events { channel.sendInput(event: e) }
+    }
+
+    // MARK: 录像
+
+    enum RecordingStop {
+        /// 用户点停止、换屏幕或画质重开画面、断线、切后台：界面还在（或回来时还在），弹「已保存」
+        case user, reopen, dropped, background
+        /// 离开画面、关闭会话：界面已经不在了，只给个提示条
+        case left, closed
+    }
+
+    var isRecording: Bool { recordingStartedAt != nil }
+
+    func toggleRecording() {
+        if isRecording { stopRecording(.user) } else { startRecording() }
+    }
+
+    func startRecording() {
+        guard let ch = channel, status == .streaming, recordingChannel == nil, !recordingBusy, foreground, !stopped else { return }
+        let url: URL
+        do {
+            url = try RecordingFiles.newURL(device: title)
+        } catch {
+            app?.showToast(L("remote.recordFailed", error.localizedDescription), error: true)
+            return
+        }
+        recordingBusy = true
+        recordingGeneration += 1
+        let gen = recordingGeneration
+        // 正在收听声音就一起录
+        let withAudio = audioOn
+        Task {
+            do {
+                try await ch.startRecording(path: url.path, withAudio: withAudio)
+                guard gen == recordingGeneration else {
+                    // 开始到一半被停掉（离开画面、切后台、断线）：这段不要了
+                    Self.discard(try? ch.stopRecording(), fallback: url)
+                    return
+                }
+                recordingChannel = ch
+                recordingStartedAt = Date()
+            } catch {
+                if gen == recordingGeneration {
+                    app?.showToast(L("remote.recordFailed", describeError(error)), error: true)
+                }
+                try? FileManager.default.removeItem(at: url)
+            }
+            if gen == recordingGeneration { recordingBusy = false }
+        }
+    }
+
+    /// 停止录像并按原因提示。没在录时什么也不做；开始到一半时让那次开始作废
+    func stopRecording(_ reason: RecordingStop) {
+        recordingGeneration += 1
+        recordingBusy = false
+        guard let ch = recordingChannel else { return }
+        recordingChannel = nil
+        recordingStartedAt = nil
+        let info: RecordingInfo
+        do {
+            info = try ch.stopRecording()
+        } catch {
+            app?.showToast(L("remote.recordSaveFailed", describeError(error)), error: true)
+            return
+        }
+        let urls = info.paths.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !urls.isEmpty else {
+            app?.showToast(L("remote.recordEmpty"))
+            return
+        }
+        switch reason {
+        case .left, .closed:
+            app?.showToast(L("remote.recordAutoSaved"))
+        case .user, .reopen, .dropped, .background:
+            savedRecording = SavedRecording(urls: urls, durationMs: info.durationMs, bytes: info.bytes)
+        }
+    }
+
+    private static func discard(_ info: RecordingInfo?, fallback: URL) {
+        let paths = info?.paths ?? [fallback.path]
+        for p in paths { try? FileManager.default.removeItem(atPath: p) }
     }
 
     func sendClipboard() {
@@ -288,11 +386,13 @@ final class RemoteSession: ObservableObject, Identifiable {
             channel?.requestKeyframe()
             if channel != nil { startAudioIfWanted() }
         } else {
+            stopRecording(.background)
             stopAudio()
         }
     }
 
     func stop() {
+        stopRecording(.closed)
         stopped = true
         stopAudio()
         statsTimer?.invalidate()
@@ -327,4 +427,12 @@ enum RemoteAudioSession {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
     }
+}
+
+/// 停止后的一段录像（分辨率变化时会分成几个文件）
+struct SavedRecording: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+    let durationMs: UInt64
+    let bytes: UInt64
 }

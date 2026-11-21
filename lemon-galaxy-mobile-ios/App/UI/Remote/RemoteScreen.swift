@@ -19,7 +19,7 @@ struct RemoteCanvasHost: UIViewRepresentable {
     }
 }
 
-/// 远程桌面：画面占满，右侧一个可拖动的悬浮球，点开是工具栏（屏幕、画质、输入方式、键盘、快捷键、声音、隐私屏、剪贴板、断开）。
+/// 远程桌面：画面占满，右侧一个可拖动的悬浮球，点开是工具栏（屏幕、画质、输入方式、键盘、快捷键、声音、录像、隐私屏、剪贴板、断开）。
 struct RemoteScreen: View {
     @ObservedObject var session: RemoteSession
     var onMinimize: (() -> Void)?
@@ -42,6 +42,11 @@ struct RemoteScreen: View {
                         .padding(.top, 8)
                         .padding(.horizontal, 10)
                         .transition(.move(edge: .top).combined(with: .opacity))
+                } else if let start = session.recordingStartedAt {
+                    // 工具栏收起时也看得到在录像
+                    RecordingBadge(start: start)
+                        .frame(maxWidth: .infinity, alignment: .top)
+                        .padding(.top, 8)
                 }
                 floatingBall(in: geo.size)
             }
@@ -50,6 +55,9 @@ struct RemoteScreen: View {
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .onAppear { session.canvas.onHideKeyboard = { setKeyboard(false) } }
+        // 离开画面（收起、切到别的会话）就停止录像
+        .onDisappear { session.stopRecording(.left) }
+        .modifier(RecordingSavedAlert(session: session))
     }
 
     private func setKeyboard(_ on: Bool) {
@@ -151,8 +159,7 @@ struct RemoteScreen: View {
                 toolbarOpen = false
             }
             shortcutsMenu
-            if session.supportsAudio { soundButton }
-            if session.supportsPrivacy { privacyButton }
+            mediaButtons
             clipboardMenu
             ToolButton(icon: "xmark.circle", label: loc("remote.disconnect"), danger: true) {
                 app.sessions.close(session.id)
@@ -227,6 +234,13 @@ struct RemoteScreen: View {
         } label: { ToolLabel(icon: "command", label: loc("remote.shortcuts")) }
     }
 
+    /// 声音、录像、隐私屏（单独成组：一个 ViewBuilder 块里的子视图不超过 10 个）
+    @ViewBuilder private var mediaButtons: some View {
+        if session.supportsAudio { soundButton }
+        RecordButton(session: session)
+        if session.supportsPrivacy { privacyButton }
+    }
+
     private var soundButton: some View {
         let on: Bool = session.audioOn
         let icon: String = on ? "speaker.wave.2.fill" : "speaker.slash"
@@ -269,6 +283,62 @@ private struct ToolLabel: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 6)
         .contentShape(Rectangle())
+    }
+}
+
+/// 录像按钮：录制中变成红色停止键，标签是计时
+private struct RecordButton: View {
+    @ObservedObject var session: RemoteSession
+    @Environment(\.loc) private var loc
+
+    var body: some View {
+        let recording: Bool = session.isRecording
+        let disabled: Bool = session.recordingBusy || (!recording && session.status != .streaming)
+        let a11y: String = loc(recording ? "remote.recordStop" : "remote.record")
+        Button { session.toggleRecording() } label: { label }
+            .buttonStyle(.plain)
+            .disabled(disabled)
+            .opacity(disabled ? 0.5 : 1)
+            .accessibilityLabel(a11y)
+    }
+
+    @ViewBuilder private var label: some View {
+        if let start = session.recordingStartedAt {
+            TimelineView(.periodic(from: start, by: 1)) { ctx in
+                ToolLabel(icon: "stop.circle.fill", label: RecordingClock.text(since: start, now: ctx.date), danger: true)
+            }
+        } else {
+            ToolLabel(icon: "record.circle", label: loc("remote.record"))
+        }
+    }
+}
+
+/// 工具栏收起时画面顶部的红点与计时（不挡触控）
+private struct RecordingBadge: View {
+    let start: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: start, by: 1)) { ctx in
+            badge(RecordingClock.text(since: start, now: ctx.date))
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func badge(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(Color(hex: "#FF4D5E")).frame(width: 8, height: 8)
+            Text(text).font(.caption.monospacedDigit().weight(.semibold)).foregroundStyle(.white)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(Color.black.opacity(0.6)))
+    }
+}
+
+enum RecordingClock {
+    static func text(since start: Date, now: Date) -> String {
+        Fmt.elapsed(Int(now.timeIntervalSince(start)))
     }
 }
 

@@ -180,6 +180,37 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
         queue.async { l?.onVaultChanged() }
     }
 
+    // MARK: 远程开机
+
+    override func canWake(deviceId: String) -> Bool {
+        guard let d = device(deviceId) else { return false }
+        return !d.online && d.kind != .mobile && MockData.wakeRelays[deviceId] != nil
+    }
+
+    /// 返回预设的代发设备；开启后台模拟时几秒后设备「开机上线」
+    override func wakeDevice(deviceId: String) async throws -> [String] {
+        await delay(700)
+        guard let d = device(deviceId) else { throw GalaxyError.NotFound(detail: zh ? "找不到这台设备" : "Device not found") }
+        guard let via = MockData.wakeRelays[deviceId] else {
+            throw GalaxyError.Other(detail: zh ? "这台设备还没有上报网卡地址（升级到新版本并上线一次后才能远程开机）"
+                                               : "This device has not reported its network adapter yet (update it and bring it online once first)")
+        }
+        guard !d.online else { return via }
+        if options.liveSimulation {
+            queue.asyncAfter(deadline: .now() + 8) { [weak self] in
+                guard let self else { return }
+                self.lock.locked {
+                    if let i = self._devices.firstIndex(where: { $0.id == deviceId }) {
+                        self._devices[i].online = true
+                        self._devices[i].lastSeenAt = MockData.now
+                    }
+                }
+                self.listener?.onDevicesChanged()
+            }
+        }
+        return via
+    }
+
     // MARK: 连接
 
     func device(_ id: String) -> DeviceInfo? { devices().first { $0.id == id } }

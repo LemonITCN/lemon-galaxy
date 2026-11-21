@@ -178,6 +178,17 @@ public final class GalaxyAccount: ObservableObject {
         reloadVault()
     }
 
+    /// 能不能远程开机：服务器认为离线、局域网里也没发现，且内核说能唤醒（能被控、上报过网卡地址）
+    public func canWake(_ id: String) -> Bool {
+        guard let d = device(id), !d.online, !d.lanSeen, !d.isSelf else { return false }
+        return client.canWake(deviceId: id)
+    }
+
+    /// 远程开机：返回代发设备名（空字符串表示本机）
+    public func wake(_ id: String) async throws -> [String] {
+        try await client.wakeDevice(deviceId: id)
+    }
+
     public func device(_ id: String) -> DeviceInfo? { devices.first { $0.id == id } }
     public func entry(_ id: String) -> VaultEntry? { vault.first { $0.id == id } }
 

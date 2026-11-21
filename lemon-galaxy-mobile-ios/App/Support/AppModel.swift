@@ -144,6 +144,29 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: 远程开机
+
+    /// 正在发送唤醒包的设备（防重复点击、详情页显示进度）
+    @Published private(set) var waking: Set<String> = []
+
+    /// 远程开机，结果用提示条告知；返回提示文字与是否成功（设备详情是弹出页，提示条被盖住时就地显示）
+    @discardableResult
+    func wake(_ deviceId: String) async -> (ok: Bool, message: String) {
+        guard !waking.contains(deviceId) else { return (false, "") }
+        waking.insert(deviceId)
+        defer { waking.remove(deviceId) }
+        do {
+            let via = try await account.wake(deviceId)
+            let m = WakeText.sent(via)
+            showToast(m)
+            return (true, m)
+        } catch {
+            let m = L("wake.failed", describeError(error))
+            showToast(m, error: true)
+            return (false, m)
+        }
+    }
+
     /// 打开终端：设备上有保留的会话时先问要不要接续
     func openTerminal(_ t: RemoteTarget, attach: TerminalSessionInfo? = nil, ask: Bool = true) {
         if attach == nil, ask, settings.askResumeTerminal, case .device(let id) = t {

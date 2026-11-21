@@ -1711,6 +1711,11 @@ public enum VaultData: Equatable, Hashable {
     )
     case preferences(json: String
     )
+    /**
+     * 端口映射规则（经由设备或 SSH 主机，恰好一个有值；local_port 为 0 时自动选）
+     */
+    case portForward(label: String, viaDeviceId: String?, viaSshHostId: String?, localPort: UInt16, remoteHost: String, remotePort: UInt16, autoStart: Bool, note: String
+    )
 
 
 
@@ -2000,6 +2005,12 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
      * 设备列表页打开期间设为 true：每隔几秒查询局域网内的同账号设备。
      */
     func setLanDiscovery(active: Bool) 
+    
+    /**
+     * 按加密库里的端口映射规则开启映射：经由设备时连上该设备转发，经由 SSH 主机时连上该主机做本地转发。
+     * 返回的 PortForward 一直有效直到 stop()（期间保持与设备 / 主机的连接）。
+     */
+    func startPortForward(entryId: String, prompt: SecretPrompt) async throws  -> PortForward
     
     func state()  -> ClientState
     
@@ -2497,6 +2508,7 @@ open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
     open func restore()  -> Bool { bridgeUnimplemented() }
     open func server()  -> ServerInfo? { bridgeUnimplemented() }
     open func setLanDiscovery(active: Bool) { bridgeUnimplemented() }
+    open func startPortForward(entryId: String, prompt: SecretPrompt) async throws  -> PortForward { bridgeUnimplemented() }
     open func state()  -> ClientState { bridgeUnimplemented() }
     open func totpDisable(code: String) async throws { bridgeUnimplemented() }
     open func totpSetup() async throws  -> TotpSetup { bridgeUnimplemented() }

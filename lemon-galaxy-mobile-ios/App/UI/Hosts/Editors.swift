@@ -399,6 +399,9 @@ struct DeviceEditor: View {
 
     var body: some View {
         EditorForm(title: loc("editor.editDevice"), canSave: true, save: save) {
+            if account.canWake(deviceId) {
+                WakeSection(deviceId: deviceId)
+            }
             if let d = account.device(deviceId) {
                 Section {
                     LabeledContent(loc("device.hostname"), value: d.hostname)
@@ -439,6 +442,44 @@ struct DeviceEditor: View {
             nt = note
             fav = favorite
         }
+    }
+}
+
+/// 设备详情里的远程开机（离线且能唤醒时才显示）。详情是弹出页，结果就地显示一行（提示条可能被弹出页盖住）
+private struct WakeSection: View {
+    let deviceId: String
+    @EnvironmentObject var app: AppModel
+    @Environment(\.palette) private var p
+    @Environment(\.loc) private var loc
+    @State private var message: String?
+    @State private var ok = false
+
+    var body: some View {
+        let busy: Bool = app.waking.contains(deviceId)
+        Section {
+            HStack(spacing: 10) {
+                Button {
+                    Task {
+                        let r = await app.wake(deviceId)
+                        if !r.message.isEmpty { ok = r.ok; message = r.message }
+                    }
+                } label: {
+                    Label(loc("wake.action"), systemImage: "power")
+                }
+                .buttonStyle(.borderless)
+                .disabled(busy)
+                Spacer(minLength: 8)
+                if busy { ProgressView() }
+                InfoButton(text: loc("wake.info"))
+            }
+            if let message { resultRow(message) }
+        }
+    }
+
+    private func resultRow(_ text: String) -> some View {
+        let icon: String = ok ? "checkmark.circle" : "exclamationmark.triangle"
+        let color: Color = ok ? p.success : p.danger
+        return Label(text, systemImage: icon).font(.callout).foregroundStyle(color)
     }
 }
 

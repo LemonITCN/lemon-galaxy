@@ -3,6 +3,7 @@ import CoreGraphics
 import CoreText
 import CoreVideo
 import ImageIO
+import QuartzCore
 
 /// 假远程桌面：本机用 CoreGraphics 画一张「被控端桌面」，经 VideoToolbox 编码成 H.264 Annex B，
 /// 再走 VideoSink（on_config / on_frame / on_cursor）——和真内核推来的数据路径完全一样，界面的解码显示因此能被真实验证。
@@ -20,6 +21,9 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
     private let streamW: Int
     private let streamH: Int
     private let codec: VideoCodec
+    private let zh: Bool
+    /// 录像中（只在 queue 上读写）
+    private var recorder: MockRecorder?
 
     init(device: DeviceInfo, display: DisplayInfo, options: DisplayOptions, sink: VideoSink, zh: Bool) {
         self.device = device
@@ -30,6 +34,7 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
         streamW = Int(Double(display.width) * scale) & ~1
         streamH = Int(Double(display.height) * scale) & ~1
         renderer = MockDesktopRenderer(device: device, display: display, zh: zh, size: CGSize(width: streamW, height: streamH))
+        self.zh = zh
         codec = options.codecs.first == .h265 ? .h265 : .h264
         super.init(noHandle: NoHandle())
         let fps = max(5, min(Int(options.maxFps), 20))
@@ -61,6 +66,7 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
         PixelBuffers.draw(pb) { ctx in renderer.draw(ctx, time: Date()) }
         frameIndex += 1
         encoder.encode(pb, ptsUs: frameIndex * 50_000)
+        recorder?.append(pb, at: CACurrentMediaTime())
     }
 
     private func toStream(_ x: Int32, _ y: Int32) -> CGPoint {
@@ -92,11 +98,45 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
     override func requestKeyframe() { encoder?.requestKeyframe() }
     override func setBitrate(kbps: UInt32) { encoder?.setBitrate(kbps: Int(kbps == 0 ? 4000 : kbps)) }
 
+    // 录像：和真内核一样，关画面时自动结束（不返回结果）
+
+    override func isRecording() -> Bool { queue.sync { recorder != nil } }
+
+    override func startRecording(path: String, withAudio: Bool) async throws {
+        // 先判断再建文件：重复开始不能碰正在写的文件
+        let busy: Bool = queue.sync { recorder != nil || stopped }
+        if busy { throw GalaxyError.Other(detail: zh ? "已经在录像了" : "Already recording") }
+        let r = try MockRecorder(url: URL(fileURLWithPath: path), width: streamW, height: streamH)
+        let ok: Bool = queue.sync {
+            guard recorder == nil, !stopped else { return false }
+            recorder = r
+            return true
+        }
+        guard ok else {
+            _ = r.finish()
+            throw GalaxyError.Other(detail: zh ? "已经在录像了" : "Already recording")
+        }
+    }
+
+    override func stopRecording() throws -> RecordingInfo {
+        let r: MockRecorder? = queue.sync {
+            let r = recorder
+            recorder = nil
+            return r
+        }
+        guard let r else { throw GalaxyError.Other(detail: zh ? "没有在录像" : "Not recording") }
+        return r.finish()
+    }
+
     override func stop() {
         queue.async { [weak self] in
             self?.stopped = true
             self?.timer?.cancel()
             self?.encoder?.invalidate()
+            if let r = self?.recorder {
+                self?.recorder = nil
+                _ = r.finish()
+            }
         }
     }
 }

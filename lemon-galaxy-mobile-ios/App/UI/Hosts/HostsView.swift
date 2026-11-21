@@ -90,6 +90,8 @@ struct HostsView: View {
         }
         .confirmationDialog(chooser?.title ?? "", isPresented: Binding(get: { chooser != nil }, set: { if !$0 { chooser = nil } }), titleVisibility: .visible, presenting: chooser) { item in
             ConnectButtons(item: item)
+        } message: { item in
+            if Self.isOffline(item) { Text(loc("device.offline")) }
         }
         .alert(confirm?.title ?? "", isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } }), presenting: confirm) { c in
             Button(c.button, role: .destructive) { c.action() }
@@ -222,7 +224,8 @@ struct HostsView: View {
     private func activate(_ item: HostItem) {
         switch item {
         case .device(let d, _):
-            guard d.online || d.lanSeen else {
+            // 离线设备：能远程开机时弹出「远程开机」，否则只提示离线
+            guard d.online || d.lanSeen || account.canWake(d.id) else {
                 app.showToast(loc("device.offline"), error: true)
                 return
             }
@@ -232,6 +235,11 @@ struct HostsView: View {
         case .rdp(let e):
             app.openRdp(e.id)
         }
+    }
+
+    static func isOffline(_ item: HostItem) -> Bool {
+        if case .device(let d, _) = item { return !(d.online || d.lanSeen) }
+        return false
     }
 
     private func edit(_ item: HostItem) {
@@ -287,13 +295,13 @@ struct ConnectButtons: View {
     var body: some View {
         switch item {
         case .device(let d, _):
-            let gui = d.platform == .windows || d.platform == .macos
-            if gui {
-                Button { app.openRemoteDesktop(d.id) } label: { Label(loc("action.remoteDesktop"), systemImage: "display") }
+            if d.online || d.lanSeen {
+                deviceButtons(d)
+            } else if app.account.canWake(d.id) {
+                // 离线设备只能远程开机（连接类操作连不上）
+                Button { Task { await app.wake(d.id) } } label: { Label(loc("wake.action"), systemImage: "power") }
+                    .disabled(app.waking.contains(d.id))
             }
-            Button { app.openTerminal(.device(d.id)) } label: { Label(loc("action.terminal"), systemImage: "terminal") }
-            Button { app.openFiles(.device(d.id)) } label: { Label(loc("action.files"), systemImage: "folder") }
-            Button { app.openAI([AgentTarget(kind: .device, id: d.id)]) } label: { Label(loc("action.ai"), systemImage: "sparkles") }
         case .ssh(let e):
             Button { app.openTerminal(.ssh(e.id)) } label: { Label(loc("action.terminal"), systemImage: "terminal") }
             Button { app.openFiles(.ssh(e.id)) } label: { Label(loc("action.sftp"), systemImage: "folder") }
@@ -301,6 +309,15 @@ struct ConnectButtons: View {
         case .rdp(let e):
             Button { app.openRdp(e.id) } label: { Label(loc("rdp.connect"), systemImage: "display") }
         }
+    }
+
+    @ViewBuilder private func deviceButtons(_ d: DeviceInfo) -> some View {
+        if d.platform == .windows || d.platform == .macos {
+            Button { app.openRemoteDesktop(d.id) } label: { Label(loc("action.remoteDesktop"), systemImage: "display") }
+        }
+        Button { app.openTerminal(.device(d.id)) } label: { Label(loc("action.terminal"), systemImage: "terminal") }
+        Button { app.openFiles(.device(d.id)) } label: { Label(loc("action.files"), systemImage: "folder") }
+        Button { app.openAI([AgentTarget(kind: .device, id: d.id)]) } label: { Label(loc("action.ai"), systemImage: "sparkles") }
     }
 }
 

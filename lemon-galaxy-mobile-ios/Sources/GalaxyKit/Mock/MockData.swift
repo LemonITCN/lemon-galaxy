@@ -32,6 +32,11 @@ enum MockData {
         ]
     }
 
+    /// 能远程开机的离线设备与代发设备（空字符串为本机）。前台经办公室电脑代发；家里 NAS 没上报网卡地址，不能远程开机
+    static let wakeRelays: [String: [String]] = [
+        "dev-reception": ["OFFICE-PC-07"],
+    ]
+
     static func vault(zh: Bool) -> [VaultEntry] {
         let t = fixedNow
         func e(_ id: String, _ folder: String?, _ sort: Int64, _ data: VaultData) -> VaultEntry {
@@ -79,6 +84,10 @@ enum MockData {
             e("n-docker", nil, 2, .snippet(label: zh ? "容器状态" : "Container status", command: "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'", tags: ["docker"])),
             e("n-update", nil, 3, .snippet(label: zh ? "更新系统" : "Update system", command: "sudo apt update && sudo apt upgrade -y", tags: ["linux"])),
             e("n-top", nil, 4, .snippet(label: zh ? "内存占用前十" : "Top 10 by memory", command: "ps aux --sort=-%mem | head -n 11", tags: ["linux"])),
+
+            // 端口映射规则：手机端不跑端口映射，各列表都应当忽略（桌面端才有对应界面）
+            e("p-pg", "f-db", 5, .portForward(label: zh ? "生产库 PostgreSQL" : "Production PostgreSQL", viaDeviceId: "dev-build", viaSshHostId: nil,
+                                             localPort: 15432, remoteHost: "10.0.2.10", remotePort: 5432, autoStart: false, note: "")),
 
             e("k-web1", nil, 0, .knownHost(host: "10.0.1.21", port: 22, keyType: "ssh-ed25519", fingerprint: "SHA256:7k3F0Zb3QmH1pRk2nB8xYw9eLqT4cVd5sJ6uG2aN1oE")),
             e("k-vps", nil, 1, .knownHost(host: "203.0.113.8", port: 2222, keyType: "ecdsa-sha2-nistp256", fingerprint: "SHA256:Qe2mW8rT5yU7iO9pA1sD3fG5hJ7kL9zX2cV4bN6mQ8w")),

@@ -100,7 +100,7 @@ final class Smoke {
         _ = await step("refresh_devices") { try await account.refreshDevices() }
         log("  设备 \(account.devices.count) 台：")
         for d in account.devices {
-            log("    \(d.isSelf ? "*" : " ") \(d.hostname) \(d.kind) \(d.platform) \(d.osVersion) online=\(d.online) lan=\(d.lanSeen)")
+            log("    \(d.isSelf ? "*" : " ") \(d.hostname) \(d.kind) \(d.platform) \(d.osVersion) online=\(d.online) lan=\(d.lanSeen) wake=\(account.canWake(d.id))")
         }
         if let me = account.devices.first(where: \.isSelf) {
             log("  本机登记为 \(me.kind) / \(me.platform)")
