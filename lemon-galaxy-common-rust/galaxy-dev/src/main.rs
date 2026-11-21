@@ -10,6 +10,8 @@
 //! galaxy-dev --data <目录> term-test <设备>     打开终端、执行命令、断开、接续，验证断线继承
 //! galaxy-dev --data <目录> audio-test <设备> [秒] 收听远端声音（不播放），打印样本数、均方根与估算频率
 //! galaxy-dev --data <目录> wake <设备ID前缀>      远程开机：找同一网络里在线的设备代发唤醒包
+//! galaxy-dev --data <目录> clip-push <设备> <本机路径…>        复制粘贴文件：传到被控端暂存区并设成远端剪贴板，打印远端路径
+//! galaxy-dev --data <目录> clip-pull <设备> <本机目录> <远端路径…> 把远端文件（含文件夹）取回本机目录
 //! galaxy-dev --data <目录> assist <设备码> <验证码> <命令>
 //! galaxy-dev --data <目录> vault-test
 //! galaxy-dev release-sign <文件>            用环境变量 LEMONGALAXY_RELEASE_SIGNING_KEY（base64 私钥种子）签名，写出 <文件>.sig
@@ -233,6 +235,29 @@ async fn main() -> anyhow::Result<()> {
                     println!("\n下载完成");
                 }
                 "term-test" => term_test(&session).await?,
+                "clip-push" => {
+                    struct P;
+                    impl TransferProgress for P {
+                        fn on_progress(&self, _d: u64, _t: u64) {}
+                        fn on_finished(&self, _e: Option<String>) {}
+                    }
+                    let (_tx, rx) = tokio::sync::watch::channel(false);
+                    let locals: Vec<std::path::PathBuf> = args[2..].iter().map(std::path::PathBuf::from).collect();
+                    let remote = galaxy_client::clipfiles::push(&session, &locals, Arc::new(P), rx).await?;
+                    for r in remote {
+                        println!("远端：{r}");
+                    }
+                }
+                "clip-pull" => {
+                    struct P;
+                    impl TransferProgress for P {
+                        fn on_progress(&self, _d: u64, _t: u64) {}
+                        fn on_finished(&self, _e: Option<String>) {}
+                    }
+                    let (_tx, rx) = tokio::sync::watch::channel(false);
+                    let got = galaxy_client::clipfiles::pull(&session, &args[3..], Path::new(&args[2]), Arc::new(P), rx).await?;
+                    println!("已取回 {} 项", got.len());
+                }
                 "audio-test" => {
                     let secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
                     let stats = Arc::new(galaxy_client::audio::PcmStats::default());

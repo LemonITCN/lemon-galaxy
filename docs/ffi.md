@@ -86,6 +86,8 @@ async clipboard_get() -> ClipboardData? / clipboard_set(ClipboardData)      Text
 async forward_port(local_port, remote_host, remote_port) -> PortForward     local_port() / stop()
 async set_privacy(on)                                                     能力列表有 "privacy" 才支持（需要控制权限）
 async start_audio(volume) -> AudioPlayback                                能力列表有 "audio" 才支持
+clipboard_push_files(local_paths, TransferListener) -> ClipboardTransfer   复制粘贴文件（本机→远端）：传到被控端暂存区再设成远端剪贴板
+clipboard_pull_files(remote_paths, local_dir, TransferListener) -> ClipboardTransfer   远端剪贴板里的文件取回本机目录，完成后 paths() 是本机路径
 async wake_on_lan(mac)
 ```
 

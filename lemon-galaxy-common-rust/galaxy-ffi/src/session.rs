@@ -210,6 +210,26 @@ impl PeerSession {
         .await
     }
 
+    /// 复制粘贴文件（本机 → 远端）：把本机文件 / 文件夹传到被控端暂存区，再把被控端剪贴板设成它们。
+    /// 进度与结果经 listener；超过 4 GB 或 1 万个文件时报错（请改用文件管理）。需要剪贴板与文件权限。
+    pub fn clipboard_push_files(&self, local_paths: Vec<String>, listener: Arc<dyn TransferListener>) -> Arc<ClipboardTransfer> {
+        let s = self.inner.clone();
+        ClipboardTransfer::start(listener, move |p, cancel| async move {
+            let locals: Vec<std::path::PathBuf> = local_paths.into_iter().map(std::path::PathBuf::from).collect();
+            galaxy_client::clipfiles::push(&s, &locals, p, cancel).await
+        })
+    }
+
+    /// 复制粘贴文件（远端 → 本机）：把远端剪贴板里的文件（clipboard_get 得到的路径）下载到 `local_dir`。
+    /// 完成后 ClipboardTransfer.paths() 是本机上的顶层路径，界面把本机剪贴板设成它们。
+    pub fn clipboard_pull_files(&self, remote_paths: Vec<String>, local_dir: String, listener: Arc<dyn TransferListener>) -> Arc<ClipboardTransfer> {
+        let s = self.inner.clone();
+        ClipboardTransfer::start(listener, move |p, cancel| async move {
+            let v = galaxy_client::clipfiles::pull(&s, &remote_paths, std::path::Path::new(&local_dir), p, cancel).await?;
+            Ok(v.into_iter().map(|x| x.to_string_lossy().to_string()).collect())
+        })
+    }
+
     pub async fn wake_on_lan(&self, mac: String) -> Result<()> {
         let s = self.inner.clone();
         run(async move { s.mgmt(pp::MgmtReq::WakeOnLan { mac }).await.map(|_| ()).map_err(Into::into) }).await
@@ -633,6 +653,49 @@ impl DisplayChannel {
 
     pub fn is_recording(&self) -> bool {
         self.ch.is_recording()
+    }
+}
+
+/// 一次复制粘贴文件的传输。
+#[derive(uniffi::Object)]
+pub struct ClipboardTransfer {
+    cancel: Mutex<Option<watch::Sender<bool>>>,
+    paths: Arc<Mutex<Vec<String>>>,
+}
+
+impl ClipboardTransfer {
+    fn start<F, Fut>(listener: Arc<dyn TransferListener>, job: F) -> Arc<Self>
+    where
+        F: FnOnce(Arc<dyn cs::TransferProgress>, watch::Receiver<bool>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = std::result::Result<Vec<String>, galaxy_client::error::ClientError>> + Send + 'static,
+    {
+        let (tx, rx) = watch::channel(false);
+        let paths: Arc<Mutex<Vec<String>>> = Default::default();
+        let me = Arc::new(Self { cancel: Mutex::new(Some(tx)), paths: paths.clone() });
+        let progress: Arc<dyn cs::TransferProgress> = Arc::new(Progress(listener.clone()));
+        rt().spawn(async move {
+            match job(progress, rx).await {
+                Ok(v) => {
+                    *paths.lock() = v;
+                    listener.on_finished(None);
+                }
+                Err(e) => listener.on_finished(Some(e.to_string())),
+            }
+        });
+        me
+    }
+}
+
+#[uniffi::export]
+impl ClipboardTransfer {
+    pub fn cancel(&self) {
+        if let Some(tx) = self.cancel.lock().take() {
+            let _ = tx.send(true);
+        }
+    }
+    /// 完成后的路径：推送时是被控端上的路径，拉取时是本机路径。
+    pub fn paths(&self) -> Vec<String> {
+        self.paths.lock().clone()
     }
 }
 

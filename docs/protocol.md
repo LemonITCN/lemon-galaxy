@@ -206,6 +206,15 @@ InputEvent =
   SpecialCombo { kind: CtrlAltDel|LockScreen|... }
 ```
 
+### 8.4.1 复制粘贴文件
+
+不加新消息，由主控端用现有的文件流与剪贴板管理请求完成：
+- 本机 → 远端：把文件 / 文件夹上传到被控端账号目录下的 `~/.lemon-galaxy/clipboard/<毫秒时间戳>-<随机数>/`，再 `ClipboardSet(Files[远端路径])`；
+  主控端每次推送前顺手删掉暂存区里一天前的内容。
+- 远端 → 本机：`ClipboardGet` 得到 `Files[远端路径]` 后逐个下载（文件夹递归），界面把本机剪贴板设成下载好的文件。
+- 被控端在剪贴板管理请求里把文件路径与协议格式互转（Windows `C:\x` ↔ `/C:/x`），文件类剪贴板要同时有剪贴板与文件权限；
+  Windows 写入用 CF_HDROP 加「Preferred DropEffect = 复制」。单次上限 4 GB、1 万个文件。
+
 ### 8.5 声音
 
 ```

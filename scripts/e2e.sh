@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 端到端测试：本机起服务器 + 被控端 + 开发用主控端，验证登录、连接（直连 / UDP 中转 / TCP 中转）、
-# 命令执行、终端断线继承、远端声音（测试音）、文件传输、远程开机。
+# 命令执行、终端断线继承、远端声音（测试音）、文件传输、复制粘贴文件、远程开机。
 # Linux / macOS：有免密 sudo 时再以 root 运行被控端，验证切换系统用户与降权文件操作。
 # Windows（Git Bash）：有管理员权限时再装成 SYSTEM 服务，验证命令与文件以指定账号身份执行。
 #   scripts/e2e.sh <二进制目录>
@@ -71,6 +71,21 @@ cmp "$WORK/big.bin" "$WORK/up.bin" || fail "上传内容不一致"
 timeout 120 "$BIN/galaxy-dev" --data "$WORK/ctl" get "" "$WORK/up.bin" "$WORK/down.bin" >/dev/null 2>&1 || fail "下载失败"
 cmp "$WORK/big.bin" "$WORK/down.bin" || fail "下载内容不一致"
 echo "上传下载内容一致"
+
+step "复制粘贴文件（文件夹传到被控端暂存区，再取回比对）"
+mkdir -p "$WORK/clip/目录 A/子目录" && echo "一" >"$WORK/clip/目录 A/1.txt" && head -c 300000 /dev/urandom >"$WORK/clip/目录 A/子目录/2.bin" && echo "顶层" >"$WORK/clip/顶层.txt"
+PUSH="$(timeout 120 "$BIN/galaxy-dev" --data "$WORK/ctl" clip-push "" "$WORK/clip/目录 A" "$WORK/clip/顶层.txt" 2>&1 | grep -v -E 'INFO|DEBUG' || true)"
+echo "$PUSH" | tail -2
+REMOTES=()
+while IFS= read -r line; do REMOTES+=("$line"); done < <(echo "$PUSH" | sed -n 's/^远端：//p')
+[ "${#REMOTES[@]}" = 2 ] || fail "没有拿到远端暂存路径：$PUSH"
+timeout 120 "$BIN/galaxy-dev" --data "$WORK/ctl" clip-pull "" "$WORK/clipback" "${REMOTES[@]}" 2>&1 | grep -v -E 'INFO|DEBUG' | tail -1
+diff -r "$WORK/clip" "$WORK/clipback" || fail "取回的内容与原文件不一致"
+echo "复制粘贴文件往返一致"
+# 被控端就是本机当前用户：清掉写进家目录的暂存
+STAGE="${REMOTES[0]%/*}"
+[ "$WIN" = 1 ] && STAGE="$(cygpath -u "${STAGE#/}")"
+rm -rf "$STAGE"
 
 for mode in udp tcp; do
   step "强制 $mode 中转"

@@ -435,12 +435,31 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             if !p.clipboard {
                 return MgmtResp::Error(denied("没有剪贴板权限"));
             }
-            MgmtResp::Clipboard(platform.clipboard_get())
+            // 文件路径转成协议格式（Windows 的 C:\x → /C:/x）；没有文件权限时不给文件
+            let d = match platform.clipboard_get() {
+                Some(ClipboardData::Files(v)) if p.files => Some(ClipboardData::Files(v.iter().map(|x| files::native_to_wire(std::path::Path::new(x))).collect())),
+                Some(ClipboardData::Files(_)) => None,
+                other => other,
+            };
+            MgmtResp::Clipboard(d)
         }
         MgmtReq::ClipboardSet(d) => {
             if !p.clipboard {
                 return MgmtResp::Error(denied("没有剪贴板权限"));
             }
+            let d = match d {
+                ClipboardData::Files(v) => {
+                    if !p.files {
+                        return MgmtResp::Error(denied("没有文件权限"));
+                    }
+                    let native: Vec<String> = v.iter().filter_map(|x| files::wire_to_native(x)).map(|x| x.to_string_lossy().to_string()).collect();
+                    if native.is_empty() {
+                        return MgmtResp::Error(PeerError::new("bad_path", "路径无效"));
+                    }
+                    ClipboardData::Files(native)
+                }
+                other => other,
+            };
             platform.clipboard_set(d);
             MgmtResp::Ok
         }
