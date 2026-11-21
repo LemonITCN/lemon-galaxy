@@ -967,3 +967,21 @@ pub struct CaptureOptions {
     pub bitrate_kbps: u32,
     pub codecs: Vec<VideoCodec>,
 }
+
+/// 新版本信息（已验过发布签名，文件在签名的清单里）。
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub file_name: String,
+    pub size: u64,
+    pub sha256: String,
+    /// 服务器上的下载路径（交给 download_update）
+    pub url: String,
+    pub notes: String,
+}
+
+impl From<galaxy_client::update::UpdateInfo> for UpdateInfo {
+    fn from(i: galaxy_client::update::UpdateInfo) -> Self {
+        Self { version: i.version, file_name: i.file_name, size: i.size, sha256: i.sha256, url: i.url, notes: i.notes }
+    }
+}

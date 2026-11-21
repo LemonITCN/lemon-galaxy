@@ -151,6 +151,12 @@ recent_events(limit) -> [HostEvent]
 
 `HostListener`：`on_status`、`on_assist_request(request_id, from_user, from_device)`（弹窗后调 `respond_assist`）、`on_session_started`、`on_session_ended`、`on_ai_activity`。
 
+## 5.0 自动更新
+
+- `check_update(component, platform, arch, current) -> Option<UpdateInfo>`：向自己的服务器查询；返回前已用内置发布公钥验过 SHA256SUMS 的签名，并确认文件在清单里。`component`：control / mobile / worker；`platform`：macos / android / windows / ios。
+- `download_update(info, dest, listener)`：下载到本地文件并核对 SHA-256；`TransferListener.on_progress / on_finished`。安装由各端自己做（Mac 换 .app、安卓调安装器、Windows 换程序）。
+- 服务器定期（默认 6 小时，后台可改）从 GitHub 拉最新发布，签名无效或没有签名的发布不镜像。
+
 ## 5.1 WorkerHost（纯被控端，如 macOS 被控端）
 
 - `WorkerHost(store)`：数据在 `CoreConfig.data_dir/worker`，设备身份存在传入的 `store`（与主控端分开）。`CoreConfig.device_kind` 用 worker。

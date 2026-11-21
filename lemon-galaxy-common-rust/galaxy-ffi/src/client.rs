@@ -790,6 +790,34 @@ impl GalaxyClient {
 
     // ---------------- 本机被控 ----------------
 
+    // ---------------- 自动更新 ----------------
+
+    /// 向服务器查询新版本。`component`：control / mobile / worker；`platform`：macos / android / windows / ios；
+    /// `arch` 为空表示不限；`current` 是本机版本。返回前已验发布签名。
+    pub async fn check_update(&self, component: String, platform: String, arch: String, current: String) -> Result<Option<UpdateInfo>> {
+        let inner = self.inner.clone();
+        run(async move {
+            let api = inner.api()?;
+            Ok(galaxy_client::update::check(&api, &component, &platform, &arch, &current).await?.map(Into::into))
+        })
+        .await
+    }
+
+    /// 下载新版本到 `dest`（本地文件路径），核对 SHA-256。进度经 listener 的 on_progress 上报，完成或失败经 on_finished。
+    pub fn download_update(&self, info: UpdateInfo, dest: String, listener: Arc<dyn TransferListener>) {
+        let inner = self.inner.clone();
+        rt().spawn(async move {
+            let r = async {
+                let api = inner.api()?;
+                let i = galaxy_client::update::UpdateInfo { version: info.version, file_name: info.file_name, size: info.size, sha256: info.sha256, url: info.url, notes: info.notes };
+                let l = listener.clone();
+                galaxy_client::update::download(&api, &i, std::path::Path::new(&dest), &move |d, t| l.on_progress(d, t)).await.map_err(GalaxyError::from)
+            }
+            .await;
+            listener.on_finished(r.err().map(|e| e.to_string()));
+        });
+    }
+
     // ---------------- SSH 直连 ----------------
 
     /// 连接加密库里的 ssh_host 条目。需要密码、口令或确认主机密钥时经 `prompt` 问用户。
