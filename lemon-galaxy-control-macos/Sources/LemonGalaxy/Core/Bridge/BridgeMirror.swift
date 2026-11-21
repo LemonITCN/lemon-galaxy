@@ -336,15 +336,23 @@ public struct ConversationSummary {
     public var modelId: String
     public var targetNames: [String]
     public var updatedAt: Int64
+    /**
+     * 创建时的配置（模型、目标、档位）；老记录没有
+     */
+    public var config: ConversationConfig?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, title: String, modelId: String, targetNames: [String], updatedAt: Int64) {
+    public init(id: String, title: String, modelId: String, targetNames: [String], updatedAt: Int64, 
+        /**
+         * 创建时的配置（模型、目标、档位）；老记录没有
+         */config: ConversationConfig?) {
         self.id = id
         self.title = title
         self.modelId = modelId
         self.targetNames = targetNames
         self.updatedAt = updatedAt
+        self.config = config
     }
 }
 
@@ -369,6 +377,9 @@ extension ConversationSummary: Equatable, Hashable {
         if lhs.updatedAt != rhs.updatedAt {
             return false
         }
+        if lhs.config != rhs.config {
+            return false
+        }
         return true
     }
 
@@ -378,6 +389,7 @@ extension ConversationSummary: Equatable, Hashable {
         hasher.combine(modelId)
         hasher.combine(targetNames)
         hasher.combine(updatedAt)
+        hasher.combine(config)
     }
 }
 
@@ -928,19 +940,27 @@ public struct HostEvent {
     public var at: Int64
     public var session: String
     public var user: String
+    /**
+     * connect / disconnect / terminal / file / exec / display / forward / ai / reject / ai_denied
+     */
     public var kind: String
     public var detail: String
     public var ai: Bool
+    public var level: EventLevel
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(at: Int64, session: String, user: String, kind: String, detail: String, ai: Bool) {
+    public init(at: Int64, session: String, user: String, 
+        /**
+         * connect / disconnect / terminal / file / exec / display / forward / ai / reject / ai_denied
+         */kind: String, detail: String, ai: Bool, level: EventLevel) {
         self.at = at
         self.session = session
         self.user = user
         self.kind = kind
         self.detail = detail
         self.ai = ai
+        self.level = level
     }
 }
 
@@ -968,6 +988,9 @@ extension HostEvent: Equatable, Hashable {
         if lhs.ai != rhs.ai {
             return false
         }
+        if lhs.level != rhs.level {
+            return false
+        }
         return true
     }
 
@@ -978,6 +1001,7 @@ extension HostEvent: Equatable, Hashable {
         hasher.combine(kind)
         hasher.combine(detail)
         hasher.combine(ai)
+        hasher.combine(level)
     }
 }
 
@@ -1990,6 +2014,21 @@ extension DeviceKind: Sendable {}
 
 extension DeviceKind: Equatable, Hashable {}
 
+public enum EventLevel {
+    
+    case info
+    /**
+     * 被拒绝的连接、被拦下的 AI 操作等，界面应醒目标出
+     */
+    case warning
+}
+
+#if compiler(>=6)
+extension EventLevel: Sendable {}
+#endif
+
+extension EventLevel: Equatable, Hashable {}
+
 public enum FileKind {
     
     case file
@@ -2008,18 +2047,18 @@ public enum GalaxyError: Swift.Error {
 
     
     
-    case Network(message: String
+    case Network(detail: String
     )
-    case Auth(code: String, message: String
+    case Auth(code: String, detail: String
     )
-    case Permission(message: String
+    case Permission(detail: String
     )
-    case NotFound(message: String
+    case NotFound(detail: String
     )
-    case Protocol(message: String
+    case Protocol(detail: String
     )
     case Cancelled
-    case Other(message: String
+    case Other(detail: String
     )
 }
 
@@ -2350,9 +2389,9 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
     func newConversation(config: ConversationConfig, listener: AgentListener) async throws  -> AgentConversation
     
     /**
-     * 打开本机保存的对话（需要重新连接目标设备）。
+     * 打开本机保存的对话（需要重新连接目标设备）。`config` 为空时用创建时保存的配置。
      */
-    func openConversation(id: String, config: ConversationConfig, listener: AgentListener) async throws  -> AgentConversation
+    func openConversation(id: String, config: ConversationConfig?, listener: AgentListener) async throws  -> AgentConversation
     
     func refreshDevices() async throws 
     
@@ -2421,7 +2460,10 @@ public protocol HostPlatform: AnyObject, Sendable {
     
     func setBitrate(displayId: UInt32, kbps: UInt32) 
     
-    func inject(event: InputEvent) 
+    /**
+     * 坐标是 `display_id` 这块屏幕的像素。
+     */
+    func inject(displayId: UInt32, event: InputEvent) 
     
     func screenshot(displayId: UInt32, maxWidth: UInt32, maxHeight: UInt32)  -> ImageData?
     
@@ -2680,7 +2722,7 @@ open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
     open func login(server: String, username: String, password: String, totp: String?) async throws  -> LoginResult { bridgeUnimplemented() }
     open func logout() async throws { bridgeUnimplemented() }
     open func newConversation(config: ConversationConfig, listener: AgentListener) async throws  -> AgentConversation { bridgeUnimplemented() }
-    open func openConversation(id: String, config: ConversationConfig, listener: AgentListener) async throws  -> AgentConversation { bridgeUnimplemented() }
+    open func openConversation(id: String, config: ConversationConfig?, listener: AgentListener) async throws  -> AgentConversation { bridgeUnimplemented() }
     open func refreshDevices() async throws { bridgeUnimplemented() }
     open func removeDevice(deviceId: String) async throws { bridgeUnimplemented() }
     open func restore()  -> Bool { bridgeUnimplemented() }

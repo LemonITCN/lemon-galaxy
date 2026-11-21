@@ -162,7 +162,8 @@ pub enum MgmtReq {
     WakeOnLan { mac: String },
     HostStatus,
     /// 不开画面直接注入输入（AI 操作图形界面用）
-    Inject { events: Vec<InputEvent>, origin: Origin },
+    /// 注入输入；坐标是 `display` 这块屏幕的像素
+    Inject { display: u32, events: Vec<InputEvent>, origin: Origin },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

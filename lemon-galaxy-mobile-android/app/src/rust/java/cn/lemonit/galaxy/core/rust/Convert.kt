@@ -99,15 +99,15 @@ import uniffi.galaxy_ffi.VideoCodec as FVideoCodec
 
 // ---------- 错误 ----------
 
-/** 生成代码里错误字段已改名为 reason（见 build.gradle.kts 的补丁说明）。 */
+/** 内核错误字段叫 detail（避开 Kotlin 异常自带的 message），文字已按 locale 本地化。 */
 internal fun FGalaxyException.toBridge(): GalaxyException = when (this) {
-    is FGalaxyException.Network -> GalaxyException.Network(reason)
-    is FGalaxyException.Auth -> GalaxyException.Auth(code, reason)
-    is FGalaxyException.Permission -> GalaxyException.Permission(reason)
-    is FGalaxyException.NotFound -> GalaxyException.NotFound(reason)
-    is FGalaxyException.Protocol -> GalaxyException.Protocol(reason)
+    is FGalaxyException.Network -> GalaxyException.Network(detail)
+    is FGalaxyException.Auth -> GalaxyException.Auth(code, detail)
+    is FGalaxyException.Permission -> GalaxyException.Permission(detail)
+    is FGalaxyException.NotFound -> GalaxyException.NotFound(detail)
+    is FGalaxyException.Protocol -> GalaxyException.Protocol(detail)
     is FGalaxyException.Cancelled -> GalaxyException.Cancelled()
-    is FGalaxyException.Other -> GalaxyException.Other(reason)
+    is FGalaxyException.Other -> GalaxyException.Other(detail)
 }
 
 /** 把内核调用里抛出的 uniffi 错误换成界面认的 GalaxyException。 */

@@ -123,26 +123,6 @@ val buildHostCoreLib by tasks.registering(Exec::class) {
     commandLine(cargo, "build", "-p", "galaxy-ffi", "--lib")
 }
 
-/**
- * uniffi 0.29 的 Kotlin 生成器有个已知问题：错误枚举的成员字段叫 `message` 时，会和 Throwable.message 冲突，生成的代码编译不过
- * （GalaxyError 的每个成员都有 message 字段）。这里只在 GalaxyException 及其转换器内把字段改名为 `reason`，
- * 并让 Throwable.message 直接返回它（内核已按 locale 本地化）。内核把字段改名后这段自动不生效。
- */
-fun patchUniffiErrorMessageField(file: File) {
-    val text = file.readText()
-    val start = text.indexOf("sealed class GalaxyException")
-    if (start < 0 || !text.substring(start).contains("override val message\n            get() = \"message=")) return
-    val conv = text.indexOf("FfiConverterTypeGalaxyError", start)
-    val end = text.indexOf("\n}\n", if (conv > 0) conv else start)
-    require(end > start) { "GalaxyException 补丁：找不到转换器结尾" }
-    var region = text.substring(start, end)
-    region = region.replace("val `message`: kotlin.String", "val `reason`: kotlin.String")
-        .replace(Regex("get\\(\\) = \"(code=\\$\\{ `code` \\}, )?message=\\$\\{ `message` \\}\""), "get() = `reason`")
-        .replace("value.`message`", "value.`reason`")
-    require(!region.contains("`message`")) { "GalaxyException 补丁不完整，检查 uniffi 生成代码是否变了" }
-    file.writeText(text.substring(0, start) + region + text.substring(end))
-}
-
 // library 模式：从主机动态库读 uniffi 元数据生成 Kotlin（接口与安卓 .so 同源，校验和一致）
 val generateUniffiKotlin by tasks.registering(Exec::class) {
     description = "Generate uniffi Kotlin bindings for galaxy-ffi into build/generated/source/uniffi/kotlin"
@@ -157,7 +137,6 @@ val generateUniffiKotlin by tasks.registering(Exec::class) {
     doLast {
         val kt = uniffiKotlinDir.get().asFile.resolve("uniffi/galaxy_ffi/galaxy_ffi.kt")
         require(kt.isFile) { "uniffi-bindgen 没有生成 galaxy_ffi.kt：检查 $lib 是否带 uniffi 元数据" }
-        patchUniffiErrorMessageField(kt)
     }
     commandLine(
         repoRoot.resolve("target/debug/uniffi-bindgen$exeSuffix").path,

@@ -124,7 +124,7 @@ final class MockFileClient: FileClient, @unchecked Sendable {
     }
 
     private func notFound(_ p: String) -> GalaxyError {
-        .NotFound(message: client.zh ? "找不到 \(p)" : "No such file or directory: \(p)")
+        .NotFound(detail: client.zh ? "找不到 \(p)" : "No such file or directory: \(p)")
     }
 
     override func home() async throws -> String { await client.delay(60); return homePath }
@@ -177,7 +177,7 @@ final class MockFileClient: FileClient, @unchecked Sendable {
             let (p, name) = split(path)
             guard let parent = node(p) else { throw notFound(p) }
             guard parent.children[name] == nil else {
-                throw GalaxyError.Other(message: client.zh ? "已存在同名文件或文件夹" : "A file or folder with that name already exists")
+                throw GalaxyError.Other(detail: client.zh ? "已存在同名文件或文件夹" : "A file or folder with that name already exists")
             }
             parent.children[name] = Node(name, .dir, size: 4096, mode: 0o755, mtime: MockData.now)
         }
@@ -203,7 +203,7 @@ final class MockFileClient: FileClient, @unchecked Sendable {
             let (p, name) = split(path)
             guard let parent = node(p), let n = parent.children[name] else { throw notFound(path) }
             if n.kind == .dir, !n.children.isEmpty, !recursive {
-                throw GalaxyError.Other(message: client.zh ? "文件夹不是空的" : "The folder is not empty")
+                throw GalaxyError.Other(detail: client.zh ? "文件夹不是空的" : "The folder is not empty")
             }
             parent.children[name] = nil
         }
@@ -222,7 +222,7 @@ final class MockFileClient: FileClient, @unchecked Sendable {
         return try lock.locked {
             guard let n = node(path) else { throw notFound(path) }
             guard let t = n.text else {
-                throw GalaxyError.Other(message: client.zh ? "这不是文本文件" : "This is not a text file")
+                throw GalaxyError.Other(detail: client.zh ? "这不是文本文件" : "This is not a text file")
             }
             return String(t.prefix(Int(maxBytes)))
         }

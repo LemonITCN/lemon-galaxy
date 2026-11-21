@@ -78,6 +78,7 @@ struct Inner {
     lan_active: AtomicBool,
     sessions: Mutex<HashMap<DeviceId, Weak<galaxy_client::session::PeerSession>>>,
     models: Mutex<Option<galaxy_proto::api::AiModelsResp>>,
+    server_version: Mutex<String>,
 }
 
 #[derive(uniffi::Object)]
@@ -111,7 +112,7 @@ impl Inner {
     }
 
     fn api(&self) -> Result<Api> {
-        self.api.lock().clone().ok_or_else(|| GalaxyError::Auth { code: "unauthorized".into(), message: "未登录".into() })
+        self.api.lock().clone().ok_or_else(|| GalaxyError::Auth { code: "unauthorized".into(), detail: "未登录".into() })
     }
 
     fn wrap_key(&self) -> [u8; 32] {
@@ -215,6 +216,14 @@ impl Inner {
             me.listener.on_devices_changed();
 
             let signal = SignalClient::start(server.clone(), me.identity.clone(), Some(saved.token.clone()), None);
+            if let Ok(api) = me.api() {
+                let me2 = me.clone();
+                rt().spawn(async move {
+                    if let Ok(info) = api.get::<galaxy_proto::api::ServerInfoResp>("/info").await {
+                        *me2.server_version.lock() = info.version;
+                    }
+                });
+            }
             let ms = match galaxy_net::MagicSock::bind(0) {
                 Ok(m) => m,
                 Err(e) => {
@@ -374,7 +383,7 @@ impl Inner {
                 return Ok(s);
             }
         }
-        let c = self.online.lock().as_ref().map(|o| o.connector.clone()).ok_or_else(|| GalaxyError::Network { message: "尚未连上服务器".into() })?;
+        let c = self.online.lock().as_ref().map(|o| o.connector.clone()).ok_or_else(|| GalaxyError::Network { detail: "尚未连上服务器".into() })?;
         let s = c.connect(d).await?;
         self.sessions.lock().insert(d, Arc::downgrade(&s));
         Ok(s)
@@ -419,6 +428,7 @@ impl GalaxyClient {
                 lan_active: AtomicBool::new(false),
                 sessions: Mutex::new(HashMap::new()),
                 models: Mutex::new(None),
+                server_version: Mutex::new(String::new()),
             }),
         })
     }
@@ -436,7 +446,7 @@ impl GalaxyClient {
     }
 
     pub fn server(&self) -> Option<ServerInfo> {
-        self.inner.saved.lock().as_ref().map(|s| ServerInfo { address: s.server.clone(), name: "LemonGalaxy".into(), version: String::new() })
+        self.inner.saved.lock().as_ref().map(|s| ServerInfo { address: s.server.clone(), name: "LemonGalaxy".into(), version: self.inner.server_version.lock().clone() })
     }
 
     /// 启动时用本机保存的会话恢复登录（不需要联网就能显示缓存的设备与主机）。
@@ -457,7 +467,7 @@ impl GalaxyClient {
     pub async fn login(&self, server: String, username: String, password: String, totp: Option<String>) -> Result<LoginResult> {
         let inner = self.inner.clone();
         run(async move {
-            let addr = ServerAddr::parse(&server).map_err(|e| GalaxyError::Auth { code: "bad_server".into(), message: e })?;
+            let addr = ServerAddr::parse(&server).map_err(|e| GalaxyError::Auth { code: "bad_server".into(), detail: e })?;
             let api = Api::new(addr, &crate::locale())?;
             match account::login(&api, &inner.identity, &inner.meta, &username, &password, totp.as_deref()).await? {
                 LoginOutcome::Done(l) => {
@@ -644,7 +654,7 @@ impl GalaxyClient {
         let inner = self.inner.clone();
         run(async move {
             let d = parse_dev(&device_id)?;
-            let c = inner.online.lock().as_ref().map(|o| o.connector.clone()).ok_or_else(|| GalaxyError::Network { message: "尚未连上服务器".into() })?;
+            let c = inner.online.lock().as_ref().map(|o| o.connector.clone()).ok_or_else(|| GalaxyError::Network { detail: "尚未连上服务器".into() })?;
             let s = c.connect(d).await?;
             inner.sessions.lock().insert(d, Arc::downgrade(&s));
             Ok(PeerSession::wrap(s, inner.device_name(&d)))
@@ -655,7 +665,7 @@ impl GalaxyClient {
     pub async fn connect_assist(&self, device_code: String, verification_code: String) -> Result<Arc<PeerSession>> {
         let inner = self.inner.clone();
         run(async move {
-            let c = inner.online.lock().as_ref().map(|o| o.connector.clone()).ok_or_else(|| GalaxyError::Network { message: "尚未连上服务器".into() })?;
+            let c = inner.online.lock().as_ref().map(|o| o.connector.clone()).ok_or_else(|| GalaxyError::Network { detail: "尚未连上服务器".into() })?;
             let s = c.connect_assist(&device_code, &verification_code).await?;
             let name = s.ack.host.hostname.clone();
             Ok(PeerSession::wrap(s, name))
@@ -689,12 +699,13 @@ impl GalaxyClient {
         ag::list_conversations(&self.inner.conv_key())
     }
 
-    /// 打开本机保存的对话（需要重新连接目标设备）。
-    pub async fn open_conversation(&self, id: String, config: ConversationConfig, listener: Arc<dyn AgentListener>) -> Result<Arc<AgentConversation>> {
+    /// 打开本机保存的对话（需要重新连接目标设备）。`config` 为空时用创建时保存的配置。
+    pub async fn open_conversation(&self, id: String, config: Option<ConversationConfig>, listener: Arc<dyn AgentListener>) -> Result<Arc<AgentConversation>> {
         let inner = self.inner.clone();
         run(async move {
             let path = ag::conv_dir().join(format!("{}.bin", id.chars().filter(|x| x.is_ascii_alphanumeric() || *x == '-').collect::<String>()));
-            let saved = ag::load_conv(&inner.conv_key(), &path).ok_or_else(|| GalaxyError::NotFound { message: "对话不存在".into() })?;
+            let saved = ag::load_conv(&inner.conv_key(), &path).ok_or_else(|| GalaxyError::NotFound { detail: "对话不存在".into() })?;
+            let config = config.or_else(|| saved.config.clone()).ok_or_else(|| GalaxyError::NotFound { detail: "这条对话没有保存配置，请重新选择模型和设备".into() })?;
             build_conversation(inner, config, listener, Some(saved)).await
         })
         .await
@@ -721,15 +732,15 @@ async fn build_conversation(inner: Arc<Inner>, c: ConversationConfig, listener: 
         None => api.get::<galaxy_proto::api::AiModelsResp>("/ai/models").await?,
     };
     if !models.enabled {
-        return Err(GalaxyError::Permission { message: "未开通 AI 功能".into() });
+        return Err(GalaxyError::Permission { detail: "未开通 AI 功能".into() });
     }
-    let m = models.items.iter().find(|m| m.provider_id == c.provider_id && m.id == c.model_id).cloned().ok_or_else(|| GalaxyError::Permission { message: "未开通该模型".into() })?;
+    let m = models.items.iter().find(|m| m.provider_id == c.provider_id && m.id == c.model_id).cloned().ok_or_else(|| GalaxyError::Permission { detail: "未开通该模型".into() })?;
     let exec = galaxy_client::ai::SessionExecutor::new();
     let mut names = vec![];
+    if c.targets.iter().any(|t| t.kind != AgentTargetKind::Device) {
+        return Err(other("AI 暂不支持 SSH 直连主机，请选择装了 LemonGalaxy 的设备"));
+    }
     for t in &c.targets {
-        if t.kind != AgentTargetKind::Device {
-            continue;
-        }
         let d = parse_dev(&t.id)?;
         let s = inner.session_for(d).await?;
         let name = inner.device_name(&d);
@@ -754,7 +765,7 @@ async fn build_conversation(inner: Arc<Inner>, c: ConversationConfig, listener: 
         trust_minutes: c.trust_minutes,
     };
     let title = c.title.clone().or_else(|| restore.as_ref().map(|r| r.title.clone())).unwrap_or_default();
-    let conv = AgentConversation::build(cfg, Arc::new(galaxy_client::ai::GatewayLlm { api }), exec, listener, inner.conv_key(), title, names);
+    let conv = AgentConversation::build(cfg, Arc::new(galaxy_client::ai::GatewayLlm { api }), exec, listener, inner.conv_key(), title, names, c.clone());
     if let Some(r) = restore {
         conv.agent.restore(r.messages);
     }

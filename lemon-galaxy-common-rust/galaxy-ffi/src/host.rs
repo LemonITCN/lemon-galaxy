@@ -49,8 +49,8 @@ impl hp::HostPlatform for PlatformBridge {
     fn set_bitrate(&self, display: u32, kbps: u32) {
         self.0.set_bitrate(display, kbps)
     }
-    fn inject(&self, ev: pp::InputEvent) {
-        self.0.inject(ev.into())
+    fn inject(&self, display: u32, ev: pp::InputEvent) {
+        self.0.inject(display, ev.into())
     }
     fn screenshot(&self, display: u32, max_w: u32, max_h: u32) -> Option<pp::ImageData> {
         self.0.screenshot(display, max_w, max_h).map(Into::into)
@@ -183,7 +183,7 @@ impl HostService {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
             let _ = code;
-            Err(crate::GalaxyError::Network { message: "连不上服务器，无法开启临时协助".into() })
+            Err(crate::GalaxyError::Network { detail: "连不上服务器，无法开启临时协助".into() })
         })
         .await
     }

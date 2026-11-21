@@ -104,7 +104,7 @@ private struct Runner {
                 if client.state() == .online { return true }
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
-            throw GalaxyError.Network(message: "20 秒内没有上线，当前状态 \(client.state())")
+            throw GalaxyError.Network(detail: "20 秒内没有上线，当前状态 \(client.state())")
         }
         if online == nil { failures += 1 }
 
@@ -155,7 +155,7 @@ private struct Runner {
                     if sink.text.contains("smoke-42") { return true }
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
-                throw GalaxyError.Other(message: "10 秒内没有收到命令输出")
+                throw GalaxyError.Other(detail: "10 秒内没有收到命令输出")
             }
             let lines = plain(sink.text).split(separator: "\n").suffix(6)
             for l in lines { log("  term| \(l)") }

@@ -52,10 +52,16 @@ impl Default for Settings {
     }
 }
 
-pub struct OnlineDevice {
+/// 一台设备的一条信令连接。同一设备最多两条：主控（带用户会话）与被控（设备身份）。
+pub struct WsConn {
     pub serial: u64,
-    pub kind: DeviceKind,
+    pub client: bool,
     pub tx: mpsc::UnboundedSender<WsMsg>,
+}
+
+pub struct OnlineDevice {
+    pub conns: Vec<WsConn>,
+    pub kind: DeviceKind,
     pub public_ip: IpAddr,
     pub accounts: Vec<u64>,
     pub assist_code: Option<String>,
@@ -75,9 +81,16 @@ impl Hub {
         self.serial.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// 发给某设备的所有信令连接（各连接只处理与自己相关的消息）。
     pub fn send(&self, id: &DeviceId, msg: WsMsg) -> bool {
         match self.devices.read().get(id) {
-            Some(d) => d.tx.send(msg).is_ok(),
+            Some(d) => {
+                let mut ok = false;
+                for c in &d.conns {
+                    ok |= c.tx.send(msg.clone()).is_ok();
+                }
+                ok
+            }
             None => false,
         }
     }
@@ -90,7 +103,9 @@ impl Hub {
     pub fn notify_user(&self, user_id: u64, msg: WsMsg) {
         for d in self.devices.read().values() {
             if d.accounts.contains(&user_id) {
-                let _ = d.tx.send(msg.clone());
+                for c in &d.conns {
+                    let _ = c.tx.send(msg.clone());
+                }
             }
         }
     }

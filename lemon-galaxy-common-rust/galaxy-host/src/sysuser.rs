@@ -9,6 +9,9 @@ pub struct SysUser {
     pub shell: String,
     /// 附加组（在父进程里算好，子进程只做系统调用）
     pub groups: Vec<u32>,
+    /// Windows：账号所在域（本机账号为计算机名）与 SID；其他系统为空
+    pub domain: String,
+    pub sid: String,
 }
 
 impl SysUser {
@@ -21,6 +24,12 @@ impl SysUser {
                 return Self::from_nix(u);
             }
         }
+        #[cfg(windows)]
+        {
+            if let Some(a) = crate::win::current_account() {
+                return Self::from_win(a);
+            }
+        }
         Self {
             name: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "user".into()),
             uid: 0,
@@ -28,7 +37,15 @@ impl SysUser {
             home: std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| "/".into()),
             shell: default_shell(),
             groups: vec![],
+            domain: String::new(),
+            sid: String::new(),
         }
+    }
+
+    #[cfg(windows)]
+    fn from_win(a: crate::win::Account) -> Self {
+        let home = crate::win::profile_dir(&a.sid).or_else(|| std::env::var("USERPROFILE").ok()).unwrap_or_else(|| "C:\\".into());
+        Self { name: a.name, uid: 0, gid: 0, home, shell: default_shell(), groups: vec![], domain: a.domain, sid: a.sid }
     }
 
     pub fn lookup(name: &str) -> Option<Self> {
@@ -39,7 +56,11 @@ impl SysUser {
             }
             None
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            crate::win::lookup_account(name).map(Self::from_win)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let c = Self::current();
             if c.name.eq_ignore_ascii_case(name) {
@@ -75,6 +96,8 @@ impl SysUser {
             home: u.dir.to_string_lossy().to_string(),
             shell: if shell.is_empty() || shell.ends_with("nologin") || shell.ends_with("false") { default_shell() } else { shell },
             groups,
+            domain: String::new(),
+            sid: String::new(),
         }
     }
 
@@ -84,17 +107,33 @@ impl SysUser {
         {
             nix::unistd::getuid().as_raw() != self.uid
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            crate::win::current_account().map(|c| c.sid != self.sid).unwrap_or(false)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             false
+        }
+    }
+
+    /// Windows：「域\用户名」；其他系统就是用户名。
+    pub fn display_name(&self) -> String {
+        if self.domain.is_empty() || self.domain.eq_ignore_ascii_case("NT AUTHORITY") {
+            self.name.clone()
+        } else {
+            format!("{}\\{}", self.domain, self.name)
         }
     }
 }
 
 pub fn default_shell() -> String {
-    if cfg!(windows) {
-        "powershell.exe".into()
-    } else if std::path::Path::new("/bin/bash").exists() {
+    #[cfg(windows)]
+    {
+        crate::win::powershell_exe()
+    }
+    #[cfg(not(windows))]
+    if std::path::Path::new("/bin/bash").exists() {
         "/bin/bash".into()
     } else if std::path::Path::new("/bin/zsh").exists() {
         "/bin/zsh".into()
@@ -103,12 +142,29 @@ pub fn default_shell() -> String {
     }
 }
 
+/// 有管理员权限（Linux/macOS 为 root；Windows 为已提升的管理员或 SYSTEM）。
+pub fn is_admin() -> bool {
+    #[cfg(windows)]
+    {
+        crate::win::is_elevated() || crate::win::is_system()
+    }
+    #[cfg(not(windows))]
+    {
+        is_root()
+    }
+}
+
+/// 以最高权限账号运行（Linux/macOS 为 root，Windows 为 SYSTEM），能替其他账号启动进程。
 pub fn is_root() -> bool {
     #[cfg(unix)]
     {
         nix::unistd::getuid().is_root()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        crate::win::is_system()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         false
     }

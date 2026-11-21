@@ -60,7 +60,8 @@ pub trait HostPlatform: Send + Sync {
     fn stop_capture(&self, display_id: u32);
     fn request_keyframe(&self, display_id: u32);
     fn set_bitrate(&self, display_id: u32, kbps: u32);
-    fn inject(&self, event: InputEvent);
+    /// 坐标是 `display_id` 这块屏幕的像素。
+    fn inject(&self, display_id: u32, event: InputEvent);
     fn screenshot(&self, display_id: u32, max_width: u32, max_height: u32) -> Option<ImageData>;
     fn ui_tree(&self, display_id: u32, max_nodes: u32) -> Option<String>;
     fn clipboard_get(&self) -> Option<ClipboardData>;

@@ -17,6 +17,12 @@ pub struct TermSession {
     inner: Mutex<TermInner>,
     #[cfg(unix)]
     master: Arc<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>,
+    #[cfg(windows)]
+    pty: Arc<crate::win::PtyProc>,
+    /// 以其他账号运行时的令牌，会话结束才释放（卸载用户配置）
+    #[cfg(windows)]
+    _token: Option<Arc<crate::win::UserToken>>,
+    #[allow(dead_code)]
     pid: i32,
 }
 
@@ -165,7 +171,66 @@ impl TermManager {
         Ok(s)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    pub fn spawn(self: &Arc<Self>, user: &SysUser, shell: Option<String>, cols: u16, rows: u16, env: &[(String, String)], account: u64) -> anyhow::Result<Arc<TermSession>> {
+        let token = if user.needs_switch() {
+            let acc = crate::win::Account { name: user.name.clone(), domain: user.domain.clone(), sid: user.sid.clone() };
+            Some(Arc::new(crate::win::token_for(&acc).map_err(|e| anyhow::anyhow!("无法以 {} 身份启动终端：{e}", user.display_name()))?))
+        } else {
+            None
+        };
+        let shell = shell.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| user.shell.clone());
+        let base = shell.rsplit(['/', '\\']).next().unwrap_or("").to_ascii_lowercase();
+        let cmdline = if base.starts_with("powershell") || base.starts_with("pwsh") {
+            format!("{} -NoLogo", crate::win::quote_arg(&shell))
+        } else {
+            crate::win::quote_arg(&shell)
+        };
+        let mut extra: Vec<(String, String)> = vec![("LEMON_GALAXY".into(), "1".into()), ("TERM".into(), "xterm-256color".into())];
+        for (k, v) in env {
+            if k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !k.eq_ignore_ascii_case("PATH") && !k.eq_ignore_ascii_case("PATHEXT") && !k.eq_ignore_ascii_case("COMSPEC") {
+                extra.push((k.clone(), v.clone()));
+            }
+        }
+        let (pty, rx) = crate::win::PtyProc::spawn(cmdline, Some(user.home.clone()), token.as_deref(), &extra, cols, rows)?;
+        let id: String = format!("{:08x}", rand::random::<u32>());
+        let title = format!("{}@{}", user.name, crate::hostname());
+        let pid = pty.child.pid as i32;
+        let s = Arc::new(TermSession {
+            id: id.clone(),
+            title,
+            account,
+            created_at: galaxy_proto::now_ms(),
+            inner: Mutex::new(TermInner { ring: VecDeque::with_capacity(RING), parser: vt100::Parser::new(rows.max(2), cols.max(10), 2000), sub: None, exited: None }),
+            pty: pty.clone(),
+            _token: token,
+            pid,
+        });
+        self.sessions.lock().insert(id.clone(), s.clone());
+        let s2 = s.clone();
+        let mgr = Arc::downgrade(self);
+        let rt = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            while let Ok(data) = rx.recv() {
+                rt.block_on(s2.on_output(&data));
+            }
+            let code = s2.pty.child.wait_blocking();
+            let sub = {
+                let mut i = s2.inner.lock();
+                i.exited = Some(code);
+                i.sub.take()
+            };
+            if let Some(tx) = sub {
+                let _ = rt.block_on(tx.send(TermEvent::Exited(code)));
+            }
+            if let Some(m) = mgr.upgrade() {
+                m.sessions.lock().remove(&s2.id);
+            }
+        });
+        Ok(s)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn spawn(self: &Arc<Self>, _user: &SysUser, _shell: Option<String>, _cols: u16, _rows: u16, _env: &[(String, String)], _account: u64) -> anyhow::Result<Arc<TermSession>> {
         anyhow::bail!("此平台的终端尚未实现")
     }
@@ -233,7 +298,13 @@ impl TermSession {
             }
             Ok(())
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let p = self.pty.clone();
+            let d = data.to_vec();
+            tokio::task::spawn_blocking(move || p.write(&d)).await.map_err(std::io::Error::other)?
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = data;
             Ok(())
@@ -249,6 +320,8 @@ impl TermSession {
                 libc::ioctl(self.master.get_ref().as_raw_fd(), libc::TIOCSWINSZ, &ws);
             }
         }
+        #[cfg(windows)]
+        self.pty.resize(cols, rows);
         self.inner.lock().parser.set_size(rows.max(2), cols.max(10));
     }
 
@@ -258,6 +331,8 @@ impl TermSession {
             libc::kill(-self.pid, libc::SIGHUP);
             libc::kill(-self.pid, libc::SIGKILL);
         }
+        #[cfg(windows)]
+        self.pty.kill();
     }
 
     pub fn exited(&self) -> Option<Option<i32>> {

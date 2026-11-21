@@ -17,6 +17,8 @@ pub(crate) struct SavedConversation {
     pub target_names: Vec<String>,
     pub updated_at: i64,
     pub messages: Vec<ga::AgentMessage>,
+    #[serde(default)]
+    pub config: Option<ConversationConfig>,
 }
 
 pub(crate) fn conv_dir() -> PathBuf {
@@ -66,8 +68,9 @@ pub struct AgentConversation {
 }
 
 impl AgentConversation {
-    pub(crate) fn build(cfg: ga::AgentConfig, llm: Arc<dyn ga::Llm>, exec: Arc<dyn ga::Executor>, listener: Arc<dyn AgentListener>, key: [u8; 32], title: String, target_names: Vec<String>) -> Arc<Self> {
-        let meta = Arc::new(Mutex::new(SavedConversation { id: cfg.conversation_id.clone(), title, model_id: cfg.model_id.clone(), target_names, updated_at: galaxy_proto::now_ms(), messages: vec![] }));
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build(cfg: ga::AgentConfig, llm: Arc<dyn ga::Llm>, exec: Arc<dyn ga::Executor>, listener: Arc<dyn AgentListener>, key: [u8; 32], title: String, target_names: Vec<String>, ui_config: ConversationConfig) -> Arc<Self> {
+        let meta = Arc::new(Mutex::new(SavedConversation { id: cfg.conversation_id.clone(), title, model_id: cfg.model_id.clone(), target_names, updated_at: galaxy_proto::now_ms(), messages: vec![], config: Some(ui_config) }));
         let holder: Arc<Mutex<Option<std::sync::Weak<ga::Agent>>>> = Arc::new(Mutex::new(None));
         let (m2, h2) = (meta.clone(), holder.clone());
         let on_change = Box::new(move || {
@@ -148,7 +151,7 @@ pub(crate) fn list_conversations(key: &[u8; 32]) -> Vec<ConversationSummary> {
     if let Ok(rd) = std::fs::read_dir(conv_dir()) {
         for e in rd.flatten() {
             if let Some(c) = load_conv(key, &e.path()) {
-                v.push(ConversationSummary { id: c.id, title: c.title, model_id: c.model_id, target_names: c.target_names, updated_at: c.updated_at });
+                v.push(ConversationSummary { id: c.id, title: c.title, model_id: c.model_id, target_names: c.target_names, updated_at: c.updated_at, config: c.config });
             }
         }
     }

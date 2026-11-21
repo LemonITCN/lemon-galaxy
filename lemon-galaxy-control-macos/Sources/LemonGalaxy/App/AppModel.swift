@@ -292,7 +292,7 @@ final class AppModel: ObservableObject {
         if let s = sshSessions[hostId], !s.closed { return s }
         // SSH 直连还不在 galaxy-ffi 里（见 Core/Bridge/Proposed.swift），模拟内核实现了
         guard let sshClient = client as? GalaxyClientSshProposed else {
-            throw GalaxyError.Other(message: L("ssh.unsupported"))
+            throw GalaxyError.Other(detail: L("ssh.unsupported"))
         }
         let prompt = SecretPromptBridge(model: self, title: sshLabel(hostId))
         let session = try await sshClient.connectSsh(hostId: hostId, secretPrompt: prompt)

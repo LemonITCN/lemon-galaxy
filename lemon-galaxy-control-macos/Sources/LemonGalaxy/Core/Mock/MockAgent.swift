@@ -45,7 +45,7 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
     func summary() -> ConversationSummary {
         lock.lock(); defer { lock.unlock() }
         return ConversationSummary(id: convId, title: titleText.isEmpty ? (zh ? "新对话" : "New conversation") : titleText,
-                                   modelId: config.modelId, targetNames: config.targets.map { client.targetName($0) }, updatedAt: updatedAt)
+                                   modelId: config.modelId, targetNames: config.targets.map { client.targetName($0) }, updatedAt: updatedAt, config: config)
     }
 
     private func emit(_ e: AgentEvent) {

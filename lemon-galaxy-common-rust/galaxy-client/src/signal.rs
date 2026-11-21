@@ -199,6 +199,9 @@ async fn session(
             "?assist=1&kind={}&platform={}&hostname={}&os_version={}&arch={}&app_version={}",
             enc(&a.kind), enc(&a.platform), enc(&a.hostname), enc(&a.os_version), enc(&a.arch), enc(&a.app_version)
         ));
+    } else if token.is_some() {
+        // 主控端连接：与同一设备上的被控服务各占一条，互不挤掉
+        url.push_str("?role=client");
     }
     let mut req = url.into_client_request()?;
     if let Some(t) = token {

@@ -9,6 +9,8 @@ pub mod serve;
 pub mod service;
 pub mod sysuser;
 pub mod term;
+#[cfg(windows)]
+pub mod win;
 
 pub use accounts::{AccountStatus, HostAccount, HostPolicy};
 pub use service::{HostConfig, HostEvents, HostService, HostStatus};

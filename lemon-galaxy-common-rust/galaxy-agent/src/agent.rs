@@ -74,7 +74,7 @@ pub trait Executor: Send + Sync {
     fn displays(&self, target: &str) -> BoxFut<'_, anyhow::Result<Vec<DisplayInfo>>>;
     fn screenshot(&self, target: &str, display: u32, max_w: u32, max_h: u32) -> BoxFut<'_, anyhow::Result<ImageData>>;
     fn ui_tree(&self, target: &str, display: u32, max_nodes: u32) -> BoxFut<'_, anyhow::Result<String>>;
-    fn inject(&self, target: &str, events: Vec<InputEvent>, origin: Origin) -> BoxFut<'_, anyhow::Result<()>>;
+    fn inject(&self, target: &str, display: u32, events: Vec<InputEvent>, origin: Origin) -> BoxFut<'_, anyhow::Result<()>>;
     fn terminal_open(&self, target: &str, origin: Origin) -> BoxFut<'_, anyhow::Result<String>>;
     fn terminal_send(&self, term: &str, data: Vec<u8>) -> BoxFut<'_, anyhow::Result<()>>;
     fn terminal_read(&self, term: &str) -> BoxFut<'_, anyhow::Result<String>>;
@@ -173,6 +173,8 @@ struct State {
     running: bool,
     terminals: HashMap<String, String>,
     last_shot: HashMap<String, (u32, u32, u32, u32, u32)>, // target -> (display, img_w, img_h, real_w, real_h)
+    /// 最近一次截图 / 读控件树的屏幕，鼠标键盘操作落在这块屏幕上
+    last_display: HashMap<String, u32>,
     prompt_tokens: u64,
     completion_tokens: u64,
 }
@@ -224,6 +226,7 @@ impl Agent {
                 running: false,
                 terminals: HashMap::new(),
                 last_shot: HashMap::new(),
+                last_display: HashMap::new(),
                 prompt_tokens: 0,
                 completion_tokens: 0,
             }),
@@ -972,6 +975,7 @@ impl Agent {
                 let displays = self.exec.displays(&t.id).await.unwrap_or_default();
                 let d = displays.iter().find(|x| x.id == display).or(displays.first()).cloned();
                 let img = self.exec.screenshot(&t.id, display, 1568, 1568).await?;
+                self.st.lock().last_display.insert(t.id.clone(), d.as_ref().map(|x| x.id).unwrap_or(display));
                 if let Some(d) = &d {
                     self.st.lock().last_shot.insert(t.id.clone(), (d.id, img.width, img.height, d.width, d.height));
                 }
@@ -980,6 +984,7 @@ impl Agent {
             "ui_tree" => {
                 let display = a["display"].as_u64().unwrap_or(0) as u32;
                 let tree = self.exec.ui_tree(&t.id, display, 400).await?;
+                self.st.lock().last_display.insert(t.id.clone(), display);
                 self.st.lock().last_shot.remove(&t.id);
                 Ok((tree, None, "已读取控件".into()))
             }
@@ -1015,7 +1020,8 @@ impl Agent {
                     "scroll" => evs.push(InputEvent::Wheel { dx: 0, dy: a["scroll_y"].as_i64().unwrap_or(3) as i32 * 40 }),
                     _ => anyhow::bail!("未知鼠标动作 {act}"),
                 }
-                self.exec.inject(&t.id, evs, origin).await?;
+                let disp = self.st.lock().last_display.get(&t.id).copied().unwrap_or(0);
+                self.exec.inject(&t.id, disp, evs, origin).await?;
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 Ok((format!("已执行鼠标 {act}。建议截图确认结果。"), None, "已执行".into()))
             }
@@ -1025,7 +1031,8 @@ impl Agent {
                 } else {
                     vec![InputEvent::Text { text: s("type") }]
                 };
-                self.exec.inject(&t.id, evs, origin).await?;
+                let disp = self.st.lock().last_display.get(&t.id).copied().unwrap_or(0);
+                self.exec.inject(&t.id, disp, evs, origin).await?;
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 Ok(("已执行键盘操作".into(), None, "已执行".into()))
             }
@@ -1047,7 +1054,8 @@ impl Agent {
                     if enter {
                         evs.extend(combo_events("enter").unwrap_or_default());
                     }
-                    self.exec.inject(&t.id, evs, origin).await?;
+                    let disp = self.st.lock().last_display.get(&t.id).copied().unwrap_or(0);
+                self.exec.inject(&t.id, disp, evs, origin).await?;
                 }
                 Ok(("用户已输入并发送（内容不对你可见）".into(), None, "已输入".into()))
             }

@@ -76,16 +76,23 @@ final class AIHubModel: ObservableObject {
         return tab
     }
 
-    /// 重新打开本机保存的对话。摘要里只有目标名称，按名称找回设备 id（见报告：建议内核在摘要里带目标 id）
+    /// 重新打开本机保存的对话：优先用创建时保存的配置；老记录没有配置时按目标名称找回设备 id
     func reopen(_ s: ConversationSummary) {
         guard let app else { return }
-        let model = models?.items.first { $0.id == s.modelId }
-            ?? AiModel(providerId: 0, providerName: "", id: s.modelId, name: s.modelId, vision: false, tools: true, contextLength: 0)
-        let targets: [AgentTarget] = s.targetNames.compactMap { name in
-            app.devices.first { $0.hostname == name || app.deviceName($0.id) == name }.map { AgentTarget(kind: .device, id: $0.id) }
-        }
-        let config = ConversationConfig(providerId: model.providerId, modelId: model.id, targets: targets, mode: app.settings.aiMode,
+        let saved = s.config
+        let model = models?.items.first { $0.id == (saved?.modelId ?? s.modelId) && (saved == nil || $0.providerId == saved!.providerId) }
+            ?? AiModel(providerId: saved?.providerId ?? 0, providerName: "", id: s.modelId, name: s.modelId, vision: false, tools: true, contextLength: 0)
+        let config: ConversationConfig
+        if let saved {
+            config = ConversationConfig(providerId: saved.providerId, modelId: saved.modelId, targets: saved.targets, mode: saved.mode,
+                                        planFirst: saved.planFirst, trustMinutes: saved.trustMinutes, title: s.title)
+        } else {
+            let targets: [AgentTarget] = s.targetNames.compactMap { name in
+                app.devices.first { $0.hostname == name || app.deviceName($0.id) == name }.map { AgentTarget(kind: .device, id: $0.id) }
+            }
+            config = ConversationConfig(providerId: model.providerId, modelId: model.id, targets: targets, mode: app.settings.aiMode,
                                         planFirst: false, trustMinutes: nil, title: s.title)
+        }
         let tab = AIConversationModel(app: app, config: config, model: model)
         tab.title = s.title
         tab.savedTargetNames = s.targetNames

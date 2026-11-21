@@ -28,6 +28,8 @@ pub struct WsQuery {
     os_version: Option<String>,
     arch: Option<String>,
     app_version: Option<String>,
+    /// client = 主控端（带用户会话）；缺省为被控端（设备身份）
+    role: Option<String>,
 }
 
 pub async fn ws_handler(State(st): State<St>, ctx: Ctx, Query(q): Query<WsQuery>, ws: WebSocketUpgrade) -> Response {
@@ -157,27 +159,56 @@ async fn run_ws(st: St, sock: WebSocket, ip: IpAddr, q: WsQuery) -> anyhow::Resu
         .await
         .unwrap_or_default();
 
+    let client_role = q.role.as_deref() == Some("client") && !assist;
     let assist_code = if assist { Some(alloc_assist_code(&st, device_id)) } else { None };
     let (tx, mut rx) = mpsc::unbounded_channel::<WsMsg>();
     let serial = st.hub.next_serial();
-    let old = st.hub.devices.write().insert(
-        device_id,
-        OnlineDevice {
-            serial,
-            kind,
-            tx: tx.clone(),
-            public_ip: ip,
-            accounts: accounts.clone(),
-            assist_code: assist_code.clone(),
-            hostname: hostname.clone(),
-            connected_at: now,
-        },
-    );
-    if let Some(old) = old {
+    let (replaced, came_online) = {
+        let mut devs = st.hub.devices.write();
+        let conn = crate::state::WsConn { serial, client: client_role, tx: tx.clone() };
+        match devs.get_mut(&device_id) {
+            Some(d) => {
+                // 同一角色只保留最新的一条
+                let old = d.conns.iter().position(|c| c.client == client_role).map(|i| d.conns.remove(i));
+                d.conns.push(conn);
+                d.kind = kind;
+                d.public_ip = ip;
+                d.accounts = accounts.clone();
+                d.hostname = hostname.clone();
+                if !client_role {
+                    if let Some(old_code) = d.assist_code.take() {
+                        if assist_code.as_ref() != Some(&old_code) {
+                            st.hub.assist_codes.write().remove(&old_code);
+                        }
+                    }
+                    d.assist_code = assist_code.clone();
+                }
+                (old, false)
+            }
+            None => {
+                devs.insert(
+                    device_id,
+                    OnlineDevice {
+                        conns: vec![conn],
+                        kind,
+                        public_ip: ip,
+                        accounts: accounts.clone(),
+                        assist_code: assist_code.clone(),
+                        hostname: hostname.clone(),
+                        connected_at: now,
+                    },
+                );
+                (None, true)
+            }
+        }
+    };
+    if let Some(old) = replaced {
         let _ = old.tx.send(WsMsg::Error { code: "replaced".into(), message: String::new() });
     }
-    for u in &accounts {
-        st.hub.notify_user(*u, WsMsg::Presence { device_id, online: true });
+    if came_online {
+        for u in &accounts {
+            st.hub.notify_user(*u, WsMsg::Presence { device_id, online: true });
+        }
     }
     let _ = tx.send(WsMsg::Ready { device_id, public_ip: ip.to_string(), udp_port: st.port, assist_code });
 
@@ -231,19 +262,29 @@ async fn run_ws(st: St, sock: WebSocket, ip: IpAddr, q: WsQuery) -> anyhow::Resu
         }
     }
 
-    // 下线
-    let removed = {
+    // 下线：去掉这条连接；设备没有连接了才算离线
+    let gone = {
         let mut devs = st.hub.devices.write();
-        match devs.get(&device_id) {
-            Some(d) if d.serial == serial => devs.remove(&device_id),
-            _ => None,
+        let mut gone = None;
+        let mut dropped_code = None;
+        if let Some(d) = devs.get_mut(&device_id) {
+            if let Some(i) = d.conns.iter().position(|c| c.serial == serial) {
+                d.conns.remove(i);
+                if !client_role {
+                    dropped_code = d.assist_code.take();
+                }
+            }
+            if d.conns.is_empty() {
+                gone = devs.remove(&device_id);
+            }
         }
-    };
-    writer.abort();
-    if let Some(d) = removed {
-        if let Some(code) = d.assist_code {
+        if let Some(code) = dropped_code {
             st.hub.assist_codes.write().remove(&code);
         }
+        gone
+    };
+    writer.abort();
+    if let Some(d) = gone {
         for u in &d.accounts {
             st.hub.notify_user(*u, WsMsg::Presence { device_id, online: false });
         }

@@ -20,7 +20,7 @@ final class MockHostService: HostService, @unchecked Sendable {
         let zh = client.zh
         let t = MockData.fixedNow
         func ev(_ m: Int64, _ kind: String, _ user: String, _ ai: Bool, _ zhMsg: String, _ enMsg: String) -> HostEvent {
-            HostEvent(at: t - m * 60_000, session: "hs-\(m)", user: user, kind: kind, detail: zh ? zhMsg : enMsg, ai: ai)
+            HostEvent(at: t - m * 60_000, session: "hs-\(m)", user: user, kind: kind, detail: zh ? zhMsg : enMsg, ai: ai, level: MockHostEvents.level(kind))
         }
         events = [
             ev(3, "connect", "alice", false, "从 OFFICE-PC-07 连接（局域网）", "Connected from OFFICE-PC-07 (LAN)"),
@@ -46,7 +46,7 @@ final class MockHostService: HostService, @unchecked Sendable {
     }
 
     private func log(_ kind: String, _ user: String, ai: Bool = false, _ detail: String) {
-        lock.locked { events.insert(HostEvent(at: MockData.now, session: "", user: user, kind: kind, detail: detail, ai: ai), at: 0) }
+        lock.locked { events.insert(HostEvent(at: MockData.now, session: "", user: user, kind: kind, detail: detail, ai: ai, level: MockHostEvents.level(kind)), at: 0) }
     }
 
     override func status() -> HostStatus {
@@ -160,5 +160,11 @@ final class MockHostService: HostService, @unchecked Sendable {
             queue.asyncAfter(deadline: .now() + 0.3) { l?.onAiActivity(sessionId: info.id, description: text) }
         }
         notify()
+    }
+}
+
+enum MockHostEvents {
+    static func level(_ kind: String) -> EventLevel {
+        ["reject", "ai_denied", "auth_failed"].contains(kind) ? .warning : .info
     }
 }

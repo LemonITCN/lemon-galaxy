@@ -25,7 +25,8 @@ pub trait HostPlatform: Send + Sync {
     fn stop_capture(&self, _display: u32) {}
     fn request_keyframe(&self, _display: u32) {}
     fn set_bitrate(&self, _display: u32, _kbps: u32) {}
-    fn inject(&self, _ev: InputEvent) {}
+    /// 注入输入；坐标是 `display` 这块屏幕的像素。
+    fn inject(&self, _display: u32, _ev: InputEvent) {}
     fn screenshot(&self, _display: u32, _max_width: u32, _max_height: u32) -> Option<ImageData> {
         None
     }

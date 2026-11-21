@@ -75,7 +75,7 @@ final class LocalHostModel: ObservableObject {
 
     /// 需要醒目标出的事件（被拒绝、认证失败等）
     static func isWarning(_ e: HostEvent) -> Bool {
-        ["reject", "ai_denied", "denied", "auth_failed", "error"].contains(e.kind) || e.kind.hasSuffix("_failed")
+        e.level == .warning
     }
 
     // MARK: 操作

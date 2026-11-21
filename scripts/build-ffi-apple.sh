@@ -35,8 +35,10 @@ lipo -create \
 
 # 生成绑定（用主机架构的动态库读取元数据）
 cargo build -p galaxy-ffi --features bindgen --bin uniffi-bindgen $CARGO_FLAG
-HOST_DYLIB="$ROOT/target/$PROFILE/libgalaxy_ffi.dylib"
-[ -f "$HOST_DYLIB" ] || cargo build -p galaxy-ffi --lib $CARGO_FLAG
+# 用刚编好的本机架构动态库（不能用 target/$PROFILE 下可能过期的那份）
+HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+HOST_DYLIB="$ROOT/target/$HOST_TRIPLE/$PROFILE/libgalaxy_ffi.dylib"
+[ -f "$HOST_DYLIB" ] || { echo "找不到 $HOST_DYLIB" >&2; exit 1; }
 "$ROOT/target/$PROFILE/uniffi-bindgen" generate --library "$HOST_DYLIB" --language swift --out-dir "$OUT/swift"
 cp "$OUT/swift/galaxy_ffiFFI.h" "$OUT/headers/"
 cp "$OUT/swift/galaxy_ffiFFI.modulemap" "$OUT/headers/module.modulemap"

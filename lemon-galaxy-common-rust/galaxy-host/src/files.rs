@@ -33,20 +33,99 @@ fn io_err(e: std::io::Error) -> FileMsg {
     err(code, msg)
 }
 
+/// 协议里的路径一律用「/」分隔。Windows 上写成 `/C:/Users/x`，`/` 本身是「此电脑」（列出各个盘）。
+/// 返回 None 表示 Windows 的根（盘符列表）。
+pub fn wire_to_native(p: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let p = p.trim();
+        if p.is_empty() || p == "/" || p == "\\" {
+            return None;
+        }
+        let t = p.strip_prefix("\\\\?\\").unwrap_or(p);
+        // UNC：//server/share 或 \\\\server\\share
+        if t.starts_with("//") || t.starts_with("\\\\") {
+            return Some(PathBuf::from(format!("\\\\{}", t[2..].replace('/', "\\"))));
+        }
+        let t = t.strip_prefix('/').filter(|r| r.as_bytes().get(1) == Some(&b':')).unwrap_or(t);
+        let b = t.as_bytes();
+        if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+            let rest = t[2..].replace('/', "\\");
+            let rest = rest.trim_start_matches('\\');
+            return Some(PathBuf::from(format!("{}:\\{rest}", (b[0] as char).to_ascii_uppercase())));
+        }
+        if let Some(r) = t.strip_prefix('/') {
+            // 不带盘符的绝对路径落在系统盘
+            let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+            return Some(PathBuf::from(format!("{drive}\\{}", r.replace('/', "\\"))));
+        }
+        Some(PathBuf::from(t.replace('/', "\\")))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(PathBuf::from(p))
+    }
+}
+
+/// 本机路径转成协议里的写法（见 [`wire_to_native`]）。
+pub fn native_to_wire(p: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let s = p.to_string_lossy();
+        let s = s.strip_prefix("\\\\?\\UNC\\").map(|r| format!("\\\\{r}")).unwrap_or_else(|| s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string());
+        if let Some(r) = s.strip_prefix("\\\\") {
+            return format!("//{}", r.replace('\\', "/"));
+        }
+        let b = s.as_bytes();
+        if b.len() >= 2 && b[1] == b':' {
+            let rest = s[2..].replace('\\', "/");
+            let rest = if rest.is_empty() { "/".to_string() } else { rest };
+            return format!("/{}:{rest}", (b[0] as char).to_ascii_uppercase());
+        }
+        s.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        p.to_string_lossy().to_string()
+    }
+}
+
 pub fn resolve(ctx: &FileCtx, p: &str) -> PathBuf {
     let p = p.trim();
     if p.is_empty() || p == "~" {
         return ctx.home.clone();
     }
     if let Some(rest) = p.strip_prefix("~/") {
-        return ctx.home.join(rest);
+        return ctx.home.join(rest.replace('/', std::path::MAIN_SEPARATOR_STR));
     }
-    let pb = PathBuf::from(p);
+    let Some(pb) = wire_to_native(p) else {
+        // Windows 的「此电脑」
+        return PathBuf::new();
+    };
     if pb.is_absolute() {
         pb
     } else {
         ctx.home.join(pb)
     }
+}
+
+/// Windows 根目录（盘符列表）。
+#[cfg(windows)]
+fn drive_entries() -> Vec<FileEntry> {
+    let mut v = vec![];
+    for c in b'A'..=b'Z' {
+        let root = format!("{}:\\", c as char);
+        if let Ok(md) = std::fs::metadata(&root) {
+            if md.is_dir() {
+                v.push(FileEntry { name: format!("{}:", c as char), path: format!("/{}:/", c as char), kind: FileKind::Dir, size: 0, mode: 0o755, modified_at: 0, owner: String::new(), group: String::new(), link_target: None });
+            }
+        }
+    }
+    v
+}
+
+fn is_root_listing(p: &Path) -> bool {
+    cfg!(windows) && p.as_os_str().is_empty()
 }
 
 #[cfg(unix)]
@@ -87,10 +166,13 @@ pub fn entry_of(path: &Path, name: Option<String>) -> std::io::Result<FileEntry>
         (lm.mode() & 0o7777, o, g)
     };
     #[cfg(not(unix))]
-    let (mode, owner, group) = (if md.permissions().readonly() { 0o444 } else { 0o644 }, String::new(), String::new());
+    let (mode, owner, group) = {
+        let base = if kind == FileKind::Dir { 0o755 } else { 0o644 };
+        (if md.permissions().readonly() { base & !0o222 } else { base }, String::new(), String::new())
+    };
     Ok(FileEntry {
-        name: name.unwrap_or_else(|| path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string_lossy().to_string())),
-        path: path.to_string_lossy().to_string(),
+        name: name.unwrap_or_else(|| path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| native_to_wire(path))),
+        path: native_to_wire(path),
         kind,
         size: if kind == FileKind::Dir { 0 } else { md.len() },
         mode,
@@ -141,15 +223,31 @@ fn copy_dir(from: &Path, to: &Path, depth: u32) -> std::io::Result<()> {
 /// 处理一次文件操作。`r` / `w` 是这次操作的流（Write 时从 r 读数据块）。
 pub async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(op: FileOp, r: &mut R, w: &mut W, ctx: &FileCtx) -> anyhow::Result<()> {
     let reply = match op {
-        FileOp::Home => FileMsg::Path(ctx.home.to_string_lossy().to_string()),
-        FileOp::Realpath { path } => match std::fs::canonicalize(resolve(ctx, &path)) {
-            Ok(p) => FileMsg::Path(p.to_string_lossy().to_string()),
-            Err(e) => io_err(e),
-        },
-        FileOp::Stat { path } => match entry_of(&resolve(ctx, &path), None) {
-            Ok(e) => FileMsg::Entry(e),
-            Err(e) => io_err(e),
-        },
+        FileOp::Home => FileMsg::Path(native_to_wire(&ctx.home)),
+        FileOp::Realpath { path } => {
+            let p = resolve(ctx, &path);
+            if is_root_listing(&p) {
+                FileMsg::Path("/".into())
+            } else {
+                match std::fs::canonicalize(p) {
+                    Ok(p) => FileMsg::Path(native_to_wire(&p)),
+                    Err(e) => io_err(e),
+                }
+            }
+        }
+        FileOp::Stat { path } => {
+            let p = resolve(ctx, &path);
+            if is_root_listing(&p) {
+                FileMsg::Entry(FileEntry { name: "/".into(), path: "/".into(), kind: FileKind::Dir, size: 0, mode: 0o755, modified_at: 0, owner: String::new(), group: String::new(), link_target: None })
+            } else {
+                match entry_of(&p, None) {
+                    Ok(e) => FileMsg::Entry(e),
+                    Err(e) => io_err(e),
+                }
+            }
+        }
+        #[cfg(windows)]
+        FileOp::List { path } if is_root_listing(&resolve(ctx, &path)) => FileMsg::Entries(drive_entries()),
         FileOp::List { path } => {
             let p = resolve(ctx, &path);
             match std::fs::read_dir(&p) {
@@ -214,8 +312,20 @@ pub async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(op: FileOp, r: &
             }
             #[cfg(not(unix))]
             {
-                let _ = (path, mode);
-                err("unsupported", "此平台不支持修改权限")
+                // Windows 只有「只读」属性：去掉所有写权限位即只读
+                let p = resolve(ctx, &path);
+                match std::fs::metadata(&p) {
+                    Ok(md) => {
+                        let mut perm = md.permissions();
+                        #[allow(clippy::permissions_set_readonly_false)]
+                        perm.set_readonly(mode & 0o222 == 0);
+                        match std::fs::set_permissions(&p, perm) {
+                            Ok(()) => FileMsg::Ok,
+                            Err(e) => io_err(e),
+                        }
+                    }
+                    Err(e) => io_err(e),
+                }
             }
         }
         FileOp::Search { root, pattern, content, max } => {
@@ -400,7 +510,45 @@ pub fn helper_main(args: &[String]) -> i32 {
     }
     #[cfg(not(unix))]
     {
-        let _ = args;
-        1
+        // Windows：父进程已经用目标账号的令牌启动本进程，不用再切换
+        let Some(home) = args.get(2) else { return 2 };
+        let backup = args.get(3).filter(|s| !s.is_empty()).map(PathBuf::from);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+        let Ok(rt) = rt else { return 4 };
+        rt.block_on(async move {
+            let mut stdin = tokio::io::stdin();
+            let mut stdout = tokio::io::stdout();
+            let ctx = FileCtx { home: PathBuf::from(home), backup_dir: backup };
+            let Ok(Some(op)) = fio::read::<_, FileOp>(&mut stdin).await else { return 5 };
+            match serve(op, &mut stdin, &mut stdout, &ctx).await {
+                Ok(()) => 0,
+                Err(_) => 6,
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths() {
+        assert_eq!(wire_to_native("/"), None);
+        assert_eq!(wire_to_native("/C:/Users/x").unwrap(), PathBuf::from("C:\\Users\\x"));
+        assert_eq!(wire_to_native("/c:").unwrap(), PathBuf::from("C:\\"));
+        assert_eq!(wire_to_native("D:\\a\\b").unwrap(), PathBuf::from("D:\\a\\b"));
+        assert_eq!(native_to_wire(Path::new("C:\\Users\\x")), "/C:/Users/x");
+        assert_eq!(native_to_wire(Path::new("\\\\?\\C:\\Windows")), "/C:/Windows");
+        assert_eq!(native_to_wire(Path::new("C:\\")), "/C:/");
+        assert_eq!(native_to_wire(Path::new("\\\\srv\\share\\a")), "//srv/share/a");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_paths_unchanged() {
+        assert_eq!(wire_to_native("/etc/hosts").unwrap(), PathBuf::from("/etc/hosts"));
+        assert_eq!(native_to_wire(Path::new("/tmp/a b")), "/tmp/a b");
     }
 }

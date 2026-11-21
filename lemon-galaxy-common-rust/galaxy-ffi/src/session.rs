@@ -324,7 +324,7 @@ impl FileClient {
         let s = self.s.clone();
         run(async move {
             let b = s.fs_read_all(&path, if max_bytes == 0 { 8 << 20 } else { max_bytes }).await?;
-            String::from_utf8(b).map_err(|_| GalaxyError::Other { message: "不是 UTF-8 文本文件".into() })
+            String::from_utf8(b).map_err(|_| GalaxyError::Other { detail: "不是 UTF-8 文本文件".into() })
         })
         .await
     }

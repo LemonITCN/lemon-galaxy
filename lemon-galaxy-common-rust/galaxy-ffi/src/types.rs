@@ -65,7 +65,7 @@ impl From<DeviceKind> for p::DeviceKind {
     }
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AiMode {
     Off,
     ReadOnly,
@@ -665,19 +665,19 @@ pub struct AiModels {
     pub items: Vec<AiModel>,
 }
 
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentTargetKind {
     Device,
     SshHost,
 }
 
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentTarget {
     pub kind: AgentTargetKind,
     pub id: String,
 }
 
-#[derive(uniffi::Record, Clone, Debug)]
+#[derive(uniffi::Record, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConversationConfig {
     pub provider_id: u64,
     pub model_id: String,
@@ -696,6 +696,8 @@ pub struct ConversationSummary {
     pub model_id: String,
     pub target_names: Vec<String>,
     pub updated_at: i64,
+    /// 创建时的配置（模型、目标、档位）；老记录没有
+    pub config: Option<ConversationConfig>,
 }
 
 #[derive(uniffi::Enum, Clone, Debug, PartialEq)]
@@ -938,14 +940,24 @@ pub struct HostEvent {
     pub at: i64,
     pub session: String,
     pub user: String,
+    /// connect / disconnect / terminal / file / exec / display / forward / ai / reject / ai_denied
     pub kind: String,
     pub detail: String,
     pub ai: bool,
+    pub level: EventLevel,
+}
+
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventLevel {
+    Info,
+    /// 被拒绝的连接、被拦下的 AI 操作等，界面应醒目标出
+    Warning,
 }
 
 impl From<galaxy_host::service::HostLogEvent> for HostEvent {
     fn from(x: galaxy_host::service::HostLogEvent) -> Self {
-        Self { at: x.at, session: x.session, user: x.user, kind: x.kind, detail: x.detail, ai: x.ai }
+        let level = if matches!(x.kind.as_str(), "reject" | "ai_denied" | "auth_failed") { EventLevel::Warning } else { EventLevel::Info };
+        Self { at: x.at, session: x.session, user: x.user, kind: x.kind, detail: x.detail, ai: x.ai, level }
     }
 }
 

@@ -143,9 +143,9 @@ impl Executor for SessionExecutor {
         })
     }
 
-    fn inject(&self, target: &str, events: Vec<InputEvent>, origin: Origin) -> BoxFut<'_, anyhow::Result<()>> {
+    fn inject(&self, target: &str, display: u32, events: Vec<InputEvent>, origin: Origin) -> BoxFut<'_, anyhow::Result<()>> {
         let target = target.to_string();
-        Box::pin(async move { self.sess(&target)?.mgmt(MgmtReq::Inject { events, origin }).await.map(|_| ()).map_err(e) })
+        Box::pin(async move { self.sess(&target)?.mgmt(MgmtReq::Inject { display, events, origin }).await.map(|_| ()).map_err(e) })
     }
 
     fn terminal_open(&self, target: &str, origin: Origin) -> BoxFut<'_, anyhow::Result<String>> {

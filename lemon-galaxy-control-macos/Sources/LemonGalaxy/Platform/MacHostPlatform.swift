@@ -81,8 +81,10 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
 
     // MARK: 输入
 
-    func inject(event: InputEvent) {
-        let display = lock.locked { lastDisplay }
+    func inject(displayId: UInt32, event: InputEvent) {
+        // 0 或已经不存在的屏幕：落在最近一次画面所在的屏幕
+        let online = displayId != 0 && CGDisplayIsOnline(displayId) != 0
+        let display = online ? displayId : lock.locked { lastDisplay }
         injector.inject(event, display: display)
     }
 

@@ -59,52 +59,61 @@ pub(crate) fn locale() -> String {
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum GalaxyError {
-    #[error("{message}")]
-    Network { message: String },
-    #[error("{message}")]
-    Auth { code: String, message: String },
-    #[error("{message}")]
-    Permission { message: String },
-    #[error("{message}")]
-    NotFound { message: String },
-    #[error("{message}")]
-    Protocol { message: String },
+    #[error("{detail}")]
+    Network { detail: String },
+    #[error("{detail}")]
+    Auth { code: String, detail: String },
+    #[error("{detail}")]
+    Permission { detail: String },
+    #[error("{detail}")]
+    NotFound { detail: String },
+    #[error("{detail}")]
+    Protocol { detail: String },
     #[error("已取消")]
     Cancelled,
-    #[error("{message}")]
-    Other { message: String },
+    #[error("{detail}")]
+    Other { detail: String },
 }
 
 impl From<galaxy_client::ClientError> for GalaxyError {
     fn from(e: galaxy_client::ClientError) -> Self {
         use galaxy_client::ClientError as C;
         match e {
-            C::Network(m) => Self::Network { message: m },
-            C::Auth { code, message } => Self::Auth { code, message },
-            C::Permission(m) => Self::Permission { message: m },
-            C::NotFound(m) => Self::NotFound { message: m },
-            C::Protocol(m) => Self::Protocol { message: m },
+            C::Network(m) => Self::Network { detail: m },
+            C::Auth { code, message } => Self::Auth { code, detail: message },
+            C::Permission(m) => Self::Permission { detail: m },
+            C::NotFound(m) => Self::NotFound { detail: m },
+            C::Protocol(m) => Self::Protocol { detail: m },
             C::Cancelled => Self::Cancelled,
-            C::Other(m) => Self::Other { message: m },
+            C::Other(m) => Self::Other { detail: m },
         }
     }
 }
 
 impl From<anyhow::Error> for GalaxyError {
     fn from(e: anyhow::Error) -> Self {
-        Self::Other { message: e.to_string() }
+        Self::Other { detail: e.to_string() }
     }
 }
 
 pub type Result<T> = std::result::Result<T, GalaxyError>;
 
 pub(crate) fn other(m: impl Into<String>) -> GalaxyError {
-    GalaxyError::Other { message: m.into() }
+    GalaxyError::Other { detail: m.into() }
 }
 
 #[uniffi::export]
 pub fn core_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// 内核日志文件（界面「导出日志」用）。安卓上日志在 logcat，返回空字符串。
+#[uniffi::export]
+pub fn core_log_path() -> String {
+    if cfg!(target_os = "android") {
+        return String::new();
+    }
+    CONFIG.read().as_ref().map(|c| std::path::PathBuf::from(&c.data_dir).join("logs").join("core.log").to_string_lossy().to_string()).unwrap_or_default()
 }
 
 /// 每个进程调用一次。
@@ -121,10 +130,22 @@ pub fn core_init(config: CoreConfig) {
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::try_new(format!("{level},quinn=warn,rustls=warn,hyper=warn,h2=warn,tungstenite=warn")).unwrap_or_else(|_| "info".into()))
-            .with_writer(std::io::stderr)
-            .try_init();
+        // 写到数据目录下的 logs/core.log（超过 8 MB 时转存为 core.log.1），不带颜色
+        let dir = std::path::PathBuf::from(&CONFIG.read().as_ref().map(|c| c.data_dir.clone()).unwrap_or_default()).join("logs");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("core.log");
+        if std::fs::metadata(&path).map(|m| m.len() > 8 * 1024 * 1024).unwrap_or(false) {
+            let _ = std::fs::rename(&path, dir.join("core.log.1"));
+        }
+        let filter = tracing_subscriber::EnvFilter::try_new(format!("{level},quinn=warn,rustls=warn,hyper=warn,h2=warn,tungstenite=warn,reqwest=warn")).unwrap_or_else(|_| "info".into());
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(f) => {
+                let _ = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::sync::Mutex::new(f)).try_init();
+            }
+            Err(_) => {
+                let _ = tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::io::stderr).try_init();
+            }
+        }
     }
     let _ = rt();
 }

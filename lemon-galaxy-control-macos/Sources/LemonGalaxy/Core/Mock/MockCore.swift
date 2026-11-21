@@ -63,16 +63,16 @@ final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked 
     override func login(server: String, username: String, password: String, totp: String?) async throws -> LoginResult {
         await delay(450)
         guard MockData.isValidServer(server) else {
-            throw GalaxyError.Network(message: zh ? "无法连接服务器：地址格式不对" : "Cannot reach the server: invalid address")
+            throw GalaxyError.Network(detail: zh ? "无法连接服务器：地址格式不对" : "Cannot reach the server: invalid address")
         }
         if password == "wrong" {
-            throw GalaxyError.Auth(code: "invalid_credentials", message: zh ? "用户名或密码错误" : "Incorrect username or password")
+            throw GalaxyError.Auth(code: "invalid_credentials", detail: zh ? "用户名或密码错误" : "Incorrect username or password")
         }
         if username.lowercased().contains("totp") && (totp ?? "").isEmpty {
             return .needTotp
         }
         if let t = totp, !t.isEmpty, t.count != 6 || !t.allSatisfy(\.isNumber) {
-            throw GalaxyError.Auth(code: "totp_invalid", message: zh ? "验证码不正确" : "Incorrect verification code")
+            throw GalaxyError.Auth(code: "totp_invalid", detail: zh ? "验证码不正确" : "Incorrect verification code")
         }
         if username.lowercased().contains("new") {
             lock.locked { pendingLogin = (server, username, true) }
@@ -97,20 +97,20 @@ final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked 
     override func completeFirstLogin(newPassword: String) async throws {
         await delay(400)
         guard newPassword.count >= 8 else {
-            throw GalaxyError.Auth(code: "weak_password", message: zh ? "新密码至少 8 位" : "The new password must be at least 8 characters")
+            throw GalaxyError.Auth(code: "weak_password", detail: zh ? "新密码至少 8 位" : "The new password must be at least 8 characters")
         }
         let p = lock.locked { pendingLogin }
-        guard let p else { throw GalaxyError.Other(message: zh ? "请先登录" : "Please sign in first") }
+        guard let p else { throw GalaxyError.Other(detail: zh ? "请先登录" : "Please sign in first") }
         finishLogin(server: p.server, username: p.username)
     }
 
     override func changePassword(oldPassword: String, newPassword: String, totp: String?) async throws {
         await delay(400)
         if oldPassword == "wrong" {
-            throw GalaxyError.Auth(code: "invalid_credentials", message: zh ? "原密码不正确" : "The current password is incorrect")
+            throw GalaxyError.Auth(code: "invalid_credentials", detail: zh ? "原密码不正确" : "The current password is incorrect")
         }
         guard newPassword.count >= 8 else {
-            throw GalaxyError.Auth(code: "weak_password", message: zh ? "新密码至少 8 位" : "The new password must be at least 8 characters")
+            throw GalaxyError.Auth(code: "weak_password", detail: zh ? "新密码至少 8 位" : "The new password must be at least 8 characters")
         }
     }
 
@@ -188,13 +188,13 @@ final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked 
     override func connect(deviceId: String) async throws -> PeerSession {
         await delay(600)
         guard let d = device(deviceId) else {
-            throw GalaxyError.NotFound(message: zh ? "设备不存在" : "Device not found")
+            throw GalaxyError.NotFound(detail: zh ? "设备不存在" : "Device not found")
         }
         guard d.online || d.lanSeen else {
-            throw GalaxyError.Network(message: zh ? "设备离线" : "The device is offline")
+            throw GalaxyError.Network(detail: zh ? "设备离线" : "The device is offline")
         }
         guard d.kind != .mobile else {
-            throw GalaxyError.Permission(message: zh ? "手机端不能被控制" : "Mobile devices cannot be controlled")
+            throw GalaxyError.Permission(detail: zh ? "手机端不能被控制" : "Mobile devices cannot be controlled")
         }
         return MockPeerSession(client: self, device: d)
     }
@@ -203,10 +203,10 @@ final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked 
         await delay(900)
         let digits = deviceCode.filter(\.isNumber)
         guard digits.count == 9 else {
-            throw GalaxyError.NotFound(message: zh ? "设备码不存在" : "Unknown device code")
+            throw GalaxyError.NotFound(detail: zh ? "设备码不存在" : "Unknown device code")
         }
         guard verificationCode.count >= 6 else {
-            throw GalaxyError.Auth(code: "invalid_credentials", message: zh ? "验证码不正确" : "Incorrect verification code")
+            throw GalaxyError.Auth(code: "invalid_credentials", detail: zh ? "验证码不正确" : "Incorrect verification code")
         }
         let d = DeviceInfo(id: "assist-" + digits, kind: .worker, platform: .windows, hostname: "DESKTOP-7Q2K9LM",
                            osVersion: "Windows 11 23H2", arch: "x86_64", appVersion: "0.1.0", online: true, lanSeen: false,
@@ -217,7 +217,7 @@ final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked 
     func connectSsh(hostId: String, secretPrompt: SecretPrompt) async throws -> SshSessionProposed {
         await delay(500)
         guard let e = vault().first(where: { $0.id == hostId }), case let .sshHost(label, host, port, username, auth, _, _, _, _, _, _) = e.data else {
-            throw GalaxyError.NotFound(message: zh ? "主机不存在" : "Host not found")
+            throw GalaxyError.NotFound(detail: zh ? "主机不存在" : "Host not found")
         }
         if case .password(let pw) = auth, pw == nil || pw!.isEmpty {
             // 没保存密码：通过 SecretPrompt 问用户（界面弹安全输入框）
@@ -265,14 +265,14 @@ final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked 
     override func totpVerify(code: String) async throws {
         await delay(200)
         guard code.count == 6, code.allSatisfy(\.isNumber) else {
-            throw GalaxyError.Auth(code: "totp_invalid", message: zh ? "验证码不正确" : "Incorrect verification code")
+            throw GalaxyError.Auth(code: "totp_invalid", detail: zh ? "验证码不正确" : "Incorrect verification code")
         }
         lock.locked { _totpEnabled = true; _user?.totpEnabled = true }
     }
     override func totpDisable(code: String) async throws {
         await delay(200)
         guard code.count == 6 else {
-            throw GalaxyError.Auth(code: "totp_invalid", message: zh ? "验证码不正确" : "Incorrect verification code")
+            throw GalaxyError.Auth(code: "totp_invalid", detail: zh ? "验证码不正确" : "Incorrect verification code")
         }
         lock.locked { _totpEnabled = false; _user?.totpEnabled = false }
     }
@@ -280,10 +280,10 @@ final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked 
         let all = lock.locked { Array(savedConversations.values) }
         return all.map { $0.summary() }.sorted { $0.updatedAt > $1.updatedAt }
     }
-    override func openConversation(id: String, config: ConversationConfig, listener: AgentListener) async throws -> AgentConversation {
+    override func openConversation(id: String, config: ConversationConfig?, listener: AgentListener) async throws -> AgentConversation {
         await delay(150)
         let c = lock.locked { savedConversations[id] }
-        guard let c else { throw GalaxyError.NotFound(message: zh ? "对话不存在" : "Conversation not found") }
+        guard let c else { throw GalaxyError.NotFound(detail: zh ? "对话不存在" : "Conversation not found") }
         c.listener = listener
         return c
     }
@@ -388,7 +388,7 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
     override func openTerminal(options: TerminalOptions, sink: TerminalSink) async throws -> TerminalChannel {
         await client.delay(250)
         guard MockData.permissions(for: device).terminal else {
-            throw GalaxyError.Permission(message: client.zh ? "对方没有给你终端权限" : "The remote owner has not granted terminal access")
+            throw GalaxyError.Permission(detail: client.zh ? "对方没有给你终端权限" : "The remote owner has not granted terminal access")
         }
         return MockTerminalChannel(client: client, device: device, options: options, sink: sink)
     }
@@ -419,7 +419,7 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
     override func openDisplay(options: DisplayOptions, sink: VideoSink) async throws -> DisplayChannel {
         await client.delay(350)
         guard MockData.permissions(for: device).view else {
-            throw GalaxyError.Permission(message: client.zh ? "对方没有给你查看画面的权限" : "The remote owner has not granted screen access")
+            throw GalaxyError.Permission(detail: client.zh ? "对方没有给你查看画面的权限" : "The remote owner has not granted screen access")
         }
         let display = MockData.displays(for: device).first { $0.id == options.displayId } ?? MockData.displays(for: device)[0]
         return MockDisplayChannel(device: device, display: display, options: options, sink: sink, zh: client.zh)

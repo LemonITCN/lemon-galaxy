@@ -311,7 +311,7 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
             });
             while let Ok(Some(m)) = fio::read::<_, DisplayIn>(&mut recv).await {
                 match m {
-                    DisplayIn::Input(ev) if can_control => platform.inject(ev),
+                    DisplayIn::Input(ev) if can_control => platform.inject(req.display_id, ev),
                     DisplayIn::Input(_) => {}
                     DisplayIn::RequestKeyframe => platform.request_keyframe(req.display_id),
                     DisplayIn::SetBitrate(k) => platform.set_bitrate(req.display_id, k.clamp(200, 200_000)),
@@ -389,7 +389,7 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             }
         }
         MgmtReq::HostStatus => MgmtResp::Text(serde_json::to_string(&host.status()).unwrap_or_default()),
-        MgmtReq::Inject { events, origin } => {
+        MgmtReq::Inject { display, events, origin } => {
             if !p.control {
                 return MgmtResp::Error(denied("没有控制键鼠的权限"));
             }
@@ -400,7 +400,7 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             let n = events.len();
             tokio::task::spawn_blocking(move || {
                 for ev in events {
-                    platform.inject(ev);
+                    platform.inject(display, ev);
                     std::thread::sleep(std::time::Duration::from_millis(8));
                 }
             })
@@ -437,16 +437,27 @@ async fn wake_on_lan(mac: &str) -> Result<(), String> {
 
 async fn run_helper(exe: &std::path::Path, sess: &ActiveSession, op: FileOp, recv: &mut quinn::RecvStream, send: &mut quinn::SendStream) -> anyhow::Result<()> {
     let u = &sess.user;
-    let backup = format!("{}/.lemon-galaxy/ai-backup", u.home);
-    let mut child = tokio::process::Command::new(exe)
-        .args(["__lg-file-helper", &u.uid.to_string(), &u.gid.to_string(), &u.home, &backup])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
+    let backup = std::path::Path::new(&u.home).join(".lemon-galaxy").join("ai-backup").to_string_lossy().to_string();
+    #[cfg(not(windows))]
+    let (mut stdin, mut stdout, mut child) = {
+        let mut child = tokio::process::Command::new(exe)
+            .args(["__lg-file-helper", &u.uid.to_string(), &u.gid.to_string(), &u.home, &backup])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        (child.stdin.take().unwrap(), child.stdout.take().unwrap(), child)
+    };
+    #[cfg(windows)]
+    let (mut stdin, mut stdout, child, _token) = {
+        let acc = crate::win::Account { name: u.name.clone(), domain: u.domain.clone(), sid: u.sid.clone() };
+        let token = crate::win::token_for(&acc)?;
+        let exe_s = exe.to_string_lossy().to_string();
+        let cmd = crate::win::cmdline(&exe_s, &["__lg-file-helper", "0", "0", &u.home, &backup]);
+        let (child, i, o, _e) = crate::win::spawn_piped(cmd, Some(u.home.clone()), Some(&token), &[])?;
+        (i, o, child, token)
+    };
     let is_write = matches!(op, FileOp::Write { .. });
     fio::write(&mut stdin, &op).await?;
     let up = async {
@@ -459,7 +470,14 @@ async fn run_helper(exe: &std::path::Path, sess: &ActiveSession, op: FileOp, rec
         let _ = tokio::io::copy(&mut stdout, send).await;
     };
     tokio::join!(up, down);
+    #[cfg(not(windows))]
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    #[cfg(windows)]
+    {
+        if tokio::time::timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+            child.kill();
+        }
+    }
     Ok(())
 }
 
