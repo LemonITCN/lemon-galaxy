@@ -51,6 +51,14 @@ while i < len(lines):
         types.append("\n".join(lines[i:end + 1]))
         i = end + 1
         continue
+    # uniffi 0.32 把错误枚举写成两行：「public 」换行「enum GalaxyError: Swift.Error ...」
+    if line.strip() == "public" and i + 1 < len(lines):
+        m = re.match(r"enum (\w+)\b", lines[i + 1])
+        if m and m.group(1) in converters:
+            end = block_at(i + 1)
+            types.append("public " + "\n".join(lines[i + 1:end + 1]))
+            i = end + 1
+            continue
     m = re.match(r"extension (\w+): (Equatable, Hashable|Foundation\.LocalizedError) \{", line)
     if m and m.group(1) in converters:
         end = block_at(i)

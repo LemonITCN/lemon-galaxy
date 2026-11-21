@@ -72,6 +72,7 @@ import cn.lemonit.galaxy.ui.files.FileMenuContent
 import cn.lemonit.galaxy.ui.files.SortKey
 import cn.lemonit.galaxy.ui.hosts.EntryEditorScreen
 import cn.lemonit.galaxy.ui.hosts.reachable
+import cn.lemonit.galaxy.ui.hosts.sshViaText
 import cn.lemonit.galaxy.ui.remote.RemoteActions
 import cn.lemonit.galaxy.ui.remote.RemoteDesktopController
 import cn.lemonit.galaxy.ui.remote.RemoteDesktopScreen
@@ -125,10 +126,12 @@ fun TerminalRoute(container: AppContainer, nav: Navigator, showBack: Boolean) {
     var remote by remember { mutableStateOf<List<TerminalSessionInfo>?>(null) }
 
     // 每个标签的状态与标题
+    val liveVia by container.connections.sshVia.collectAsState()
     val uis = tabs.map { t ->
         val status by t.status.collectAsState()
         val title by t.title.collectAsState()
-        TerminalTabUi(t.id, title, t.targetName, status, t.session, t.target is TargetRef.Ssh)
+        val via = (t.target as? TargetRef.Ssh)?.let { tg -> (data.entry(tg.hostId)?.data as? VaultData.SshHost)?.let { sshViaText(data, it, liveVia[tg.hostId]) } }
+        TerminalTabUi(t.id, title, t.targetName, status, t.session, t.target is TargetRef.Ssh, via)
     }
     LaunchedEffect(tabs.isEmpty()) { if (tabs.isEmpty()) nav.pop() }
     val active = tabs.firstOrNull { it.id == activeId } ?: tabs.firstOrNull() ?: return
@@ -585,9 +588,8 @@ fun NewConversationRoute(target: TargetRef?, container: AppContainer, nav: Navig
     val models by container.agents.models.collectAsState()
     val modelsError by container.agents.modelsError.collectAsState()
     val prefs = container.settings.prefs.value
-    // 真内核的 AI 目前只支持设备目标；SSH 主机要等内核支持 SSH 直连
-    val ssh = container.connections.sshSupported
-    val targets = HostTree.items(data).filter { (it is HostItem.Device && it.reachable()) || (ssh && it is HostItem.Ssh) }
+    // SSH 主机作为 AI 目标时内核用加密库里保存的凭据与已确认的主机密钥连接（对话里不能弹窗问密码）
+    val targets = HostTree.items(data).filter { (it is HostItem.Device && it.reachable()) || it is HostItem.Ssh }
     val initialKey = when (target) {
         is TargetRef.Device -> "device:${target.deviceId}"
         is TargetRef.Ssh -> "ssh:${target.hostId}"

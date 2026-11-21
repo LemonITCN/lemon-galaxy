@@ -726,6 +726,62 @@ public struct Permissions: Equatable, Hashable {
 extension Permissions: Sendable {}
 #endif
 
+public struct RdpTarget: Equatable, Hashable {
+    public var label: String
+    /**
+     * 远程桌面客户端要连的地址与端口
+     */
+    public var host: String
+    public var port: UInt16
+    public var username: String
+    public var domain: String?
+    /**
+     * 加密库里保存的密码（界面决定是否交给系统客户端，如 Windows 的 cmdkey）
+     */
+    public var password: String?
+    /**
+     * 经设备转发时为真；用完调 close_rdp 关掉转发
+     */
+    public var forwarded: Bool
+    /**
+     * 用于 close_rdp
+     */
+    public var forwardId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(label: String, 
+        /**
+         * 远程桌面客户端要连的地址与端口
+         */host: String, port: UInt16, username: String, domain: String?, 
+        /**
+         * 加密库里保存的密码（界面决定是否交给系统客户端，如 Windows 的 cmdkey）
+         */password: String?, 
+        /**
+         * 经设备转发时为真；用完调 close_rdp 关掉转发
+         */forwarded: Bool, 
+        /**
+         * 用于 close_rdp
+         */forwardId: String) {
+        self.label = label
+        self.host = host
+        self.port = port
+        self.username = username
+        self.domain = domain
+        self.password = password
+        self.forwarded = forwarded
+        self.forwardId = forwardId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RdpTarget: Sendable {}
+#endif
+
 public struct ServerInfo: Equatable, Hashable {
     public var address: String
     public var name: String
@@ -746,6 +802,182 @@ public struct ServerInfo: Equatable, Hashable {
 
 #if compiler(>=6)
 extension ServerInfo: Sendable {}
+#endif
+
+public struct SshInfo: Equatable, Hashable {
+    /**
+     * 加密库条目 id
+     */
+    public var hostId: String
+    public var label: String
+    public var host: String
+    public var port: UInt16
+    public var username: String
+    /**
+     * 怎么连过去的：direct / device:<设备名> / ssh:<跳转主机名>
+     */
+    public var via: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 加密库条目 id
+         */hostId: String, label: String, host: String, port: UInt16, username: String, 
+        /**
+         * 怎么连过去的：direct / device:<设备名> / ssh:<跳转主机名>
+         */via: String) {
+        self.hostId = hostId
+        self.label = label
+        self.host = host
+        self.port = port
+        self.username = username
+        self.via = via
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SshInfo: Sendable {}
+#endif
+
+public struct TermLine: Equatable, Hashable {
+    public var spans: [TermSpan]
+    /**
+     * 这一行是上一行自动折行过来的（复制时不加换行）
+     */
+    public var wrapped: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(spans: [TermSpan], 
+        /**
+         * 这一行是上一行自动折行过来的（复制时不加换行）
+         */wrapped: Bool) {
+        self.spans = spans
+        self.wrapped = wrapped
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TermLine: Sendable {}
+#endif
+
+public struct TermScreenState: Equatable, Hashable {
+    public var rows: UInt16
+    public var cols: UInt16
+    public var lines: [TermLine]
+    public var cursorRow: UInt16
+    public var cursorCol: UInt16
+    /**
+     * 程序隐藏了光标，或正在往上翻看历史
+     */
+    public var cursorVisible: Bool
+    public var title: String
+    public var alternateScreen: Bool
+    public var applicationCursor: Bool
+    public var applicationKeypad: Bool
+    public var bracketedPaste: Bool
+    public var mouseMode: TermMouseMode
+    /**
+     * 鼠标上报用 SGR 编码
+     */
+    public var mouseSgr: Bool
+    /**
+     * 当前往上翻看的行数（0 为最底部）
+     */
+    public var scrollOffset: UInt32
+    /**
+     * 历史里一共有多少行
+     */
+    public var scrollbackLen: UInt32
+    /**
+     * 响铃计数（变化时界面提示一下）
+     */
+    public var bellCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(rows: UInt16, cols: UInt16, lines: [TermLine], cursorRow: UInt16, cursorCol: UInt16, 
+        /**
+         * 程序隐藏了光标，或正在往上翻看历史
+         */cursorVisible: Bool, title: String, alternateScreen: Bool, applicationCursor: Bool, applicationKeypad: Bool, bracketedPaste: Bool, mouseMode: TermMouseMode, 
+        /**
+         * 鼠标上报用 SGR 编码
+         */mouseSgr: Bool, 
+        /**
+         * 当前往上翻看的行数（0 为最底部）
+         */scrollOffset: UInt32, 
+        /**
+         * 历史里一共有多少行
+         */scrollbackLen: UInt32, 
+        /**
+         * 响铃计数（变化时界面提示一下）
+         */bellCount: UInt32) {
+        self.rows = rows
+        self.cols = cols
+        self.lines = lines
+        self.cursorRow = cursorRow
+        self.cursorCol = cursorCol
+        self.cursorVisible = cursorVisible
+        self.title = title
+        self.alternateScreen = alternateScreen
+        self.applicationCursor = applicationCursor
+        self.applicationKeypad = applicationKeypad
+        self.bracketedPaste = bracketedPaste
+        self.mouseMode = mouseMode
+        self.mouseSgr = mouseSgr
+        self.scrollOffset = scrollOffset
+        self.scrollbackLen = scrollbackLen
+        self.bellCount = bellCount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TermScreenState: Sendable {}
+#endif
+
+public struct TermSpan: Equatable, Hashable {
+    public var text: String
+    public var cells: UInt16
+    public var fg: UInt32
+    public var bg: UInt32
+    /**
+     * 1 粗体、2 斜体、4 下划线、8 反色
+     */
+    public var flags: UInt8
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(text: String, cells: UInt16, fg: UInt32, bg: UInt32, 
+        /**
+         * 1 粗体、2 斜体、4 下划线、8 反色
+         */flags: UInt8) {
+        self.text = text
+        self.cells = cells
+        self.fg = fg
+        self.bg = bg
+        self.flags = flags
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TermSpan: Sendable {}
 #endif
 
 public struct TerminalOptions: Equatable, Hashable {
@@ -878,6 +1110,40 @@ public struct TotpSetup: Equatable, Hashable {
 
 #if compiler(>=6)
 extension TotpSetup: Sendable {}
+#endif
+
+public struct UpdateInfo: Equatable, Hashable {
+    public var version: String
+    public var fileName: String
+    public var size: UInt64
+    public var sha256: String
+    /**
+     * 服务器上的下载路径（交给 download_update）
+     */
+    public var url: String
+    public var notes: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(version: String, fileName: String, size: UInt64, sha256: String, 
+        /**
+         * 服务器上的下载路径（交给 download_update）
+         */url: String, notes: String) {
+        self.version = version
+        self.fileName = fileName
+        self.size = size
+        self.sha256 = sha256
+        self.url = url
+        self.notes = notes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension UpdateInfo: Sendable {}
 #endif
 
 public struct UserInfo: Equatable, Hashable {
@@ -1178,6 +1444,35 @@ public enum FileKind: Equatable, Hashable {
 extension FileKind: Sendable {}
 #endif
 
+public enum GalaxyError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    case Network(detail: String
+    )
+    case Auth(code: String, detail: String
+    )
+    case Permission(detail: String
+    )
+    case NotFound(detail: String
+    )
+    case Protocol(detail: String
+    )
+    case Cancelled
+    case Other(detail: String
+    )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
 #if compiler(>=6)
 extension GalaxyError: Sendable {}
 #endif
@@ -1318,6 +1613,24 @@ public enum SshAuth: Equatable, Hashable {
 extension SshAuth: Sendable {}
 #endif
 
+public enum TermMouseMode: Equatable, Hashable {
+    
+    case none
+    case press
+    case pressRelease
+    case buttonMotion
+    case anyMotion
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TermMouseMode: Sendable {}
+#endif
+
 public enum TouchPhase: Equatable, Hashable {
     
     case began
@@ -1377,6 +1690,29 @@ public enum VideoCodec: Equatable, Hashable {
 
 #if compiler(>=6)
 extension VideoCodec: Sendable {}
+#endif
+
+public enum WorkerLoginResult: Equatable, Hashable {
+    
+    case success(userId: UInt64, username: String
+    )
+    /**
+     * 需要两步验证码：带上 totp 再调一次
+     */
+    case needTotp
+    /**
+     * 首次登录或被管理员重置：带上 new_password 再调一次
+     */
+    case mustChangePassword
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WorkerLoginResult: Sendable {}
 #endif
 
 // MARK: - 协议（对象与回调）
@@ -1495,6 +1831,17 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
     func changePassword(oldPassword: String, newPassword: String, totp: String?) async throws 
     
     /**
+     * 向服务器查询新版本。`component`：control / mobile / worker；`platform`：macos / android / windows / ios；
+     * `arch` 为空表示不限；`current` 是本机版本。返回前已验发布签名。
+     */
+    func checkUpdate(component: String, platform: String, arch: String, current: String) async throws  -> UpdateInfo?
+    
+    /**
+     * 关掉 open_rdp 开的端口转发。
+     */
+    func closeRdp(forwardId: String) 
+    
+    /**
      * 首次登录设置新密码（会生成账号密钥）。
      */
     func completeFirstLogin(newPassword: String) async throws 
@@ -1503,6 +1850,11 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
     
     func connectAssist(deviceCode: String, verificationCode: String) async throws  -> PeerSession
     
+    /**
+     * 连接加密库里的 ssh_host 条目。需要密码、口令或确认主机密钥时经 `prompt` 问用户。
+     */
+    func connectSsh(hostId: String, prompt: SecretPrompt) async throws  -> SshSession
+    
     func currentUser()  -> UserInfo?
     
     func deleteConversation(id: String) 
@@ -1510,6 +1862,11 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
     func deviceId()  -> String
     
     func devices()  -> [DeviceInfo]
+    
+    /**
+     * 下载新版本到 `dest`（本地文件路径），核对 SHA-256。进度经 listener 的 on_progress 上报，完成或失败经 on_finished。
+     */
+    func downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener) 
     
     /**
      * control 客户端的本机被控服务；登录完成并上线后才有。
@@ -1534,6 +1891,12 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
      * 打开本机保存的对话（需要重新连接目标设备）。`config` 为空时用创建时保存的配置。
      */
     func openConversation(id: String, config: ConversationConfig?, listener: AgentListener) async throws  -> AgentConversation
+    
+    /**
+     * 准备连接加密库里的 rdp_host：设了经由设备时在本机开端口转发穿过那台设备。
+     * 界面拿返回的地址交给系统的远程桌面客户端（Windows 的 mstsc，其他平台的微软 Windows App）。
+     */
+    func openRdp(hostId: String) async throws  -> RdpTarget
     
     func refreshDevices() async throws 
     
@@ -1706,6 +2069,11 @@ public protocol PeerSessionProtocol: AnyObject, Sendable {
     
     func setListener(listener: PeerListener) 
     
+    /**
+     * 隐私屏：被控端本地屏幕黑掉、本地键鼠失效，远端照常操作；本会话结束时自动关闭。能力列表里有 "privacy" 才支持。
+     */
+    func setPrivacy(on: Bool) async throws 
+    
     func wakeOnLan(mac: String) async throws 
     
 }
@@ -1718,6 +2086,20 @@ public protocol PortForwardProtocol: AnyObject, Sendable {
     
 }
 
+public protocol SecretPrompt: AnyObject, Sendable {
+    
+    /**
+     * 密码、私钥口令、键盘交互的回答；返回 None 表示取消。`echo` 为假时输入框应遮挡。
+     */
+    func ask(prompt: String, echo: Bool)  -> String?
+    
+    /**
+     * 首次连接或主机密钥变化时确认。`changed` 为真表示与记录的不一致（可能被冒充），界面应醒目警告。
+     */
+    func confirmHostKey(host: String, port: UInt16, keyType: String, fingerprint: String, changed: Bool)  -> Bool
+    
+}
+
 public protocol SecureStore: AnyObject, Sendable {
     
     func get(key: String)  -> Data?
@@ -1725,6 +2107,33 @@ public protocol SecureStore: AnyObject, Sendable {
     func set(key: String, value: Data) 
     
     func remove(key: String) 
+    
+}
+
+public protocol SshSessionProtocol: AnyObject, Sendable {
+    
+    func disconnect() 
+    
+    func exec(request: ExecRequest) async throws  -> ExecResult
+    
+    /**
+     * 文件（SFTP）。
+     */
+    func files()  -> FileClient
+    
+    /**
+     * 本地端口转发（在本机 127.0.0.1 监听，经 SSH 连到 remote_host:remote_port；local_port 为 0 时自动选）。
+     */
+    func forwardPort(localPort: UInt16, remoteHost: String, remotePort: UInt16) async throws  -> PortForward
+    
+    func info()  -> SshInfo
+    
+    func isClosed()  -> Bool
+    
+    /**
+     * 打开终端。SSH 没有断线继承：detach 与 kill 都会结束这个终端。
+     */
+    func openTerminal(options: TerminalOptions, sink: TerminalSink) async throws  -> TerminalChannel
     
 }
 
@@ -1744,6 +2153,32 @@ public protocol TerminalChannelProtocol: AnyObject, Sendable {
     func title()  -> String
     
     func write(data: Data) 
+    
+}
+
+public protocol TerminalScreenProtocol: AnyObject, Sendable {
+    
+    /**
+     * 喂入被控端终端的输出。
+     */
+    func feed(data: Data) 
+    
+    func resize(rows: UInt16, cols: UInt16) 
+    
+    /**
+     * 取屏幕内容。`scroll_offset` 为往上翻看的行数，0 为最底部（超出历史长度时按最大值算）。
+     */
+    func state(scrollOffset: UInt32)  -> TermScreenState
+    
+    /**
+     * 可见区域全部文字。
+     */
+    func text()  -> String
+    
+    /**
+     * 可见区域里两点之间的文字（选中复制用），行列从 0 开始，含终点。
+     */
+    func textBetween(startRow: UInt16, startCol: UInt16, endRow: UInt16, endCol: UInt16)  -> String
     
 }
 
@@ -1788,6 +2223,34 @@ public protocol VideoSink: AnyObject, Sendable {
     func onCursor(x: Int32, y: Int32, visible: Bool) 
     
     func onClosed(reason: String) 
+    
+}
+
+public protocol WorkerHostProtocol: AnyObject, Sendable {
+    
+    func deviceId()  -> String
+    
+    /**
+     * 登录一个账号。`system_user` 为空时用当前系统用户。所有账号必须在同一台服务器上。
+     */
+    func login(server: String, username: String, password: String, totp: String?, newPassword: String?, systemUser: String?) async throws  -> WorkerLoginResult
+    
+    /**
+     * 退出某个账号（服务器上也作废这台设备的登录）。
+     */
+    func logout(userId: UInt64) async throws 
+    
+    /**
+     * 已登录账号所在的服务器地址；还没登录过为空。
+     */
+    func server()  -> String?
+    
+    func service()  -> HostService?
+    
+    /**
+     * 启动被控服务（有账号时）。应用启动时调一次；之后的状态从返回的 HostService 读。
+     */
+    func start() async throws  -> HostService?
     
 }
 
@@ -1852,19 +2315,24 @@ open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
     required public init(unsafeFromHandle handle: UInt64) {}
     open func aiModels() async throws  -> AiModels { bridgeUnimplemented() }
     open func changePassword(oldPassword: String, newPassword: String, totp: String?) async throws { bridgeUnimplemented() }
+    open func checkUpdate(component: String, platform: String, arch: String, current: String) async throws  -> UpdateInfo? { bridgeUnimplemented() }
+    open func closeRdp(forwardId: String) { bridgeUnimplemented() }
     open func completeFirstLogin(newPassword: String) async throws { bridgeUnimplemented() }
     open func connect(deviceId: String) async throws  -> PeerSession { bridgeUnimplemented() }
     open func connectAssist(deviceCode: String, verificationCode: String) async throws  -> PeerSession { bridgeUnimplemented() }
+    open func connectSsh(hostId: String, prompt: SecretPrompt) async throws  -> SshSession { bridgeUnimplemented() }
     open func currentUser()  -> UserInfo? { bridgeUnimplemented() }
     open func deleteConversation(id: String) { bridgeUnimplemented() }
     open func deviceId()  -> String { bridgeUnimplemented() }
     open func devices()  -> [DeviceInfo] { bridgeUnimplemented() }
+    open func downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener) { bridgeUnimplemented() }
     open func host()  -> HostService? { bridgeUnimplemented() }
     open func listConversations()  -> [ConversationSummary] { bridgeUnimplemented() }
     open func login(server: String, username: String, password: String, totp: String?) async throws  -> LoginResult { bridgeUnimplemented() }
     open func logout() async throws { bridgeUnimplemented() }
     open func newConversation(config: ConversationConfig, listener: AgentListener) async throws  -> AgentConversation { bridgeUnimplemented() }
     open func openConversation(id: String, config: ConversationConfig?, listener: AgentListener) async throws  -> AgentConversation { bridgeUnimplemented() }
+    open func openRdp(hostId: String) async throws  -> RdpTarget { bridgeUnimplemented() }
     open func refreshDevices() async throws { bridgeUnimplemented() }
     open func removeDevice(deviceId: String) async throws { bridgeUnimplemented() }
     open func restore()  -> Bool { bridgeUnimplemented() }
@@ -1918,6 +2386,7 @@ open class PeerSession: PeerSessionProtocol, @unchecked Sendable {
     open func path()  -> PathInfo { bridgeUnimplemented() }
     open func screenshot(displayId: UInt32, maxWidth: UInt32) async throws  -> ImageData { bridgeUnimplemented() }
     open func setListener(listener: PeerListener) { bridgeUnimplemented() }
+    open func setPrivacy(on: Bool) async throws { bridgeUnimplemented() }
     open func wakeOnLan(mac: String) async throws { bridgeUnimplemented() }
 }
 
@@ -1927,6 +2396,19 @@ open class PortForward: PortForwardProtocol, @unchecked Sendable {
     required public init(unsafeFromHandle handle: UInt64) {}
     open func localPort()  -> UInt16 { bridgeUnimplemented() }
     open func stop() { bridgeUnimplemented() }
+}
+
+open class SshSession: SshSessionProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func disconnect() { bridgeUnimplemented() }
+    open func exec(request: ExecRequest) async throws  -> ExecResult { bridgeUnimplemented() }
+    open func files()  -> FileClient { bridgeUnimplemented() }
+    open func forwardPort(localPort: UInt16, remoteHost: String, remotePort: UInt16) async throws  -> PortForward { bridgeUnimplemented() }
+    open func info()  -> SshInfo { bridgeUnimplemented() }
+    open func isClosed()  -> Bool { bridgeUnimplemented() }
+    open func openTerminal(options: TerminalOptions, sink: TerminalSink) async throws  -> TerminalChannel { bridgeUnimplemented() }
 }
 
 open class TerminalChannel: TerminalChannelProtocol, @unchecked Sendable {
@@ -1941,6 +2423,17 @@ open class TerminalChannel: TerminalChannelProtocol, @unchecked Sendable {
     open func write(data: Data) { bridgeUnimplemented() }
 }
 
+open class TerminalScreen: TerminalScreenProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func feed(data: Data) { bridgeUnimplemented() }
+    open func resize(rows: UInt16, cols: UInt16) { bridgeUnimplemented() }
+    open func state(scrollOffset: UInt32)  -> TermScreenState { bridgeUnimplemented() }
+    open func text()  -> String { bridgeUnimplemented() }
+    open func textBetween(startRow: UInt16, startCol: UInt16, endRow: UInt16, endCol: UInt16)  -> String { bridgeUnimplemented() }
+}
+
 open class Transfer: TransferProtocol, @unchecked Sendable {
     public struct NoHandle { public init() {} }
     public init(noHandle: NoHandle) {}
@@ -1948,5 +2441,17 @@ open class Transfer: TransferProtocol, @unchecked Sendable {
     open func cancel() { bridgeUnimplemented() }
     open func pause() { bridgeUnimplemented() }
     open func resume() { bridgeUnimplemented() }
+}
+
+open class WorkerHost: WorkerHostProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func deviceId()  -> String { bridgeUnimplemented() }
+    open func login(server: String, username: String, password: String, totp: String?, newPassword: String?, systemUser: String?) async throws  -> WorkerLoginResult { bridgeUnimplemented() }
+    open func logout(userId: UInt64) async throws { bridgeUnimplemented() }
+    open func server()  -> String? { bridgeUnimplemented() }
+    open func service()  -> HostService? { bridgeUnimplemented() }
+    open func start() async throws  -> HostService? { bridgeUnimplemented() }
 }
 #endif

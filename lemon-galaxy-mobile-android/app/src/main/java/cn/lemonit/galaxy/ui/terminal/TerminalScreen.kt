@@ -90,6 +90,8 @@ data class TerminalTabUi(
     val status: TabStatus,
     val session: TerminalSession,
     val isSsh: Boolean,
+    /** SSH 标签的连接路径（直连 / 经设备 / 经 SSH 主机）。 */
+    val sshVia: String? = null,
 )
 
 interface TerminalActions {
@@ -173,7 +175,7 @@ fun TerminalScreen(
 private fun PathLine(path: PathInfo?, tab: TerminalTabUi?) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         val (label, color) = when {
-            tab?.isSsh == true -> stringResource(R.string.path_ssh) to Galaxy.colors.online
+            tab?.isSsh == true -> stringResource(R.string.path_ssh) + (tab.sshVia?.let { "  ·  $it" } ?: "") to Galaxy.colors.online
             path == null -> "—" to Galaxy.colors.offline
             path.kind == PathKind.LAN -> stringResource(R.string.path_lan) to Galaxy.colors.online
             path.kind == PathKind.DIRECT -> stringResource(R.string.path_direct) to Galaxy.colors.online

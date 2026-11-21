@@ -100,7 +100,9 @@ class TerminalTab internal constructor(
                     is TargetRef.Device -> conn.peer(target.deviceId).session.openTerminal(
                         TerminalOptions(attachId, null, cols.toUShort(), rows.toUShort(), TERMINAL_ENV), s,
                     )
-                    is TargetRef.Ssh -> conn.ssh(target.hostId, targetName).session.openTerminal(cols.toUShort(), rows.toUShort(), s)
+                    is TargetRef.Ssh -> conn.ssh(target.hostId, targetName).session.openTerminal(
+                        TerminalOptions(null, null, cols.toUShort(), rows.toUShort(), TERMINAL_ENV), s,
+                    )
                 }
                 channel = ch
                 remoteSessionId = ch.sessionId()

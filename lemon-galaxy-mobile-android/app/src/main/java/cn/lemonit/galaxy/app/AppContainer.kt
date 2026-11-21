@@ -63,9 +63,7 @@ class AppContainer(
     val client: GalaxyClientInterface = core.newGalaxyClient(store, listener)
     val account = AccountController(client, settings, scope)
     val hosts = HostsController(client, scope, ::toast)
-    val connections = ConnectionManager(client, prompts).also { c ->
-        appContext?.getString(cn.lemonit.galaxy.R.string.ssh_unsupported)?.let { c.sshUnsupportedMessage = it }
-    }
+    val connections = ConnectionManager(client, prompts)
     val terminals = TerminalController(scope, connections, appContext) { hosts.data.value.targetName(it) }
     val transfers = TransferManager(appContext, scope, connections)
     val agents = AgentController(

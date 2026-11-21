@@ -27,6 +27,7 @@ enum LocalHostPage: String, CaseIterable { case overview, accounts, assist, even
 enum ModalKind: Identifiable {
     case connectChooser(deviceId: String)
     case secretPrompt(SecretPromptRequest)
+    case hostKey(HostKeyRequest)
     case assistConnect
     case terminalSessions(deviceId: String, sessions: [TerminalSessionInfo])
     case confirm(ConfirmRequest)
@@ -34,9 +35,27 @@ enum ModalKind: Identifiable {
         switch self {
         case .connectChooser(let d): return "chooser-" + d
         case .secretPrompt(let r): return "secret-" + r.id
+        case .hostKey(let r): return "hostkey-" + r.id
         case .assistConnect: return "assist"
         case .terminalSessions(let d, _): return "sessions-" + d
         case .confirm(let c): return "confirm-" + c.id
+        }
+    }
+
+    /// 内核线程正在等它回答（SecretPrompt），不能被点空白处关掉
+    var isKernelPrompt: Bool {
+        switch self {
+        case .secretPrompt, .hostKey: return true
+        default: return false
+        }
+    }
+
+    /// 被别的卡片顶掉或关掉时，按取消回答内核（否则内核线程一直等）
+    func cancelPending() {
+        switch self {
+        case .secretPrompt(let r): r.respond(nil)
+        case .hostKey(let r): r.respond(false)
+        default: break
         }
     }
 }
@@ -86,7 +105,12 @@ final class AppModel: ObservableObject {
 
     @Published var tabs: [TabModel] = []
     @Published var activeTabId: String?
-    @Published var modal: ModalKind?
+    @Published var modal: ModalKind? {
+        didSet {
+            // 等内核回答的卡片被换掉：按取消回答（回答只认第一次，卡片自己回答过的不受影响）
+            if let old = oldValue, old.isKernelPrompt, old.id != modal?.id { old.cancelPending() }
+        }
+    }
     @Published var toast: Toast?
 
     let host: LocalHostModel
@@ -96,6 +120,8 @@ final class AppModel: ObservableObject {
     private var peers: [String: PeerConnection] = [:]
     private var assistNames: [String: String] = [:]
     private var sshSessions: [String: SshConnection] = [:]
+    /// 已连上的 SSH 主机 → 内核报告的连接路径（direct / device:<名> / ssh:<名>），主机详情与终端顶栏显示
+    @Published private(set) var sshVia: [String: String] = [:]
     private var listenerAdapter: ClientListenerAdapter?
 
     init(settings: AppSettings, selfTest: Bool, forceMock: Bool = false, mockOptions: MockOptions = MockOptions()) {
@@ -289,16 +315,42 @@ final class AppModel: ObservableObject {
     }
 
     func ssh(_ hostId: String) async throws -> SshConnection {
-        if let s = sshSessions[hostId], !s.closed { return s }
-        // SSH 直连还不在 galaxy-ffi 里（见 Core/Bridge/Proposed.swift），模拟内核实现了
-        guard let sshClient = client as? GalaxyClientSshProposed else {
-            throw GalaxyError.Other(detail: L("ssh.unsupported"))
-        }
+        if let s = sshSessions[hostId], !s.session.isClosed() { return s }
         let prompt = SecretPromptBridge(model: self, title: sshLabel(hostId))
-        let session = try await sshClient.connectSsh(hostId: hostId, secretPrompt: prompt)
+        let session = try await client.connectSsh(hostId: hostId, prompt: prompt)
         let c = SshConnection(hostId: hostId, session: session)
         sshSessions[hostId] = c
+        sshVia[hostId] = c.info.via
         return c
+    }
+
+    /// 没有标签页在用的 SSH 直连会话断开（SSH 没有断线继承，留着只占服务器连接）
+    func releaseUnusedSsh() {
+        var used = Set<String>()
+        for t in tabs {
+            if let term = t as? TerminalTabModel, case .ssh(let h) = term.target { used.insert(h) }
+            if let sftp = t as? SFTPTabModel {
+                for pane in [sftp.left, sftp.right] { if case .ssh(let h) = pane.endpoint { used.insert(h) } }
+            }
+        }
+        for (id, c) in sshSessions where !used.contains(id) {
+            c.session.disconnect()
+            sshSessions[id] = nil
+            sshVia[id] = nil
+        }
+    }
+
+    /// SSH 主机的连接路径文字：有直连会话时用内核报告的 via，否则按条目里配置的跳转推断
+    func sshViaText(_ hostId: String) -> String {
+        if let via = sshVia[hostId] {
+            if via.hasPrefix("device:") { return L("ssh.via.device", String(via.dropFirst(7))) }
+            if via.hasPrefix("ssh:") { return L("ssh.via.host", String(via.dropFirst(4))) }
+            return L("ssh.via.direct")
+        }
+        guard let e = entry(hostId), case .sshHost(_, _, _, _, _, let jd, let jh, _, _, _, _) = e.data else { return L("ssh.via.direct") }
+        if let jd, !jd.isEmpty { return L("ssh.via.device", deviceName(jd)) }
+        if let jh, !jh.isEmpty { return L("ssh.via.host", sshLabel(jh)) }
+        return L("ssh.via.direct")
     }
 
     /// 临时协助连上的设备不在本账号设备列表里：用合成 id 放进连接池，标签页照常按 id 取会话
@@ -334,6 +386,7 @@ final class AppModel: ObservableObject {
             activeTabId = tabs.isEmpty ? nil : tabs[min(i, tabs.count - 1)].id
         }
         if let d = tab.deviceId { releaseIfUnused(deviceId: d) }
+        releaseUnusedSsh()
     }
 
     func closeAllTabs() {
@@ -344,6 +397,7 @@ final class AppModel: ObservableObject {
         peers.removeAll()
         for s in sshSessions.values { s.session.disconnect() }
         sshSessions.removeAll()
+        sshVia.removeAll()
     }
 
     func selectHome(_ s: NavSection? = nil) {
@@ -399,9 +453,6 @@ final class AppModel: ObservableObject {
         activeTabId = nil
     }
 
-    /// 当前内核能不能 SSH 直连（真内核暂不支持，按钮置灰）
-    var sshSupported: Bool { client is GalaxyClientSshProposed }
-
     func openRdp(_ hostId: String) {
         guard let e = entry(hostId), case .rdpHost(let label, let host, let port, let username, _, let domain, let jump, _, _, _) = e.data else { return }
         Task {
@@ -446,12 +497,18 @@ final class PeerConnection: ObservableObject {
     }
 }
 
+/// 一条 SSH 直连会话（同一台主机的终端、SFTP 共用）。
 @MainActor
 final class SshConnection {
     let hostId: String
-    let session: SshSessionProposed
-    var closed = false
-    init(hostId: String, session: SshSessionProposed) { self.hostId = hostId; self.session = session }
+    let session: SshSession
+    /// 连接时内核给的信息，via 是实际走的路径
+    let info: SshInfo
+    init(hostId: String, session: SshSession) {
+        self.hostId = hostId
+        self.session = session
+        self.info = session.info()
+    }
 }
 
 // MARK: - 回调适配：内核线程 → 主线程
@@ -470,7 +527,34 @@ final class PeerListenerAdapter: PeerListener, @unchecked Sendable {
     func onClosed(reason: String) { DispatchQueue.main.async { self.owner?.closedReason = reason } }
 }
 
-/// SSH 键盘交互、私钥口令、未保存的密码：内核在自己的线程上同步调用 ask，这里切到主线程弹框并等用户回答。
+/// 内核等界面回答的一次询问：只认第一次回答（卡片按钮、被别的卡片顶掉、超时可能先后触发）。
+final class PromptReply<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private let sem = DispatchSemaphore(value: 0)
+    private var value: T
+    private var done = false
+    init(default value: T) { self.value = value }
+
+    func resolve(_ v: T) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !done else { return }
+        done = true
+        value = v
+        sem.signal()
+    }
+
+    /// 阻塞等回答；超时按默认值（取消 / 不信任）
+    func wait(timeout: TimeInterval) -> (value: T, timedOut: Bool) {
+        let timedOut = sem.wait(timeout: .now() + timeout) == .timedOut
+        if timedOut { resolve(value) }
+        lock.lock()
+        defer { lock.unlock() }
+        return (value, timedOut)
+    }
+}
+
+/// SSH 未保存的密码、私钥口令、键盘交互问题
 struct SecretPromptRequest: Identifiable {
     let id = UUID().uuidString
     let title: String
@@ -479,24 +563,53 @@ struct SecretPromptRequest: Identifiable {
     let respond: (String?) -> Void
 }
 
-final class SecretPromptBridge: SecretPrompt {
+/// 首次连接或主机密钥变化时确认
+struct HostKeyRequest: Identifiable {
+    let id = UUID().uuidString
+    let title: String
+    let host: String
+    let port: UInt16
+    let keyType: String
+    let fingerprint: String
+    /// 与加密库里记录的不一致（可能被冒充）
+    let changed: Bool
+    let respond: (Bool) -> Void
+}
+
+/// 内核在自己的线程上同步调用 SecretPrompt：这里切到主线程弹卡片，阻塞当前（内核）线程等用户回答。
+final class SecretPromptBridge: SecretPrompt, @unchecked Sendable {
     private weak var model: AppModel?
     private let title: String
+    /// 用户走开时不让内核线程永远等着
+    static let timeout: TimeInterval = 600
     init(model: AppModel, title: String) { self.model = model; self.title = title }
 
     func ask(prompt: String, echo: Bool) -> String? {
         if Thread.isMainThread { return nil }   // 不能在主线程上等主线程
-        let sem = DispatchSemaphore(value: 0)
-        var answer: String?
+        let reply = PromptReply<String?>(default: nil)
+        let req = SecretPromptRequest(title: title, prompt: prompt, echo: echo) { reply.resolve($0) }
+        return present(.secretPrompt(req), reply: reply)
+    }
+
+    func confirmHostKey(host: String, port: UInt16, keyType: String, fingerprint: String, changed: Bool) -> Bool {
+        if Thread.isMainThread { return false }
+        let reply = PromptReply<Bool>(default: false)
+        let req = HostKeyRequest(title: title, host: host, port: port, keyType: keyType, fingerprint: fingerprint, changed: changed) { reply.resolve($0) }
+        return present(.hostKey(req), reply: reply)
+    }
+
+    private func present<T>(_ modal: ModalKind, reply: PromptReply<T>) -> T {
         DispatchQueue.main.async {
-            guard let model = self.model else { sem.signal(); return }
-            model.modal = .secretPrompt(SecretPromptRequest(title: self.title, prompt: prompt, echo: echo) { value in
-                answer = value
-                sem.signal()
-            })
+            guard let model = self.model else { modal.cancelPending(); return }
+            MainActor.assumeIsolated { model.modal = modal }
         }
-        sem.wait()
-        return answer
+        let r = reply.wait(timeout: Self.timeout)
+        if r.timedOut {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { if let model = self.model, model.modal?.id == modal.id { model.modal = nil } }
+            }
+        }
+        return r.value
     }
 }
 

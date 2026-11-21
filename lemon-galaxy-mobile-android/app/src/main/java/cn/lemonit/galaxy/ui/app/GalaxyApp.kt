@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Dns
@@ -26,7 +25,6 @@ import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -34,13 +32,11 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,9 +51,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import cn.lemonit.galaxy.R
 import cn.lemonit.galaxy.app.AppContainer
@@ -66,6 +59,8 @@ import cn.lemonit.galaxy.app.Route
 import cn.lemonit.galaxy.app.SecretPromptBroker
 import cn.lemonit.galaxy.app.Tab
 import cn.lemonit.galaxy.core.CoreProvider
+import cn.lemonit.galaxy.ui.hosts.HostKeyDialog
+import cn.lemonit.galaxy.ui.hosts.SecretAskDialog
 import cn.lemonit.galaxy.ui.icons.PlatformIcons
 import cn.lemonit.galaxy.ui.login.LoginRoute
 import cn.lemonit.galaxy.ui.theme.GalaxyTheme
@@ -120,30 +115,21 @@ fun LockScreen(onUnlock: () -> Unit) {
     LaunchedEffect(Unit) { onUnlock() }
 }
 
-/** 内核 SecretPrompt（键盘交互认证、私钥口令、首次连接确认指纹）弹框。 */
+/** 内核 SecretPrompt 弹框：密码 / 私钥口令 / 键盘交互问题，以及主机密钥确认。 */
 @Composable
 fun SecretPromptHost(broker: SecretPromptBroker) {
     val req by broker.request.collectAsState()
-    val r = req ?: return
-    var value by remember(r.id) { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = { broker.respond(null) },
-        title = { Text(r.title ?: stringResource(if (r.echo) R.string.host_key_title else R.string.secret_prompt_title)) },
-        text = {
-            Column {
-                Text(r.prompt, style = MaterialTheme.typography.bodyMedium, fontFamily = if (r.echo) FontFamily.Monospace else null)
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value, { value = it },
-                    singleLine = true,
-                    visualTransformation = if (r.echo) androidx.compose.ui.text.input.VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = if (r.echo) KeyboardType.Ascii else KeyboardType.Password),
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = { broker.respond(value) }) { Text(stringResource(R.string.ok)) } },
-        dismissButton = { TextButton(onClick = { broker.respond(null) }) { Text(stringResource(R.string.cancel)) } },
-    )
+    when (val r = req) {
+        null -> Unit
+        is SecretPromptBroker.Request.Ask -> SecretAskDialog(
+            key = r.id, title = r.title, prompt = r.prompt, echo = r.echo,
+            onSubmit = { broker.respond(it) }, onCancel = { broker.respond(null) },
+        )
+        is SecretPromptBroker.Request.HostKey -> HostKeyDialog(
+            host = r.host, port = r.port, keyType = r.keyType, fingerprint = r.fingerprint, changed = r.changed,
+            onTrust = { broker.respondHostKey(true) }, onReject = { broker.respondHostKey(false) },
+        )
+    }
 }
 
 private data class TabSpec(val tab: Tab, val label: Int, val icon: ImageVector, val selectedIcon: ImageVector)

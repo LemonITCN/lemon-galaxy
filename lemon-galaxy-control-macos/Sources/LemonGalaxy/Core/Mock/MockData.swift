@@ -78,10 +78,16 @@ enum MockData {
             e("n-update", nil, 3, .snippet(label: zh ? "更新系统" : "Update system", command: "sudo apt update && sudo apt upgrade -y", tags: ["linux"])),
             e("n-top", nil, 4, .snippet(label: zh ? "内存占用前十" : "Top 10 by memory", command: "ps aux --sort=-%mem | head -n 11", tags: ["linux"])),
 
-            e("k-web1", nil, 0, .knownHost(host: "10.0.1.21", port: 22, keyType: "ssh-ed25519", fingerprint: "SHA256:7k3F0Zb3QmH1pRk2nB8xYw9eLqT4cVd5sJ6uG2aN1oE")),
-            e("k-vps", nil, 1, .knownHost(host: "203.0.113.8", port: 2222, keyType: "ecdsa-sha2-nistp256", fingerprint: "SHA256:Qe2mW8rT5yU7iO9pA1sD3fG5hJ7kL9zX2cV4bN6mQ8w")),
+            e("k-web1", nil, 0, .knownHost(host: "10.0.1.21", port: 22, keyType: "ssh-ed25519", fingerprint: knownFingerprints["10.0.1.21"]!)),
+            e("k-vps", nil, 1, .knownHost(host: "203.0.113.8", port: 2222, keyType: "ecdsa-sha2-nistp256", fingerprint: knownFingerprints["203.0.113.8"]!)),
         ]
     }
+
+    /// 模拟 SSH 主机的主机密钥指纹（加密库里的 known_host 与模拟连接时报出的一致）
+    static let knownFingerprints: [String: String] = [
+        "10.0.1.21": "SHA256:7k3F0Zb3QmH1pRk2nB8xYw9eLqT4cVd5sJ6uG2aN1oE",
+        "203.0.113.8": "SHA256:Qe2mW8rT5yU7iO9pA1sD3fG5hJ7kL9zX2cV4bN6mQ8w",
+    ]
 
     static func username(for d: DeviceInfo) -> String {
         switch d.platform {

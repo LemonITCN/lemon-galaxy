@@ -153,8 +153,21 @@
     <string name="assist_connect">连接</string>
     <string name="assist_info">未登录账号的设备会显示设备码和验证码。验证码只显示在对方屏幕上，不经过服务器。连接时需要对方点「允许」。</string>
     <string name="secret_prompt_title">需要输入</string>
-    <string name="ssh_unsupported">SSH 直连需要新版内核支持，目前请先通过某台设备的终端访问这台主机。</string>
-    <string name="host_key_title">未知主机</string>
+    <string name="host_key_new_title">首次连接这台主机</string>
+    <string name="host_key_new_message">还没有记录过 %1$s 的主机密钥。请核对下面的指纹与服务器上的一致，信任后会保存到加密库，以后连接自动比对。</string>
+    <string name="host_key_changed_title">主机密钥变了</string>
+    <string name="host_key_changed_message">%1$s 的主机密钥与加密库里记录的不一致。可能是服务器重装或换了密钥，也可能有人在冒充这台主机。</string>
+    <string name="host_key_changed_hint">除非确认是正常变更，否则不要继续连接。</string>
+    <string name="host_key_host">主机</string>
+    <string name="host_key_type">密钥类型</string>
+    <string name="host_key_fingerprint">指纹（SHA256）</string>
+    <string name="host_key_trust">信任并连接</string>
+    <string name="host_key_trust_anyway">仍然信任</string>
+    <string name="ssh_via">连接路径</string>
+    <string name="ssh_connected">已连接</string>
+    <string name="ssh_via_direct">直连</string>
+    <string name="ssh_via_device">经设备 %s</string>
+    <string name="ssh_via_host">经 SSH 主机 %s</string>
 
     <!-- 终端 -->
     <string name="terminal_title">终端</string>

@@ -335,7 +335,7 @@ struct SshDetail: View {
     @Environment(\.loc) var loc
 
     var body: some View {
-        guard case .sshHost(let label, let host, let port, let user, let auth, let jumpDev, let jumpHost, let tags, let note, _, let theme) = entry.data else {
+        guard case .sshHost(let label, let host, let port, let user, let auth, _, _, let tags, let note, _, let theme) = entry.data else {
             return AnyView(EmptyView())
         }
         return AnyView(ScrollView {
@@ -348,20 +348,17 @@ struct SshDetail: View {
                 }
                 if !tags.isEmpty { HStack(spacing: 5) { ForEach(tags, id: \.self) { TagChip(text: $0) } } }
                 HStack(spacing: 12) {
-                    ActionTile(icon: "terminal", title: loc("connect.terminal"), enabled: app.sshSupported) { app.openTerminal(sshHostId: entry.id) }
-                    ActionTile(icon: "folder", title: loc("connect.sftp"), enabled: app.sshSupported) { app.openSFTP(sshHostId: entry.id) }
-                    ActionTile(icon: "wand.and.stars", title: loc("connect.ai"), enabled: app.sshSupported && (app.user?.aiEnabled ?? false)) {
+                    ActionTile(icon: "terminal", title: loc("connect.terminal"), enabled: true) { app.openTerminal(sshHostId: entry.id) }
+                    ActionTile(icon: "folder", title: loc("connect.sftp"), enabled: true) { app.openSFTP(sshHostId: entry.id) }
+                    ActionTile(icon: "wand.and.stars", title: loc("connect.ai"), enabled: app.user?.aiEnabled ?? false) {
                         app.openAI(targets: [AgentTarget(kind: .sshHost, id: entry.id)])
                     }
-                }
-                if !app.sshSupported {
-                    Label(loc("ssh.unsupported"), systemImage: "info.circle").font(.system(size: 12)).foregroundStyle(p.secondaryText)
                 }
                 InfoGrid(rows: [
                     (loc("ssh.address"), "\(host):\(port)"),
                     (loc("ssh.username"), user),
                     (loc("ssh.auth"), authText(auth)),
-                    (loc("ssh.jump"), jumpDev.map { app.deviceName($0) } ?? jumpHost.map { app.sshLabel($0) } ?? loc("ssh.jump.none")),
+                    (loc("ssh.via"), app.sshViaText(entry.id) + (app.sshVia[entry.id] != nil ? " · " + loc("ssh.via.connected") : "")),
                     (loc("ssh.theme"), theme.map { TerminalTheme.named($0).name } ?? loc("ssh.theme.default")),
                 ])
                 if !note.isEmpty {

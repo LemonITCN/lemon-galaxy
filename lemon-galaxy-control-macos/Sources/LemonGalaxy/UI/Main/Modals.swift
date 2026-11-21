@@ -9,7 +9,8 @@ struct ModalOverlay: View {
         if let m = app.modal {
             ZStack {
                 Color.black.opacity(p.isDark ? 0.45 : 0.25)
-                    .onTapGesture { if case .secretPrompt = m {} else { app.modal = nil } }
+                    // 内核在等回答的卡片（密码、主机密钥）不能点空白处关掉
+                    .onTapGesture { if !m.isKernelPrompt { app.modal = nil } }
                 card(m)
                     .background(RoundedRectangle(cornerRadius: 12).fill(p.card).shadow(color: .black.opacity(0.25), radius: 24, y: 8))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(p.border, lineWidth: 0.5))
@@ -22,6 +23,7 @@ struct ModalOverlay: View {
         switch m {
         case .connectChooser(let id): ConnectChooser(deviceId: id).frame(width: 440)
         case .secretPrompt(let r): SecretPromptCard(request: r).frame(width: 380)
+        case .hostKey(let r): HostKeyCard(request: r).frame(width: 460)
         case .assistConnect: AssistConnectCard().frame(width: 400)
         case .terminalSessions(let id, let list): TerminalSessionsCard(deviceId: id, sessions: list).frame(width: 440)
         case .confirm(let c): ConfirmCard(request: c).frame(width: 380)
@@ -100,7 +102,7 @@ struct ConnectChooser: View {
     }
 }
 
-/// SSH 的密码 / 口令 / 键盘交互问题，以及首次连接主机指纹确认
+/// SSH 的密码 / 私钥口令 / 键盘交互问题（echo 为假时遮挡输入）
 struct SecretPromptCard: View {
     let request: SecretPromptRequest
     @EnvironmentObject var app: AppModel
@@ -122,7 +124,8 @@ struct SecretPromptCard: View {
             .onSubmit(submit)
             HStack {
                 Spacer()
-                Button(loc("common.cancel")) { app.modal = nil; request.respond(nil) }.buttonStyle(SecondaryButtonStyle())
+                Button(loc("common.cancel")) { request.respond(nil); app.modal = nil }
+                    .buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
                 Button(loc("common.ok"), action: submit).buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
             }
         }
@@ -130,9 +133,76 @@ struct SecretPromptCard: View {
     }
 
     private func submit() {
-        app.modal = nil
         request.respond(value)
+        app.modal = nil
         value = ""
+    }
+}
+
+/// SSH 主机密钥确认：显示密钥类型与 SHA256 指纹。
+/// 首次连接是普通确认；与加密库记录不一致（changed）时用警告样式，回车与 Esc 都是「取消」，信任要明确点按钮。
+struct HostKeyCard: View {
+    let request: HostKeyRequest
+    @EnvironmentObject var app: AppModel
+    @Environment(\.palette) var p
+    @Environment(\.loc) var loc
+
+    var body: some View {
+        let changed = request.changed
+        let address = request.port == 22 ? request.host : "\(request.host):\(request.port)"
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: changed ? "exclamationmark.triangle.fill" : "key.horizontal")
+                    .font(.system(size: 18)).foregroundStyle(changed ? p.danger : p.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(loc(changed ? "hostkey.changed.title" : "hostkey.new.title"))
+                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(changed ? p.danger : p.text)
+                    Text(request.title).font(.system(size: 11.5)).foregroundStyle(p.secondaryText)
+                }
+            }
+            Text(loc(changed ? "hostkey.changed.message" : "hostkey.new.message", address))
+                .font(.system(size: 12.5)).foregroundStyle(changed ? p.danger : p.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 9) {
+                field(loc("hostkey.host"), address)
+                field(loc("hostkey.type"), request.keyType)
+                field(loc("hostkey.fingerprint"), request.fingerprint.hasPrefix("SHA256:") ? String(request.fingerprint.dropFirst(7)) : request.fingerprint)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8).fill(changed ? p.danger.opacity(0.08) : p.elevated))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(changed ? p.danger.opacity(0.55) : p.border, lineWidth: changed ? 1 : 0.6))
+            if changed {
+                Label(loc("hostkey.changed.hint"), systemImage: "exclamationmark.shield")
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(p.danger)
+            }
+            HStack {
+                Spacer()
+                if changed {
+                    Button(loc("hostkey.trustAnyway")) { answer(true) }.buttonStyle(SecondaryButtonStyle(destructive: true))
+                    Button(loc("common.cancel")) { answer(false) }
+                        .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
+                } else {
+                    Button(loc("common.cancel")) { answer(false) }.buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+                    Button(loc("hostkey.trust")) { answer(true) }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .padding(18)
+        .onExitCommand { answer(false) }
+    }
+
+    private func field(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.system(size: 11)).foregroundStyle(p.tertiaryText)
+            Text(value).font(.system(size: 12.5, design: .monospaced)).foregroundStyle(p.text)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func answer(_ trust: Bool) {
+        request.respond(trust)
+        app.modal = nil
     }
 }
 

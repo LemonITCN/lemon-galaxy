@@ -36,6 +36,7 @@ import cn.lemonit.galaxy.core.bridge.PointerButton
 import cn.lemonit.galaxy.core.bridge.RiskLevel
 import cn.lemonit.galaxy.core.bridge.ServerInfo
 import cn.lemonit.galaxy.core.bridge.SshAuth
+import cn.lemonit.galaxy.core.bridge.SshInfo
 import cn.lemonit.galaxy.core.bridge.TerminalOptions
 import cn.lemonit.galaxy.core.bridge.TerminalSessionInfo
 import cn.lemonit.galaxy.core.bridge.ToolCallView
@@ -81,6 +82,7 @@ import uniffi.galaxy_ffi.PointerButton as FPointerButton
 import uniffi.galaxy_ffi.RiskLevel as FRiskLevel
 import uniffi.galaxy_ffi.ServerInfo as FServerInfo
 import uniffi.galaxy_ffi.SshAuth as FSshAuth
+import uniffi.galaxy_ffi.SshInfo as FSshInfo
 import uniffi.galaxy_ffi.TerminalOptions as FTerminalOptions
 import uniffi.galaxy_ffi.TerminalSessionInfo as FTerminalSessionInfo
 import uniffi.galaxy_ffi.ToolCallView as FToolCallView
@@ -147,6 +149,7 @@ internal fun FDeviceInfo.toBridge() = DeviceInfo(id, kind.toBridge(), platform.t
 internal fun FPathInfo.toBridge() = PathInfo(kind.toBridge(), rttMs, remoteAddr)
 internal fun FPermissions.toBridge() = Permissions(view, control, files, terminal, clipboard, audio, aiCap.toBridge())
 internal fun FPeerInfo.toBridge() = PeerInfo(deviceId, hostname, platform.toBridge(), osVersion, arch, systemUser, shell, permissions.toBridge(), capabilities, path.toBridge())
+internal fun FSshInfo.toBridge() = SshInfo(hostId, label, host, port, username, via)
 internal fun TerminalOptions.toFfi() = FTerminalOptions(attachSession, shell, cols, rows, env.map { FEnvVar(it.name, it.value) })
 internal fun FTerminalSessionInfo.toBridge() = TerminalSessionInfo(id, title, createdAt, attached)
 internal fun FFileEntry.toBridge() = FileEntry(name, path, kind.toBridge(), size, mode, modifiedAt, owner, group, linkTarget)

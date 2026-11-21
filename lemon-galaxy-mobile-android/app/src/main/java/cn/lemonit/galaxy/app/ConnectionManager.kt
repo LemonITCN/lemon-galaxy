@@ -6,9 +6,8 @@ import cn.lemonit.galaxy.core.bridge.PathInfo
 import cn.lemonit.galaxy.core.bridge.PeerInfo
 import cn.lemonit.galaxy.core.bridge.PeerListener
 import cn.lemonit.galaxy.core.bridge.PeerSessionInterface
-import cn.lemonit.galaxy.core.bridge.GalaxyException
 import cn.lemonit.galaxy.core.bridge.SecretPrompt
-import cn.lemonit.galaxy.core.bridge.SshClientInterface
+import cn.lemonit.galaxy.core.bridge.SshInfo
 import cn.lemonit.galaxy.core.bridge.SshSessionInterface
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -42,8 +41,11 @@ class PeerHandle(val deviceId: String, val session: PeerSessionInterface, privat
     fun has(capability: String) = capability in info.capabilities
 }
 
+/** 与一台 SSH 主机的直连会话（终端、文件共用）。 */
 class SshHandle(val hostId: String, val session: SshSessionInterface) {
-    @Volatile var closed = false
+    /** 连接时内核给的信息，via 表示怎么连过去的（直连 / 经设备 / 经 SSH 主机）。 */
+    val info: SshInfo = session.info()
+    val closed get() = session.isClosed()
 }
 
 /**
@@ -76,21 +78,20 @@ class ConnectionManager(
 
     fun existingPeer(deviceId: String): PeerHandle? = peers[deviceId]?.takeIf { !it.closed }
 
-    /** 界面语言的「暂不支持 SSH 直连」文字，由容器设置。 */
-    var sshUnsupportedMessage: String = "SSH"
-
-    /** 当前内核是否支持 SSH 直连（galaxy-ffi 还没导出 connect_ssh 时为 false）。 */
-    val sshSupported: Boolean get() = client is SshClientInterface
+    private val _sshVia = MutableStateFlow<Map<String, String>>(emptyMap())
+    /** 已连上的 SSH 主机 → 内核报告的路径（direct / device:<名> / ssh:<名>），主机详情显示用。 */
+    val sshVia: StateFlow<Map<String, String>> = _sshVia.asStateFlow()
 
     suspend fun ssh(hostId: String, title: String?): SshHandle = mutex.withLock {
         ssh[hostId]?.takeIf { !it.closed }?.let { return it }
-        val sshClient = client as? SshClientInterface
-            ?: throw GalaxyException.Other(sshUnsupportedMessage)
         val prompt = object : SecretPrompt {
             override fun ask(prompt: String, echo: Boolean): String? = prompts.ask(prompt, echo, title)
+            override fun confirmHostKey(host: String, port: UShort, keyType: String, fingerprint: String, changed: Boolean): Boolean =
+                prompts.confirmHostKey(host, port.toInt(), keyType, fingerprint, changed, title)
         }
-        val h = SshHandle(hostId, sshClient.connectSsh(hostId, prompt))
+        val h = SshHandle(hostId, client.connectSsh(hostId, prompt))
         ssh[hostId] = h
+        _sshVia.value = _sshVia.value + (hostId to h.info.via)
         h
     }
 
@@ -108,7 +109,8 @@ class ConnectionManager(
         peers.values.forEach { runCatching { it.session.disconnect() } }
         peers.clear()
         _paths.value = emptyMap()
-        ssh.values.forEach { runCatching { it.session.close() } }
+        ssh.values.forEach { runCatching { it.session.disconnect() } }
         ssh.clear()
+        _sshVia.value = emptyMap()
     }
 }

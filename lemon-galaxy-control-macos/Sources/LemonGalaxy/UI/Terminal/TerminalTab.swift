@@ -62,16 +62,18 @@ final class TerminalTabModel: TabModel, TerminalViewDelegate {
         Task {
             guard let app else { return }
             do {
+                let env = [EnvVar(name: "TERM", value: "xterm-256color")]
                 switch target {
                 case .device(let id):
                     let p = try await app.peer(id)
                     peer = p
-                    let ch = try await p.session.openTerminal(options: TerminalOptions(attachSession: attach?.id, shell: nil, cols: cols, rows: rows, env: [EnvVar(name: "TERM", value: "xterm-256color")]), sink: adapter)
+                    let ch = try await p.session.openTerminal(options: TerminalOptions(attachSession: attach?.id, shell: nil, cols: cols, rows: rows, env: env), sink: adapter)
                     channel = ch
                     sessionTitle = attach?.title ?? ch.title()
                 case .ssh(let id):
+                    // SSH 没有断线继承：每次都是新终端
                     let s = try await app.ssh(id)
-                    channel = try await s.session.openTerminal(cols: cols, rows: rows, sink: adapter)
+                    channel = try await s.session.openTerminal(options: TerminalOptions(attachSession: nil, shell: nil, cols: cols, rows: rows, env: env), sink: adapter)
                 }
                 phase = .running
                 live = true
@@ -114,7 +116,7 @@ final class TerminalTabModel: TabModel, TerminalViewDelegate {
     }
 
     override func close() {
-        // 关闭标签只断开，被控端保留会话，下次可以接续
+        // 关闭标签只断开：设备的被控端保留会话，下次可以接续；SSH 终端随之结束
         channel?.detach()
         channel = nil
         cancellables.removeAll()
@@ -351,10 +353,7 @@ struct SshPathBadge: View {
     @Environment(\.loc) var loc
 
     var body: some View {
-        var text = loc("path.ssh")
-        if let e = app.entry(hostId), case .sshHost(_, _, _, _, _, let jump?, _, _, _, _, _) = e.data {
-            text = loc("path.sshVia", app.deviceName(jump))
-        }
+        let text = loc("path.ssh") + " · " + app.sshViaText(hostId)
         return HStack(spacing: 5) {
             Image(systemName: "lock").font(.system(size: 10, weight: .semibold))
             Text(text).font(.system(size: 11, weight: .medium))

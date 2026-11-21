@@ -14,7 +14,6 @@ import cn.lemonit.galaxy.core.bridge.ConversationSummary
 import cn.lemonit.galaxy.core.bridge.CoreConfig
 import cn.lemonit.galaxy.core.bridge.DeviceInfo
 import cn.lemonit.galaxy.core.bridge.GalaxyClientInterface
-import cn.lemonit.galaxy.core.bridge.SshClientInterface
 import cn.lemonit.galaxy.core.bridge.GalaxyCore
 import cn.lemonit.galaxy.core.bridge.GalaxyException
 import cn.lemonit.galaxy.core.bridge.ImageData
@@ -26,6 +25,7 @@ import cn.lemonit.galaxy.core.bridge.SecretPrompt
 import cn.lemonit.galaxy.core.bridge.SecureStore
 import cn.lemonit.galaxy.core.bridge.ServerInfo
 import cn.lemonit.galaxy.core.bridge.SshAuth
+import cn.lemonit.galaxy.core.bridge.SshInfo
 import cn.lemonit.galaxy.core.bridge.SshSessionInterface
 import cn.lemonit.galaxy.core.bridge.ToolCallView
 import cn.lemonit.galaxy.core.bridge.ToolResultView
@@ -82,7 +82,7 @@ internal class MockClient(
     private val core: MockCore,
     private val store: SecureStore,
     private val listener: ClientListener,
-) : GalaxyClientInterface, SshClientInterface {
+) : GalaxyClientInterface {
     private val scope = core.scope
     private fun tr(zh: String, en: String) = core.tr(zh, en)
 
@@ -246,39 +246,40 @@ internal class MockClient(
         return MockPeerSession(hostFor(d), core, d.osVersion, d.arch)
     }
 
-    override suspend fun connectSsh(hostId: String, secretPrompt: SecretPrompt): SshSessionInterface {
+    override suspend fun connectSsh(hostId: String, prompt: SecretPrompt): SshSessionInterface {
         val entry = vault[hostId] ?: throw GalaxyException.NotFound(tr("找不到主机", "Host not found"))
         val h = entry.data as? VaultData.SshHost ?: throw GalaxyException.NotFound(tr("不是 SSH 主机", "Not an SSH host"))
         delay(500)
         withContext(Dispatchers.IO) {
-            val known = vault.values.any { (it.data as? VaultData.KnownHost)?.host == h.host }
-            if (!known) {
-                val fp = "SHA256:" + UUID.nameUUIDFromBytes(h.host.toByteArray()).toString().replace("-", "").take(43)
-                val ans = secretPrompt.ask(
-                    tr(
-                        "无法确认主机 ${h.host} 的真实性。\nED25519 指纹：$fp\n确定继续连接？（输入 yes）",
-                        "The authenticity of host '${h.host}' can't be established.\nED25519 key fingerprint is $fp.\nContinue connecting? (type yes)",
-                    ),
-                    true,
-                ) ?: throw GalaxyException.Cancelled()
-                if (ans.trim().lowercase() != "yes") throw GalaxyException.Cancelled()
-                val kh = VaultEntry(UUID.randomUUID().toString(), null, 999, VaultData.KnownHost(h.host, h.port, "ssh-ed25519", fp), System.currentTimeMillis())
+            // 与真内核一样：没记录过主机密钥就请用户确认，确认后存进加密库
+            val fp = "SHA256:" + UUID.nameUUIDFromBytes(h.host.toByteArray()).toString().replace("-", "").take(43)
+            val known = vault.values.mapNotNull { it.data as? VaultData.KnownHost }.firstOrNull { it.host.equals(h.host, true) && it.port == h.port }
+            if (known == null || known.fingerprint != fp) {
+                if (!prompt.confirmHostKey(h.host, h.port, "ssh-ed25519", fp, known != null)) throw GalaxyException.Cancelled()
+                val old = vault.values.firstOrNull { (it.data as? VaultData.KnownHost)?.let { k -> k.host.equals(h.host, true) && k.port == h.port } == true }
+                val kh = VaultEntry(old?.id ?: UUID.randomUUID().toString(), null, 999, VaultData.KnownHost(h.host, h.port, "ssh-ed25519", fp), System.currentTimeMillis())
                 vault[kh.id] = kh
                 listener.onVaultChanged()
             }
-            val needPassword = when (val a = h.auth) {
-                is SshAuth.Password -> a.password == null
-                SshAuth.Interactive -> true
-                else -> false
+            when (val a = h.auth) {
+                is SshAuth.Password -> if (a.password == null) {
+                    val pw = prompt.ask(tr("${h.username}@${h.host} 的密码：", "${h.username}@${h.host}'s password:"), false)
+                        ?: throw GalaxyException.Cancelled()
+                    if (pw == "wrong") throw GalaxyException.Auth("invalid_credentials", tr("密码错误", "Permission denied"))
+                }
+                SshAuth.Interactive -> prompt.ask(tr("验证码：", "Verification code:"), true) ?: throw GalaxyException.Cancelled()
+                SshAuth.Agent -> throw GalaxyException.Permission(tr("暂不支持 SSH Agent，请改用私钥或密码", "SSH agent is not supported yet; use a private key or password"))
+                else -> Unit
             }
-            if (needPassword) {
-                val pw = secretPrompt.ask(tr("${h.username}@${h.host} 的密码：", "${h.username}@${h.host}'s password:"), false)
-                    ?: throw GalaxyException.Cancelled()
-                if (pw == "wrong") throw GalaxyException.Auth("invalid_credentials", tr("密码错误", "Permission denied"))
-            }
+            Unit
+        }
+        val via = when {
+            !h.jumpDeviceId.isNullOrEmpty() -> "device:" + (devices.firstOrNull { it.id == h.jumpDeviceId }?.hostname ?: h.jumpDeviceId)
+            !h.jumpHostId.isNullOrEmpty() -> "ssh:" + ((vault[h.jumpHostId]?.data as? VaultData.SshHost)?.label ?: h.jumpHostId)
+            else -> "direct"
         }
         val mh = hosts.getOrPut("ssh-$hostId") { MockHost("ssh-$hostId", h.label, Platform.LINUX, h.username, scope, ::tr) }
-        return MockSshSession(mh)
+        return MockSshSession(mh, SshInfo(hostId, h.label, h.host, h.port, h.username, via))
     }
 
     override suspend fun aiModels(): AiModels {

@@ -31,9 +31,10 @@ extension AppModel {
                 nodes.append(HostNode(id: e.id, kind: .folder, title: name, subtitle: "", folderId: e.folderId, sort: e.sort, color: color, expanded: expanded))
             case .deviceMeta(let did, _, _, _, _):
                 metaByDevice[did] = e
-            case .sshHost(let label, let host, let port, let user, _, let jump, _, let tags, _, let fav, _):
+            case .sshHost(let label, let host, let port, let user, _, let jump, let jumpHost, let tags, _, let fav, _):
                 var sub = "\(user)@\(host)" + (port == 22 ? "" : ":\(port)")
-                if let jump { sub += " · " + L("hosts.via", deviceName(jump)) }
+                if let jump, !jump.isEmpty { sub += " · " + L("hosts.via", deviceName(jump)) }
+                else if let jumpHost, !jumpHost.isEmpty { sub += " · " + L("hosts.via", sshLabel(jumpHost)) }
                 nodes.append(HostNode(id: e.id, kind: .ssh, title: label, subtitle: sub, tags: tags, favorite: fav, folderId: e.folderId, sort: e.sort))
             case .rdpHost(let label, let host, let port, let user, _, _, _, let tags, _, let fav):
                 nodes.append(HostNode(id: e.id, kind: .rdp, title: label, subtitle: "\(user)@\(host)" + (port == 3389 ? "" : ":\(port)"),
@@ -178,7 +179,7 @@ extension AppModel {
     func open(_ n: HostNode) {
         switch n.kind {
         case .device: if let d = n.deviceId { activateDevice(d) }
-        case .ssh: if sshSupported { openTerminal(sshHostId: n.id) } else { showToast(L("ssh.unsupported"), error: true) }
+        case .ssh: openTerminal(sshHostId: n.id)
         case .rdp: openRdp(n.id)
         case .folder: toggleFolder(n.id)
         }
@@ -444,9 +445,9 @@ struct HostContextMenu: View {
             Button(loc("hosts.rename")) { app.renamingId = node.id }
             Button(node.favorite ? loc("hosts.unfavorite") : loc("hosts.favorite")) { app.toggleFavorite(node.id) }
         case .ssh:
-            Button(loc("connect.terminal")) { app.openTerminal(sshHostId: node.id) }.disabled(!app.sshSupported)
-            Button(loc("connect.sftp")) { app.openSFTP(sshHostId: node.id) }.disabled(!app.sshSupported)
-            Button(loc("connect.ai")) { app.openAI(targets: [AgentTarget(kind: .sshHost, id: node.id)]) }.disabled(!app.sshSupported)
+            Button(loc("connect.terminal")) { app.openTerminal(sshHostId: node.id) }
+            Button(loc("connect.sftp")) { app.openSFTP(sshHostId: node.id) }
+            Button(loc("connect.ai")) { app.openAI(targets: [AgentTarget(kind: .sshHost, id: node.id)]) }.disabled(!(app.user?.aiEnabled ?? false))
             Divider()
             Button(loc("hosts.edit")) { app.selection = node.id; app.editing = .vault(node.id) }
             Button(loc("hosts.rename")) { app.renamingId = node.id }

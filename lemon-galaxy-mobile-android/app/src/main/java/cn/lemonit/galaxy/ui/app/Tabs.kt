@@ -39,6 +39,7 @@ import cn.lemonit.galaxy.ui.hosts.AssistDialog
 import cn.lemonit.galaxy.ui.hosts.FolderAction
 import cn.lemonit.galaxy.ui.hosts.HostAction
 import cn.lemonit.galaxy.ui.hosts.HostActionsContent
+import cn.lemonit.galaxy.ui.hosts.sshViaText
 import cn.lemonit.galaxy.ui.hosts.HostsActions
 import cn.lemonit.galaxy.ui.hosts.HostsFilter
 import cn.lemonit.galaxy.ui.hosts.HostsScreen
@@ -159,8 +160,10 @@ fun HostsTab(container: AppContainer, nav: Navigator) {
 
     sheetItem?.let { item ->
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val liveVia by container.connections.sshVia.collectAsState()
+        val via = (item as? HostItem.Ssh)?.let { sshViaText(data, it.host, liveVia[it.entry.id]) }
         ModalBottomSheet(onDismissRequest = { sheetItem = null }, sheetState = sheetState) {
-            HostActionsContent(item, sshSupported = container.connections.sshSupported, onAction = { a ->
+            HostActionsContent(item, sshVia = via, sshConnected = item is HostItem.Ssh && item.entry.id in liveVia, onAction = { a ->
                 sheetItem = null
                 when (a) {
                     HostAction.MOVE -> moveItem = item
@@ -263,8 +266,7 @@ fun AiTab(container: AppContainer, nav: Navigator) {
 fun FilesTab(container: AppContainer, nav: Navigator) {
     val data by container.hosts.data.collectAsState()
     val transfers by container.transfers.items.collectAsState()
-    val ssh = container.connections.sshSupported
-    val targets = HostTree.items(data).filter { (it is HostItem.Device && it.reachable()) || (ssh && it is HostItem.Ssh) }
+    val targets = HostTree.items(data).filter { (it is HostItem.Device && it.reachable()) || it is HostItem.Ssh }
         .sortedWith(compareBy({ it !is HostItem.Device }, { it.title.lowercase() }))
     val selected = (nav.top as? Route.Files)?.target?.let { if (it is TargetRef.Device) "device:${it.deviceId}" else "ssh:${(it as TargetRef.Ssh).hostId}" }
     FilesHomeScreen(

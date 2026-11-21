@@ -18,6 +18,7 @@ import cn.lemonit.galaxy.core.bridge.PeerSessionInterface
 import cn.lemonit.galaxy.core.bridge.Permissions
 import cn.lemonit.galaxy.core.bridge.Platform
 import cn.lemonit.galaxy.core.bridge.PortForwardInterface
+import cn.lemonit.galaxy.core.bridge.SshInfo
 import cn.lemonit.galaxy.core.bridge.SshSessionInterface
 import cn.lemonit.galaxy.core.bridge.TerminalChannelInterface
 import cn.lemonit.galaxy.core.bridge.TerminalOptions
@@ -205,11 +206,16 @@ internal class MockPortForward(private val port: UShort) : PortForwardInterface 
     override fun stop() = Unit
 }
 
-internal class MockSshSession(private val host: MockHost) : SshSessionInterface {
-    override suspend fun openTerminal(cols: UShort, rows: UShort, sink: TerminalSink): TerminalChannelInterface {
+internal class MockSshSession(private val host: MockHost, private val info: SshInfo) : SshSessionInterface {
+    @Volatile private var closed = false
+
+    override fun info(): SshInfo = info
+    override fun isClosed(): Boolean = closed
+
+    override suspend fun openTerminal(options: TerminalOptions, sink: TerminalSink): TerminalChannelInterface {
         delay(200)
         val shell = host.newShell()
-        shell.resize(cols.toInt(), rows.toInt())
+        shell.resize(options.cols.toInt(), options.rows.toInt())
         shell.sink = sink
         shell.start()
         return MockTerminalChannel(shell)
@@ -222,10 +228,11 @@ internal class MockSshSession(private val host: MockHost) : SshSessionInterface 
         return ExecResult(0, "", "", false, false, 300u)
     }
 
-    override suspend fun forwardLocal(localPort: UShort, remoteHost: String, remotePort: UShort): PortForwardInterface = MockPortForward(localPort)
+    override suspend fun forwardPort(localPort: UShort, remoteHost: String, remotePort: UShort): PortForwardInterface = MockPortForward(localPort)
 
-    override fun close() {
+    override fun disconnect() {
         // SSH 直连没有被控端常驻会话：断开即结束
+        closed = true
         host.shells.values.toList().forEach { it.kill() }
     }
 }

@@ -24,6 +24,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Route
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Tv
@@ -61,6 +62,7 @@ import cn.lemonit.galaxy.core.bridge.VaultData
 import cn.lemonit.galaxy.ui.components.EntryAvatar
 import cn.lemonit.galaxy.ui.components.InfoButton
 import cn.lemonit.galaxy.ui.components.Tag
+import cn.lemonit.galaxy.ui.theme.Galaxy
 
 enum class HostAction { REMOTE, TERMINAL, FILES, AI, EDIT, FAVORITE, MOVE, DELETE }
 
@@ -68,9 +70,41 @@ enum class HostAction { REMOTE, TERMINAL, FILES, AI, EDIT, FAVORITE, MOVE, DELET
 fun HostItem.Device.hasDisplay() = device.platform == Platform.MACOS || device.platform == Platform.WINDOWS
 fun HostItem.Device.reachable() = device.online || device.lanSeen
 
-/** 点设备 / 主机弹出的操作面板内容（底部弹层与平板详情栏共用）。 */
+/**
+ * SSH 主机的连接路径文字：直连 / 经设备 X / 经 SSH 主机 Y。
+ * 有直连会话时用内核报告的 [liveVia]（direct、device:<名>、ssh:<名>），否则按条目里配置的跳转推断。
+ */
 @Composable
-fun HostActionsContent(item: HostItem, onAction: (HostAction) -> Unit, modifier: Modifier = Modifier, sshSupported: Boolean = true) {
+fun sshViaText(data: HostsData, host: VaultData.SshHost, liveVia: String?): String {
+    val (kind, name) = when {
+        liveVia != null -> when {
+            liveVia.startsWith("device:") -> "device" to liveVia.removePrefix("device:")
+            liveVia.startsWith("ssh:") -> "ssh" to liveVia.removePrefix("ssh:")
+            else -> "direct" to ""
+        }
+        !host.jumpDeviceId.isNullOrEmpty() -> "device" to data.deviceName(host.jumpDeviceId)
+        !host.jumpHostId.isNullOrEmpty() -> "ssh" to ((data.entry(host.jumpHostId)?.data as? VaultData.SshHost)?.label ?: host.jumpHostId)
+        else -> "direct" to ""
+    }
+    return when (kind) {
+        "device" -> stringResource(R.string.ssh_via_device, name)
+        "ssh" -> stringResource(R.string.ssh_via_host, name)
+        else -> stringResource(R.string.ssh_via_direct)
+    }
+}
+
+/**
+ * 点设备 / 主机弹出的操作面板内容（底部弹层与平板详情栏共用）。
+ * [sshVia] 是 SSH 主机的连接路径（见 [sshViaText]），[sshConnected] 表示当前有这台主机的直连会话。
+ */
+@Composable
+fun HostActionsContent(
+    item: HostItem,
+    onAction: (HostAction) -> Unit,
+    modifier: Modifier = Modifier,
+    sshVia: String? = null,
+    sshConnected: Boolean = false,
+) {
     Column(modifier.fillMaxWidth().padding(bottom = 16.dp)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             val (icon, status) = avatarFor(item)
@@ -99,6 +133,22 @@ fun HostActionsContent(item: HostItem, onAction: (HostAction) -> Unit, modifier:
                 item.tags.forEach { Tag("#$it") }
             }
         }
+        if (item is HostItem.Ssh && sshVia != null) {
+            Row(Modifier.padding(horizontal = 20.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Route, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    stringResource(R.string.ssh_via) + "  " + sshVia,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (sshConnected) {
+                    Spacer(Modifier.width(8.dp))
+                    Tag(stringResource(R.string.ssh_connected), color = Galaxy.colors.online)
+                }
+            }
+        }
         Spacer(Modifier.height(12.dp))
         when (item) {
             is HostItem.Device -> {
@@ -119,10 +169,9 @@ fun HostActionsContent(item: HostItem, onAction: (HostAction) -> Unit, modifier:
                 }
             }
             is HostItem.Ssh -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                ActionTile(Icons.Rounded.Terminal, stringResource(R.string.action_terminal), sshSupported) { onAction(HostAction.TERMINAL) }
-                ActionTile(Icons.Rounded.FolderOpen, stringResource(R.string.action_files), sshSupported) { onAction(HostAction.FILES) }
-                ActionTile(Icons.Rounded.AutoAwesome, stringResource(R.string.action_ai), sshSupported) { onAction(HostAction.AI) }
-                if (!sshSupported) InfoButton(stringResource(R.string.ssh_unsupported))
+                ActionTile(Icons.Rounded.Terminal, stringResource(R.string.action_terminal), true) { onAction(HostAction.TERMINAL) }
+                ActionTile(Icons.Rounded.FolderOpen, stringResource(R.string.action_files), true) { onAction(HostAction.FILES) }
+                ActionTile(Icons.Rounded.AutoAwesome, stringResource(R.string.action_ai), true) { onAction(HostAction.AI) }
             }
             is HostItem.Rdp -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 ActionTile(Icons.Rounded.Tv, stringResource(R.string.action_remote_desktop), false) {}

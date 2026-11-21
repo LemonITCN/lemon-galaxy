@@ -64,6 +64,9 @@ interface GalaxyClientInterface {
     suspend fun connect(deviceId: String): PeerSessionInterface
     suspend fun connectAssist(deviceCode: String, verificationCode: String): PeerSessionInterface
 
+    /** 连接加密库里的 ssh_host 条目（ffi.md 第 3.1 节）。需要密码、口令或确认主机密钥时经 [prompt] 问用户。 */
+    suspend fun connectSsh(hostId: String, prompt: SecretPrompt): SshSessionInterface
+
     suspend fun aiModels(): AiModels
     suspend fun newConversation(config: ConversationConfig, listener: AgentListener): AgentConversationInterface
 
@@ -136,6 +139,32 @@ interface TerminalChannelInterface {
     /** 断开但被控端保留会话。 */
     fun detach()
     fun kill()
+}
+
+// ---------- 3.1 SSH 直连 ----------
+
+/** SSH 直连时向用户要东西。内核在自己的线程上同步调用，界面可以阻塞等用户回答（不能阻塞主线程）。 */
+interface SecretPrompt {
+    /** 密码、私钥口令、键盘交互的回答；返回 null 表示取消。[echo] 为 false 时输入框应遮挡。 */
+    fun ask(prompt: String, echo: Boolean): String?
+
+    /** 首次连接或主机密钥变化时确认。[changed] 为 true 表示与记录的不一致（可能被冒充），界面应醒目警告。 */
+    fun confirmHostKey(host: String, port: UShort, keyType: String, fingerprint: String, changed: Boolean): Boolean
+}
+
+/** SSH 直连会话：终端、文件（SFTP）、命令、端口转发。终端与文件接口与设备会话相同。 */
+interface SshSessionInterface {
+    fun info(): SshInfo
+    fun isClosed(): Boolean
+
+    /** SSH 没有断线继承：detach 与 kill 都会结束这个终端。 */
+    suspend fun openTerminal(options: TerminalOptions, sink: TerminalSink): TerminalChannelInterface
+    fun files(): FileClientInterface
+    suspend fun exec(request: ExecRequest): ExecResult
+
+    /** 本地端口转发（本机 127.0.0.1 监听；localPort 为 0 时自动选）。 */
+    suspend fun forwardPort(localPort: UShort, remoteHost: String, remotePort: UShort): PortForwardInterface
+    fun disconnect()
 }
 
 // ---------- 3.2 文件 ----------

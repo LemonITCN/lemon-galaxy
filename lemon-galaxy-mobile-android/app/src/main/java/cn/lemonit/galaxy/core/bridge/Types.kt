@@ -251,6 +251,19 @@ data class FileEntry(
     val linkTarget: String?,
 )
 
+// ---------- 3.1 SSH 直连 ----------
+
+data class SshInfo(
+    /** 加密库条目 id */
+    val hostId: String,
+    val label: String,
+    val host: String,
+    val port: UShort,
+    val username: String,
+    /** 怎么连过去的：direct / device:<设备名> / ssh:<跳转主机名> */
+    val via: String,
+)
+
 // ---------- 3.3 远程画面 ----------
 
 data class DisplayInfo(

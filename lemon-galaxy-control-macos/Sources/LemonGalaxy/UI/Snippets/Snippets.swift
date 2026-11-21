@@ -131,7 +131,7 @@ struct SFTPTargetsList: View {
                     ForEach(app.vault.filter { if case .sshHost = $0.data { return true }; return false }, id: \.id) { e in
                         if case .sshHost(let label, let host, _, let user, _, _, _, _, _, _, _) = e.data {
                             row(icon: AnyView(ProtocolBadge(text: "SSH", color: p.accent).scaleEffect(0.8)), title: label, subtitle: "\(user)@\(host)",
-                                state: nil, enabled: app.sshSupported) { app.openSFTP(sshHostId: e.id) }
+                                state: nil, enabled: true) { app.openSFTP(sshHostId: e.id) }
                         }
                     }
                 }

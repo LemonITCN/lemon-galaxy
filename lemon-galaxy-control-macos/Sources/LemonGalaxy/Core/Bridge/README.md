@@ -8,7 +8,8 @@
 - **镜像** `BridgeMirror.swift`：没有内核产物（或 `LEMONGALAXY_NO_CORE=1`）时用它编译，只有模拟内核可用。
   它由 `scripts/gen-bridge-mirror.py` 从 `galaxy_ffi.swift` 自动生成（记录、枚举、协议逐字相同，对象方法为占位），
   每次重新生成内核绑定后运行一次：`python3 scripts/gen-bridge-mirror.py`。
-- `Proposed.swift`：内核还没有、界面已经准备好的接口（目前是 SSH 直连）。界面用 `client as? GalaxyClientSshProposed` 判断，真内核下对应按钮置灰。
 
 冒烟测试（只用真内核，内存 SecureStore，不开窗口）：
-`LemonGalaxy --core-smoke <服务器地址> <用户名> <密码>`
+`LemonGalaxy --core-smoke <服务器地址> <用户名> <密码> [--ssh <主机:端口> <SSH 用户名> <私钥文件>]`
+带 `--ssh` 时追加 SSH 直连一段：在加密库建临时凭据与 ssh_host 条目，连接（自动信任主机密钥）、执行命令、终端收发、
+SFTP 列目录与上传下载、端口转发、AI 对话以 SSH 主机为目标，最后删掉临时条目。

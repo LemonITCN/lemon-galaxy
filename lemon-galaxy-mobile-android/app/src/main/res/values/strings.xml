@@ -155,8 +155,21 @@
     <string name="assist_connect">Connect</string>
     <string name="assist_info">A device that is not signed in shows a device code and a verification code. The verification code is only shown on that screen and never passes through the server. The other person must tap Allow before the connection starts.</string>
     <string name="secret_prompt_title">Input required</string>
-    <string name="ssh_unsupported">SSH direct connections need a newer core. Reach this host through a device terminal for now.</string>
-    <string name="host_key_title">Unknown host</string>
+    <string name="host_key_new_title">First connection to this host</string>
+    <string name="host_key_new_message">No host key has been recorded for %1$s yet. Check that the fingerprint below matches the server. Once trusted it is saved to the vault and checked on every later connection.</string>
+    <string name="host_key_changed_title">Host key has changed</string>
+    <string name="host_key_changed_message">The host key of %1$s does not match the one recorded in the vault. The server may have been reinstalled or rekeyed, or someone may be impersonating it.</string>
+    <string name="host_key_changed_hint">Do not continue unless you know this change is expected.</string>
+    <string name="host_key_host">Host</string>
+    <string name="host_key_type">Key type</string>
+    <string name="host_key_fingerprint">Fingerprint (SHA256)</string>
+    <string name="host_key_trust">Trust and connect</string>
+    <string name="host_key_trust_anyway">Trust anyway</string>
+    <string name="ssh_via">Route</string>
+    <string name="ssh_connected">Connected</string>
+    <string name="ssh_via_direct">Direct</string>
+    <string name="ssh_via_device">Through device %s</string>
+    <string name="ssh_via_host">Through SSH host %s</string>
 
     <!-- Terminal -->
     <string name="terminal_title">Terminal</string>

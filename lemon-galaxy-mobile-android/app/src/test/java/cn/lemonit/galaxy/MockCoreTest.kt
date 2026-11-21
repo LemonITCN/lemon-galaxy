@@ -175,16 +175,45 @@ class MockCoreTest {
     @Test
     fun sshPromptsForHostKeyAndPassword() = runBlocking<Unit> {
         client.login(server, "alice", "pw", null)
-        val asked = CopyOnWriteArrayList<Boolean>()
-        val session = (client as cn.lemonit.galaxy.core.bridge.SshClientInterface).connectSsh(MockData.SSH_PG, object : SecretPrompt {
+        val asked = CopyOnWriteArrayList<String>()
+        val prompt = object : SecretPrompt {
             override fun ask(prompt: String, echo: Boolean): String? {
-                asked.add(echo)
-                return if (echo) "yes" else "secret"
+                asked.add("ask:$echo")
+                return "secret"
             }
-        })
-        assertEquals(listOf(true, false), asked.toList())
+
+            override fun confirmHostKey(host: String, port: UShort, keyType: String, fingerprint: String, changed: Boolean): Boolean {
+                asked.add("hostkey:$changed")
+                assertTrue(fingerprint.startsWith("SHA256:"))
+                return true
+            }
+        }
+        val session = client.connectSsh(MockData.SSH_PG, prompt)
+        // 首次连接先确认主机密钥，再问密码（遮挡输入）
+        assertEquals(listOf("hostkey:false", "ask:false"), asked.toList())
+        assertEquals(MockData.SSH_PG, session.info().hostId)
+        assertTrue(session.info().via.startsWith("device:"))
         assertNotNull(session.files())
-        session.close()
+        assertTrue(client.vault().any { (it.data as? VaultData.KnownHost)?.host == "10.0.3.21" })
+        session.disconnect()
+        assertTrue(session.isClosed())
+
+        // 主机密钥已记录：第二次只问密码
+        asked.clear()
+        client.connectSsh(MockData.SSH_PG, prompt).disconnect()
+        assertEquals(listOf("ask:false"), asked.toList())
+    }
+
+    @Test
+    fun sshRejectingHostKeyCancels() = runBlocking<Unit> {
+        client.login(server, "alice", "pw", null)
+        val result = runCatching {
+            client.connectSsh(MockData.SSH_BASTION, object : SecretPrompt {
+                override fun ask(prompt: String, echo: Boolean): String? = null
+                override fun confirmHostKey(host: String, port: UShort, keyType: String, fingerprint: String, changed: Boolean) = false
+            })
+        }
+        assertTrue(result.exceptionOrNull() is GalaxyException.Cancelled)
     }
 
     @Test

@@ -7,7 +7,7 @@ import Foundation
 //   - 用户名含 new：登录后必须改密码；
 //   - 其余任意用户名密码都能登录。
 
-final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked Sendable {
+final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
     required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     static let version = "0.1.0-mock"
 
@@ -214,21 +214,61 @@ final class MockGalaxyClient: GalaxyClient, GalaxyClientSshProposed, @unchecked 
         return MockPeerSession(client: self, device: d)
     }
 
-    func connectSsh(hostId: String, secretPrompt: SecretPrompt) async throws -> SshSessionProposed {
+    override func connectSsh(hostId: String, prompt: SecretPrompt) async throws -> SshSession {
         await delay(500)
-        guard let e = vault().first(where: { $0.id == hostId }), case let .sshHost(label, host, port, username, auth, _, _, _, _, _, _) = e.data else {
+        guard let e = vault().first(where: { $0.id == hostId }),
+              case let .sshHost(label, host, port, username, auth, jumpDevice, jumpHost, _, _, _, _) = e.data else {
             throw GalaxyError.NotFound(detail: zh ? "主机不存在" : "Host not found")
         }
-        if case .password(let pw) = auth, pw == nil || pw!.isEmpty {
-            // 没保存密码：通过 SecretPrompt 问用户（界面弹安全输入框）
-            let answer = secretPrompt.ask(prompt: zh ? "\(username)@\(host) 的密码：" : "Password for \(username)@\(host):", echo: false)
-            guard let answer, !answer.isEmpty else { throw GalaxyError.Cancelled }
+        // 与真内核一样：内核在自己的线程上同步询问（界面阻塞等回答），不能占着协作线程池
+        try await Task.detached(priority: .userInitiated) { [self] in
+            // 主机密钥：没记录过或与记录不一致时请用户确认，确认后存进加密库
+            let fp = Self.fakeFingerprint(host)
+            let known = self.vault().first { if case .knownHost(let h, let p, _, _) = $0.data { return h.caseInsensitiveCompare(host) == .orderedSame && p == port }; return false }
+            var knownFp: String?
+            if let known, case .knownHost(_, _, _, let f) = known.data { knownFp = f }
+            if knownFp != fp {
+                guard prompt.confirmHostKey(host: host, port: port, keyType: "ssh-ed25519", fingerprint: fp, changed: knownFp != nil) else {
+                    throw GalaxyError.Cancelled
+                }
+                let entry = VaultEntry(id: known?.id ?? "", folderId: nil, sort: 0,
+                                       data: .knownHost(host: host, port: port, keyType: "ssh-ed25519", fingerprint: fp), updatedAt: 0)
+                _ = try await self.vaultSave(entry: entry)
+            }
+            switch auth {
+            case .password(let pw) where pw == nil || pw!.isEmpty:
+                // 没保存密码：通过 SecretPrompt 问用户（界面弹遮挡的输入框）
+                let answer = prompt.ask(prompt: self.zh ? "\(username)@\(host) 的密码：" : "Password for \(username)@\(host):", echo: false)
+                guard let answer, !answer.isEmpty else { throw GalaxyError.Cancelled }
+                if answer == "wrong" { throw GalaxyError.Auth(code: "invalid_credentials", detail: self.zh ? "密码错误" : "Permission denied") }
+            case .interactive:
+                guard prompt.ask(prompt: self.zh ? "验证码（键盘交互）：" : "Verification code (keyboard-interactive):", echo: true) != nil else {
+                    throw GalaxyError.Cancelled
+                }
+            case .agent:
+                throw GalaxyError.Permission(detail: self.zh ? "暂不支持 SSH Agent，请改用私钥或密码" : "SSH agent is not supported yet; use a private key or password")
+            default:
+                break
+            }
+        }.value
+        var via = "direct"
+        if let d = jumpDevice, !d.isEmpty { via = "device:" + (device(d)?.hostname ?? d) }
+        else if let j = jumpHost, !j.isEmpty, let je = vault().first(where: { $0.id == j }), case .sshHost(let jl, _, _, _, _, _, _, _, _, _, _) = je.data { via = "ssh:" + jl }
+        return MockSshSession(client: self, info: SshInfo(hostId: hostId, label: label, host: host, port: port, username: username, via: via))
+    }
+
+    /// 模拟主机密钥指纹：MockData 里记录过的用记录值，其余按主机名稳定生成（43 位 base64 样式）
+    static func fakeFingerprint(_ host: String) -> String {
+        if let fp = MockData.knownFingerprints[host] { return fp }
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        var x: UInt64 = 0xcbf2_9ce4_8422_2325
+        for b in host.utf8 { x = (x ^ UInt64(b)) &* 0x100_0000_01b3 }
+        var out = "SHA256:"
+        for _ in 0..<43 {
+            x = x &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            out.append(alphabet[Int(x >> 58)])
         }
-        if case .interactive = auth {
-            let answer = secretPrompt.ask(prompt: zh ? "验证码（键盘交互）：" : "Verification code (keyboard-interactive):", echo: true)
-            guard answer != nil else { throw GalaxyError.Cancelled }
-        }
-        return MockSshSession(client: self, label: label, host: host, port: port, username: username)
+        return out
     }
 
     // MARK: AI
@@ -455,37 +495,43 @@ final class MockPortForward: PortForward, @unchecked Sendable {
 
 // MARK: - SSH 直连
 
-final class MockSshSession: SshSessionProposed {
+final class MockSshSession: SshSession, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     let client: MockGalaxyClient
+    let sshInfo: SshInfo
     let device: DeviceInfo
-    lazy var fileClient = MockFileClient(client: client, platform: .linux, username: device.hostname.isEmpty ? "root" : username)
-    let username: String
+    private var closed = false
+    lazy var fileClient = MockFileClient(client: client, platform: .linux, username: sshInfo.username)
 
-    init(client: MockGalaxyClient, label: String, host: String, port: UInt16, username: String) {
+    init(client: MockGalaxyClient, info: SshInfo) {
         self.client = client
-        self.username = username
-        self.device = DeviceInfo(id: "ssh-\(host)", kind: .worker, platform: .linux, hostname: label, osVersion: "Debian GNU/Linux 12",
+        self.sshInfo = info
+        self.device = DeviceInfo(id: "ssh-\(info.host)", kind: .worker, platform: .linux, hostname: info.label, osVersion: "Debian GNU/Linux 12",
                                  arch: "x86_64", appVersion: "", online: true, lanSeen: false, lastSeenAt: MockData.now, isSelf: false)
+        super.init(noHandle: NoHandle())
     }
 
-    func openTerminal(cols: UInt16, rows: UInt16, sink: TerminalSink) async throws -> TerminalChannel {
+    override func info() -> SshInfo { sshInfo }
+    override func isClosed() -> Bool { closed }
+
+    override func openTerminal(options: TerminalOptions, sink: TerminalSink) async throws -> TerminalChannel {
         await client.delay(200)
-        return MockTerminalChannel(client: client, device: device,
-                                   options: TerminalOptions(attachSession: nil, shell: nil, cols: cols, rows: rows, env: []),
-                                   sink: sink, usernameOverride: username, register: false)
+        // SSH 没有断线继承：不登记到被控端保留会话里
+        return MockTerminalChannel(client: client, device: device, options: options, sink: sink, usernameOverride: sshInfo.username, register: false)
     }
 
-    func files() -> FileClient { fileClient }
+    override func files() -> FileClient { fileClient }
 
-    func exec(request: ExecRequest) async throws -> ExecResult {
+    override func exec(request: ExecRequest) async throws -> ExecResult {
         await client.delay(200)
         let out = MockShell.run(command: request.command, device: device, cwd: request.cwd ?? "~", zh: client.zh)
         return ExecResult(code: out.code, stdout: out.text, stderr: "", timedOut: false, truncated: false, durationMs: 30)
     }
 
-    func forwardLocal(localPort: UInt16, remoteHost: String, remotePort: UInt16) async throws -> PortForward {
-        MockPortForward(port: localPort)
+    override func forwardPort(localPort: UInt16, remoteHost: String, remotePort: UInt16) async throws -> PortForward {
+        await client.delay(100)
+        return MockPortForward(port: localPort == 0 ? 50_000 + remotePort % 1000 : localPort)
     }
 
-    func disconnect() {}
+    override func disconnect() { closed = true }
 }

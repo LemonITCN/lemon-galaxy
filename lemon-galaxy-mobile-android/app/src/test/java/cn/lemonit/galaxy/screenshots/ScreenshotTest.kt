@@ -61,10 +61,12 @@ import cn.lemonit.galaxy.ui.hosts.AddKind
 import cn.lemonit.galaxy.ui.hosts.EntryEditorScreen
 import cn.lemonit.galaxy.ui.hosts.FolderAction
 import cn.lemonit.galaxy.ui.hosts.HostActionsContent
+import cn.lemonit.galaxy.ui.hosts.HostKeyDialog
 import cn.lemonit.galaxy.ui.hosts.HostsActions
 import cn.lemonit.galaxy.ui.hosts.HostsFilter
 import cn.lemonit.galaxy.ui.hosts.HostsScreen
 import cn.lemonit.galaxy.ui.hosts.HostsSubTab
+import cn.lemonit.galaxy.ui.hosts.sshViaText
 import cn.lemonit.galaxy.ui.login.LoginScreen
 import cn.lemonit.galaxy.ui.remote.RemoteActions
 import cn.lemonit.galaxy.ui.remote.RemoteDesktopScreen
@@ -77,7 +79,9 @@ import cn.lemonit.galaxy.ui.terminal.TerminalTabUi
 import cn.lemonit.galaxy.ui.theme.GalaxyTheme
 import cn.lemonit.galaxy.ui.theme.TerminalThemes
 import cn.lemonit.galaxy.ui.theme.ThemeMode
+import com.github.takahirom.roborazzi.ExperimentalRoborazziApi
 import com.github.takahirom.roborazzi.captureRoboImage
+import com.github.takahirom.roborazzi.captureScreenRoboImage
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -145,9 +149,23 @@ class ScreenshotTest {
         capture(name, dark)
     }
 
+    private fun fileFor(name: String, dark: Boolean) = "build/outputs/roborazzi/${name}_${size()}_${if (zh) "zh" else "en"}_${if (dark) "dark" else "light"}.png"
+
     private fun capture(name: String, dark: Boolean) {
-        val file = "build/outputs/roborazzi/${name}_${size()}_${if (zh) "zh" else "en"}_${if (dark) "dark" else "light"}.png"
-        compose.onRoot().captureRoboImage(file)
+        compose.onRoot().captureRoboImage(fileFor(name, dark))
+    }
+
+    /** 弹框在单独的窗口里：截整个屏幕（含所有窗口）。 */
+    @OptIn(ExperimentalRoborazziApi::class)
+    private fun shotScreen(name: String, dark: Boolean, content: @Composable () -> Unit) {
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            GalaxyTheme(mode = if (dark) ThemeMode.DARK else ThemeMode.LIGHT) {
+                Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) { content() }
+            }
+        }
+        compose.mainClock.advanceTimeBy(800)
+        captureScreenRoboImage(fileFor(name, dark))
     }
 
     /** 处理主线程消息并等真实时间（模拟内核在后台线程按真实时间推进）。 */
@@ -217,6 +235,29 @@ class ScreenshotTest {
 
     @Test @Config(qualifiers = PHONE_EN)
     fun hostSheetEnDark() = hostSheet(true, MockData.DEV_WEB_01, "host_sheet")
+
+    private fun sshSheet(dark: Boolean) = shot("host_sheet_ssh", dark) {
+        val item = HostTree.items(Fixtures.hosts).first { it is HostItem.Ssh && it.entry.id == MockData.SSH_GITLAB } as HostItem.Ssh
+        Surface(color = MaterialTheme.colorScheme.surfaceContainerLow) {
+            HostActionsContent(item, onAction = {}, sshVia = sshViaText(Fixtures.hosts, item.host, null))
+        }
+    }
+
+    @Test fun hostSheetSshZhLight() = sshSheet(false)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun hostSheetSshEnDark() = sshSheet(true)
+
+    private fun hostKey(dark: Boolean, changed: Boolean) = shotScreen(if (changed) "ssh_host_key_changed" else "ssh_host_key", dark) {
+        HostKeyDialog("10.0.2.15", 22, "ssh-ed25519", "SHA256:3EDwKv5fv67WpFIHRKfVmkbbTSnNckJjoNmrY5SyKAM", changed, onTrust = {}, onReject = {})
+    }
+
+    @Test fun hostKeyZhLight() = hostKey(false, false)
+
+    @Test fun hostKeyChangedZhDark() = hostKey(true, true)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun hostKeyChangedEnLight() = hostKey(false, true)
 
     private fun editor(dark: Boolean) = shot("editor_ssh", dark) {
         val e = Fixtures.hosts.entry(MockData.SSH_GITLAB)

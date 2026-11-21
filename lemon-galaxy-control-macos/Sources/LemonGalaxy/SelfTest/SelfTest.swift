@@ -280,6 +280,30 @@ enum SelfTest {
         }
         shot("\(prefix)-21-terminal-ssh", app, window: window, host: host, settle: 0.3)
 
+        // SSH 主机密钥：web-02 没有记录过，走模拟内核 → SecretPromptBridge → 主窗口卡片的完整路径
+        app.openTerminal(sshHostId: "s-web2")
+        if wait("SSH 主机密钥确认", { if case .hostKey = app.modal { return true }; return false }) {
+            shot("\(prefix)-22-ssh-hostkey", app, window: window, host: host)
+            if case .hostKey(let r)? = app.modal { r.respond(true); app.modal = nil }
+            if let t = app.activeTab as? TerminalTabModel { wait("SSH 终端（新主机）打开") { t.phase == .running } }
+            if !app.knownHosts.contains(where: { if case .knownHost(let h, _, _, _) = $0.data { return h == "10.0.1.22" }; return false }) {
+                problems.append("确认后的主机密钥没有存进加密库")
+            }
+        }
+        // 主机密钥变化（警告样式）与密码输入：直接放卡片截图
+        app.modal = .hostKey(HostKeyRequest(title: "web-01", host: "10.0.1.21", port: 22, keyType: "ssh-ed25519",
+                                            fingerprint: MockGalaxyClient.fakeFingerprint("changed-10.0.1.21"), changed: true) { _ in })
+        shot("\(prefix)-23-ssh-hostkey-changed", app, window: window, host: host)
+        app.modal = .secretPrompt(SecretPromptRequest(title: "db-primary", prompt: zh ? "postgres@10.0.2.10 的密码：" : "Password for postgres@10.0.2.10:",
+                                                      echo: false) { _ in })
+        shot("\(prefix)-24-ssh-password", app, window: window, host: host)
+        app.modal = nil
+        // 已连接的 SSH 主机详情：连接路径来自内核报告的 via
+        app.selection = "s-web1"
+        app.selectHome(.hosts)
+        shot("\(prefix)-25-hosts-ssh-detail", app, window: window, host: host)
+        app.selection = nil
+
         // 4. SFTP
         app.openSFTP(deviceId: "dev-build")
         if let s = app.activeTab as? SFTPTabModel {

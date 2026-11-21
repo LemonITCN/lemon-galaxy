@@ -248,6 +248,25 @@ struct EditorPanel: View {
     }
 
     private var jumpDevices: [DeviceInfo] { app.devices.filter { !$0.isSelf && $0.kind != .mobile } }
+    /// 可作跳板的其他 SSH 主机（不含正在编辑的这台）
+    private var jumpHosts: [VaultEntry] {
+        app.vault.filter { if case .sshHost = $0.data { return $0.id != draft.id }; return false }
+    }
+
+    /// SSH 主机的跳转：经设备（d:<设备 id>）或经另一台 SSH 主机（s:<条目 id>），二选一
+    private var sshJump: Binding<String> {
+        Binding(
+            get: {
+                if !draft.jumpDeviceId.isEmpty { return "d:" + draft.jumpDeviceId }
+                if !draft.jumpHostId.isEmpty { return "s:" + draft.jumpHostId }
+                return ""
+            },
+            set: { v in
+                draft.jumpDeviceId = v.hasPrefix("d:") ? String(v.dropFirst(2)) : ""
+                draft.jumpHostId = v.hasPrefix("s:") ? String(v.dropFirst(2)) : ""
+            }
+        )
+    }
 
     @ViewBuilder
     private var sshFields: some View {
@@ -283,10 +302,15 @@ struct EditorPanel: View {
                 }
             }
         }
-        labeled(loc("ssh.jump"), info: loc("ssh.jump.info")) {
-            Picker("", selection: $draft.jumpDeviceId) {
+        labeled(loc("ssh.jumpVia"), info: loc("ssh.jumpVia.info")) {
+            Picker("", selection: sshJump) {
                 Text(loc("ssh.jump.none")).tag("")
-                ForEach(jumpDevices, id: \.id) { d in Text(app.deviceName(d.id)).tag(d.id) }
+                Section(loc("hosts.devices")) {
+                    ForEach(jumpDevices, id: \.id) { d in Text(app.deviceName(d.id)).tag("d:" + d.id) }
+                }
+                Section(loc("hosts.sshHosts")) {
+                    ForEach(jumpHosts, id: \.id) { e in Text(app.sshLabel(e.id)).tag("s:" + e.id) }
+                }
             }
             .labelsHidden()
         }

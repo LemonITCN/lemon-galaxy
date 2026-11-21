@@ -30,8 +30,11 @@ import cn.lemonit.galaxy.core.bridge.PeerInfo
 import cn.lemonit.galaxy.core.bridge.PeerListener
 import cn.lemonit.galaxy.core.bridge.PeerSessionInterface
 import cn.lemonit.galaxy.core.bridge.PortForwardInterface
+import cn.lemonit.galaxy.core.bridge.SecretPrompt
 import cn.lemonit.galaxy.core.bridge.SecureStore
 import cn.lemonit.galaxy.core.bridge.ServerInfo
+import cn.lemonit.galaxy.core.bridge.SshInfo
+import cn.lemonit.galaxy.core.bridge.SshSessionInterface
 import cn.lemonit.galaxy.core.bridge.TerminalChannelInterface
 import cn.lemonit.galaxy.core.bridge.TerminalOptions
 import cn.lemonit.galaxy.core.bridge.TerminalSessionInfo
@@ -54,7 +57,9 @@ import uniffi.galaxy_ffi.PathInfo as FPathInfo
 import uniffi.galaxy_ffi.PeerListener as FPeerListener
 import uniffi.galaxy_ffi.PeerSession as FPeerSession
 import uniffi.galaxy_ffi.PortForward as FPortForward
+import uniffi.galaxy_ffi.SecretPrompt as FSecretPrompt
 import uniffi.galaxy_ffi.SecureStore as FSecureStore
+import uniffi.galaxy_ffi.SshSession as FSshSession
 import uniffi.galaxy_ffi.TerminalChannel as FTerminalChannel
 import uniffi.galaxy_ffi.TerminalSink as FTerminalSink
 import uniffi.galaxy_ffi.Transfer as FTransfer
@@ -63,7 +68,7 @@ import uniffi.galaxy_ffi.VideoCodec as FVideoCodec
 import uniffi.galaxy_ffi.VideoSink as FVideoSink
 
 /**
- * 真内核（galaxy-ffi，uniffi 0.29 生成的 uniffi.galaxy_ffi.*）到界面接口（core.bridge）的适配层。
+ * 真内核（galaxy-ffi，uniffi 0.32 生成的 uniffi.galaxy_ffi.*）到界面接口（core.bridge）的适配层。
  * CoreProvider 在 BuildConfig.USE_MOCK_CORE = false 时通过反射创建它（无参构造）。
  *
  * 约定：
@@ -123,6 +128,17 @@ internal class UniffiClient(private val c: FGalaxyClient) : GalaxyClientInterfac
     override suspend fun connect(deviceId: String): PeerSessionInterface = ffi { UniffiPeer(c.connect(deviceId)) }
     override suspend fun connectAssist(deviceCode: String, verificationCode: String): PeerSessionInterface =
         ffi { UniffiPeer(c.connectAssist(deviceCode, verificationCode)) }
+
+    override suspend fun connectSsh(hostId: String, prompt: SecretPrompt): SshSessionInterface {
+        // 内核在自己的线程上同步调用，原样转给界面层（界面层阻塞等用户回答）
+        val ui = prompt
+        val p = object : FSecretPrompt {
+            override fun ask(prompt: String, echo: Boolean): String? = ui.ask(prompt, echo)
+            override fun confirmHostKey(host: String, port: UShort, keyType: String, fingerprint: String, changed: Boolean): Boolean =
+                ui.confirmHostKey(host, port, keyType, fingerprint, changed)
+        }
+        return ffi { UniffiSsh(c.connectSsh(hostId, p)) }
+    }
 
     override suspend fun aiModels(): AiModels = ffi { c.aiModels().toBridge() }
 
@@ -193,6 +209,31 @@ internal class UniffiPeer(private val p: FPeerSession) : PeerSessionInterface {
         ffi { UniffiPortForward(p.forwardPort(localPort, remoteHost, remotePort)) }
 
     override suspend fun wakeOnLan(mac: String) = ffi { p.wakeOnLan(mac) }
+}
+
+internal class UniffiSsh(private val s: FSshSession) : SshSessionInterface {
+    override fun info(): SshInfo = s.info().toBridge()
+    override fun isClosed(): Boolean = s.isClosed()
+
+    override suspend fun openTerminal(options: TerminalOptions, sink: TerminalSink): TerminalChannelInterface = ffi {
+        UniffiTerminal(
+            s.openTerminal(
+                options.toFfi(),
+                object : FTerminalSink {
+                    override fun onOutput(data: ByteArray) = sink.onOutput(data)
+                    override fun onExit(code: Int?) = sink.onExit(code)
+                },
+            ),
+        )
+    }
+
+    override fun files(): FileClientInterface = UniffiFiles(s.files())
+    override suspend fun exec(request: ExecRequest): ExecResult = ffi { s.exec(request.toFfi()).toBridge() }
+
+    override suspend fun forwardPort(localPort: UShort, remoteHost: String, remotePort: UShort): PortForwardInterface =
+        ffi { UniffiPortForward(s.forwardPort(localPort, remoteHost, remotePort)) }
+
+    override fun disconnect() = s.disconnect()
 }
 
 internal class UniffiTerminal(private val t: FTerminalChannel) : TerminalChannelInterface {
