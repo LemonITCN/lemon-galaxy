@@ -17,6 +17,11 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
     private let streamW: Int
     private let streamH: Int
     private let codec: VideoCodec
+    /// 模拟录像：只记参数与时长，不写文件（selftest 用来核对界面传下来的路径与 with_audio）
+    private let recLock = NSLock()
+    private var rec: (path: String, withAudio: Bool, started: Date)?
+    private(set) var lastRecording: (path: String, withAudio: Bool)?
+    private let bitrateKbps: UInt32
 
     init(device: DeviceInfo, display: DisplayInfo, options: DisplayOptions, sink: VideoSink, zh: Bool) {
         self.device = device
@@ -28,6 +33,7 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
         streamH = Int(Double(display.height) * scale) & ~1
         renderer = MockDesktopRenderer(device: device, display: display, zh: zh, size: CGSize(width: streamW, height: streamH))
         codec = options.codecs.contains(.h265) && !options.codecs.contains(.h264) ? .h265 : .h264
+        bitrateKbps = options.bitrateKbps
         super.init(noHandle: NoHandle())
         let fps = max(5, min(Int(options.maxFps), 30))
         queue.async { [weak self] in self?.start(fps: fps, bitrate: Int(options.bitrateKbps)) }
@@ -82,7 +88,35 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
     override func requestKeyframe() { encoder?.requestKeyframe() }
     override func setBitrate(kbps: UInt32) { encoder?.setBitrate(kbps: Int(kbps)) }
 
+    override func isRecording() -> Bool { recLock.locked { rec != nil } }
+
+    override func startRecording(path: String, withAudio: Bool) async throws {
+        try recLock.locked {
+            if rec != nil { throw GalaxyError.Other(detail: "已经在录像") }
+            guard path.hasSuffix(".mp4") else { throw GalaxyError.Other(detail: "录像文件要用 .mp4") }
+            rec = (path, withAudio, Date())
+            lastRecording = (path, withAudio)
+        }
+        requestKeyframe()
+    }
+
+    /// selftest 用：把录像开始时间往前拨，截图里的时长更像真的
+    func backdateRecording(by seconds: TimeInterval) {
+        recLock.locked { if let r = rec { rec = (r.path, r.withAudio, r.started.addingTimeInterval(-seconds)) } }
+    }
+
+    override func stopRecording() throws -> RecordingInfo {
+        try recLock.locked {
+            guard let r = rec else { throw GalaxyError.Other(detail: "没有在录像") }
+            rec = nil
+            let ms = UInt64(max(0, Date().timeIntervalSince(r.started) * 1000))
+            return RecordingInfo(paths: [r.path], durationMs: ms, bytes: ms * UInt64(bitrateKbps) / 8)
+        }
+    }
+
     override func stop() {
+        // 与内核一样：关画面时自动结束录像
+        recLock.locked { rec = nil }
         queue.async { [weak self] in
             self?.stopped = true
             self?.timer?.cancel()

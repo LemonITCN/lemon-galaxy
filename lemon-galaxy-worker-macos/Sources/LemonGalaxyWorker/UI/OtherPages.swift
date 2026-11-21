@@ -233,6 +233,12 @@ struct GeneralPage: View {
                     }
                 }
             }
+            SectionLabel(text: loc("general.security"))
+            Card {
+                ToggleRow(label: loc("general.lockOnEnd"), isOn: Binding(get: { model.lockOnEnd }, set: { model.setLockOnEnd($0) }),
+                          info: loc("general.lockOnEnd.info"))
+            }
+            .disabled(model.service == nil)
             HStack(spacing: 4) {
                 SectionLabel(text: loc("general.notify"))
                 InfoButton(text: loc("general.menuIconHint"))

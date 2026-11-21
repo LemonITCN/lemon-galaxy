@@ -245,6 +245,9 @@
   "update.downloading": "已下载 {0} / {1}",
   "update.downloaded": "{0} 已下载到「下载」文件夹并打开。请把 LemonGalaxyWorker 拖进「应用程序」文件夹替换旧版本，然后重新打开它；账号与权限都会保留。",
   "update.reveal": "在访达中显示",
-  "update.done": "完成"
+  "update.done": "完成",
+  "general.security": "安全",
+  "general.lockOnEnd": "远程结束后自动锁屏",
+  "general.lockOnEnd.info": "别人远程看过这台 Mac 的桌面后，等这些会话全部结束 10 秒自动锁屏；断线后自动重连不会触发。只看终端、文件的会话不算。"
  }
 }

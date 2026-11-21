@@ -121,7 +121,7 @@ struct Sidebar: View {
                         if s == .settings, app.update.available != nil { UpdateDot().offset(x: 3, y: -2) }
                     }
                 if !compact {
-                    Text(loc(s.titleKey)).font(.system(size: 13, weight: selected ? .semibold : .regular))
+                    Text(loc(s.titleKey)).font(.system(size: 13, weight: selected ? .semibold : .regular)).lineLimit(1)
                     Spacer(minLength: 0)
                     badge(s)
                 }
@@ -147,6 +147,10 @@ struct Sidebar: View {
         } else if s == .hosts {
             let n = app.devices.filter { $0.online && !$0.isSelf && $0.kind != .mobile }.count
             if n > 0 { Text("\(n)").font(.system(size: 10.5, weight: .medium).monospacedDigit()).foregroundStyle(p.tertiaryText) }
+        } else if s == .forwards {
+            // 运行中的端口映射条数（绿色）
+            let n = app.forwards.count
+            if n > 0 { Text("\(n)").font(.system(size: 10.5, weight: .semibold).monospacedDigit()).foregroundStyle(p.success) }
         }
     }
 
@@ -194,6 +198,7 @@ struct MiddleColumn: View {
             switch app.section {
             case .hosts: HostsList()
             case .sftp: SFTPTargetsList()
+            case .forwards: PortForwardList()
             case .ai: AIConversationList()
             case .snippets: SnippetsList()
             case .local: LocalHostNav()
@@ -267,6 +272,7 @@ struct HomePage: View {
         switch app.section {
         case .hosts: HostsHome()
         case .sftp: SFTPHome()
+        case .forwards: PortForwardHome()
         case .ai: NewConversationPage()
         case .snippets: SnippetHome()
         case .local: LocalHostPageView()
@@ -367,6 +373,16 @@ struct ToastView: View {
                 Image(systemName: t.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                     .foregroundStyle(t.isError ? p.danger : p.success)
                 Text(t.text).font(.system(size: 12.5)).foregroundStyle(p.text).lineLimit(2)
+                if let a = t.action {
+                    Rectangle().fill(p.separator).frame(width: 1, height: 14)
+                    Button {
+                        a.run()
+                        app.toast = nil
+                    } label: {
+                        Text(a.title).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(p.accent)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             .padding(.horizontal, 14).padding(.vertical, 9)
             .background(RoundedRectangle(cornerRadius: 9).fill(p.elevated).shadow(color: .black.opacity(0.18), radius: 10, y: 3))

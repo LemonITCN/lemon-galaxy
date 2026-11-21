@@ -295,6 +295,72 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
 
     override func closeRdp(forwardId: String) { lock.locked { _ = rdpForwards.remove(forwardId) } }
 
+    // MARK: 远程开机
+
+    override func canWake(deviceId: String) -> Bool {
+        guard let d = device(deviceId) else { return false }
+        return !d.online && !d.lanSeen && d.kind != .mobile && !d.isSelf && MockData.wakeRelays[deviceId] != nil
+    }
+
+    /// 模拟：经同一网络里的在线设备代发唤醒包；后台模拟打开时 6 秒后设备上线
+    override func wakeDevice(deviceId: String) async throws -> [String] {
+        await delay(500)
+        guard let d = device(deviceId) else { throw GalaxyError.NotFound(detail: zh ? "设备不存在" : "Device not found") }
+        if d.online || d.lanSeen { throw GalaxyError.Other(detail: zh ? "设备在线，不需要远程开机" : "The device is already online") }
+        guard let relay = MockData.wakeRelays[deviceId] else {
+            throw GalaxyError.Other(detail: zh ? "这台设备还没有上报网卡地址，无法远程开机" : "This device has not reported a network adapter address yet")
+        }
+        if options.liveSimulation {
+            queue.asyncAfter(deadline: .now() + 6) { [weak self] in
+                guard let self else { return }
+                self.lock.locked {
+                    if let i = self._devices.firstIndex(where: { $0.id == deviceId }) {
+                        self._devices[i].online = true
+                        self._devices[i].lastSeenAt = MockData.now
+                    }
+                }
+                self.listener?.onDevicesChanged()
+            }
+        }
+        return [relay]
+    }
+
+    // MARK: 端口映射
+
+    /// 模拟映射正在占用的本机端口
+    private var forwardPorts: Set<UInt16> = []
+
+    func releaseForwardPort(_ p: UInt16) { lock.locked { _ = forwardPorts.remove(p) } }
+
+    override func startPortForward(entryId: String, prompt: SecretPrompt) async throws -> PortForward {
+        await delay(250)
+        guard let e = vault().first(where: { $0.id == entryId }),
+              case let .portForward(_, viaDevice, viaSsh, localPort, remoteHost, remotePort, _, _) = e.data else {
+            throw GalaxyError.NotFound(detail: zh ? "端口映射规则不存在" : "Port forward rule not found")
+        }
+        guard !remoteHost.trimmingCharacters(in: .whitespaces).isEmpty, remotePort != 0 else {
+            throw GalaxyError.Other(detail: zh ? "目标地址或端口没填" : "Target address or port is missing")
+        }
+        if let d = viaDevice, !d.isEmpty {
+            guard let dev = device(d) else { throw GalaxyError.NotFound(detail: zh ? "设备不存在" : "Device not found") }
+            guard dev.online || dev.lanSeen else { throw GalaxyError.Network(detail: zh ? "经由的设备离线" : "The via device is offline") }
+        } else if let h = viaSsh, !h.isEmpty {
+            // 经 SSH 主机：与连接 SSH 主机同一套询问（主机密钥、未保存的密码）
+            let s = try await connectSsh(hostId: h, prompt: prompt)
+            s.disconnect()
+        } else {
+            throw GalaxyError.Other(detail: zh ? "没有指定经由哪台设备或 SSH 主机" : "No via device or SSH host is set")
+        }
+        let port = localPort == 0 ? 50_000 + remotePort % 1000 : localPort
+        try lock.locked {
+            if forwardPorts.contains(port) {
+                throw GalaxyError.Network(detail: zh ? "本机端口 \(port) 已被占用" : "Local port \(port) is already in use")
+            }
+            forwardPorts.insert(port)
+        }
+        return MockPortForward(port: port, client: self)
+    }
+
     // MARK: 更新
 
     /// 模拟服务器上的最新版本
@@ -573,9 +639,15 @@ final class MockAudioPlayback: AudioPlayback, @unchecked Sendable {
 final class MockPortForward: PortForward, @unchecked Sendable {
     required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     let port: UInt16
-    init(port: UInt16) { self.port = port; super.init(noHandle: NoHandle()) }
+    private weak var client: MockGalaxyClient?
+    private(set) var stopped = false
+    init(port: UInt16, client: MockGalaxyClient? = nil) { self.port = port; self.client = client; super.init(noHandle: NoHandle()) }
     override func localPort() -> UInt16 { port }
-    override func stop() {}
+    override func stop() {
+        guard !stopped else { return }
+        stopped = true
+        client?.releaseForwardPort(port)
+    }
 }
 
 // MARK: - SSH 直连

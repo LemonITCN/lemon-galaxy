@@ -432,6 +432,10 @@ struct HostContextMenu: View {
     var body: some View {
         switch node.kind {
         case .device:
+            if let id = node.deviceId, app.canWake(id) {
+                Button(loc("wake.action")) { app.wake(id) }
+                Divider()
+            }
             if let d = node.device, !d.isSelf, d.kind != .mobile, let id = node.deviceId {
                 if d.platform == .windows || d.platform == .macos {
                     Button(loc("connect.desktop")) { app.openRemoteDesktop(deviceId: id) }

@@ -270,6 +270,19 @@ struct DeviceDetail: View {
                 if !tags.isEmpty {
                     HStack(spacing: 5) { ForEach(tags, id: \.self) { TagChip(text: $0) } }
                 }
+                if app.canWake(id) {
+                    // 离线、能远程开机：醒目放在连接按钮上面
+                    HStack(spacing: 12) {
+                        RoundedRectangle(cornerRadius: 8).fill(p.elevated).frame(width: 34, height: 34)
+                            .overlay(Image(systemName: "powersleep").font(.system(size: 15)).foregroundStyle(p.secondaryText))
+                        Text(statusText).font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        WakeButton(deviceId: id)
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(p.card))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(p.border, lineWidth: 0.6))
+                }
                 if device.isSelf {
                     Text(loc("device.selfHint")).font(.system(size: 12.5)).foregroundStyle(p.secondaryText)
                 } else if device.kind == .mobile {
@@ -417,5 +430,33 @@ struct RdpDetail: View {
             }
             .padding(24)
         })
+    }
+}
+
+/// 「远程开机」按钮 + i 说明（需要在对方主板 / 网卡设置里开启网络唤醒）。发送中显示转圈
+struct WakeButton: View {
+    let deviceId: String
+    var compact = false
+    @EnvironmentObject var app: AppModel
+    @Environment(\.palette) var p
+    @Environment(\.loc) var loc
+
+    var body: some View {
+        HStack(spacing: 6) {
+            InfoButton(text: loc("wake.info"))
+            if app.waking.contains(deviceId) {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text(loc("wake.sending")).font(.system(size: 12)).foregroundStyle(p.secondaryText)
+                }
+                .frame(height: 28)
+            } else if compact {
+                Button { app.wake(deviceId) } label: { Label(loc("wake.action"), systemImage: "power") }
+                    .buttonStyle(SecondaryButtonStyle())
+            } else {
+                Button { app.wake(deviceId) } label: { Label(loc("wake.action"), systemImage: "power") }
+                    .buttonStyle(PrimaryButtonStyle())
+            }
+        }
     }
 }

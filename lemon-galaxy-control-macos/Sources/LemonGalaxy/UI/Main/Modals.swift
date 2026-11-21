@@ -10,7 +10,7 @@ struct ModalOverlay: View {
             ZStack {
                 Color.black.opacity(p.isDark ? 0.45 : 0.25)
                     // 内核在等回答的卡片（密码、主机密钥）不能点空白处关掉
-                    .onTapGesture { if !m.isKernelPrompt { app.modal = nil } }
+                    .onTapGesture { if m.dismissOnBackground { app.modal = nil } }
                 card(m)
                     .background(RoundedRectangle(cornerRadius: 12).fill(p.card).shadow(color: .black.opacity(0.25), radius: 24, y: 8))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(p.border, lineWidth: 0.5))
@@ -28,6 +28,7 @@ struct ModalOverlay: View {
         case .assistConnect: AssistConnectCard().frame(width: 400)
         case .terminalSessions(let id, let list): TerminalSessionsCard(deviceId: id, sessions: list).frame(width: 440)
         case .confirm(let c): ConfirmCard(request: c).frame(width: 380)
+        case .portForwardEditor(let d): PortForwardEditorCard(draft: d).frame(width: 480)
         }
     }
 }
@@ -77,6 +78,10 @@ struct ConnectChooser: View {
                 HStack(spacing: 6) {
                     StatusDot(state: StatusDot.of(d), size: 7)
                     Text(d.lanSeen ? loc("device.lanOnly") : loc("device.offline")).font(.system(size: 11.5)).foregroundStyle(p.secondaryText)
+                    Spacer()
+                    if app.canWake(deviceId) {
+                        WakeButton(deviceId: deviceId, compact: true)
+                    }
                 }
             }
         }

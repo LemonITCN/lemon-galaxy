@@ -261,6 +261,15 @@ private struct SmokeRunner {
             guard service.status().remoteEnabled else { throw fail("允许后状态仍为禁止") }
         }) == nil { failures += 1 }
 
+        // 6b. 远程结束后自动锁屏（默认关；开了读回再关掉）
+        if await step("set_lock_on_end(true → false)", { () async throws -> Void in
+            if service.lockOnEnd() { throw fail("默认应为关") }
+            service.setLockOnEnd(on: true)
+            guard service.lockOnEnd() else { throw fail("打开后读回仍为关") }
+            service.setLockOnEnd(on: false)
+            guard !service.lockOnEnd() else { throw fail("关掉后读回仍为开") }
+        }) == nil { failures += 1 }
+
         // 7. 临时协助
         if let a = await step("start_assist", { try await service.startAssist() }) {
             log("  设备码 \(a.deviceCode) 验证码 \(a.code)")

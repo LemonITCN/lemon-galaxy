@@ -78,10 +78,25 @@ enum MockData {
             e("n-update", nil, 3, .snippet(label: zh ? "更新系统" : "Update system", command: "sudo apt update && sudo apt upgrade -y", tags: ["linux"])),
             e("n-top", nil, 4, .snippet(label: zh ? "内存占用前十" : "Top 10 by memory", command: "ps aux --sort=-%mem | head -n 11", tags: ["linux"])),
 
+            e("p-pg", nil, 0, .portForward(label: zh ? "生产库 Postgres" : "Production Postgres", viaDeviceId: "dev-build", viaSshHostId: nil,
+                                           localPort: 15432, remoteHost: "10.0.2.10", remotePort: 5432, autoStart: true,
+                                           note: zh ? "本机的数据库客户端连 127.0.0.1:15432" : "Point local database tools at 127.0.0.1:15432")),
+            e("p-grafana", nil, 1, .portForward(label: "Grafana", viaDeviceId: "dev-gpu", viaSshHostId: nil,
+                                                localPort: 0, remoteHost: "127.0.0.1", remotePort: 3000, autoStart: false, note: "")),
+            e("p-router", nil, 2, .portForward(label: zh ? "路由器管理页" : "Router admin page", viaDeviceId: nil, viaSshHostId: "s-router",
+                                               localPort: 8080, remoteHost: "192.168.1.1", remotePort: 80, autoStart: false, note: "")),
+            e("p-nas", nil, 3, .portForward(label: zh ? "NAS 管理页" : "NAS admin page", viaDeviceId: "dev-nas", viaSshHostId: nil,
+                                            localPort: 5001, remoteHost: "127.0.0.1", remotePort: 5000, autoStart: false, note: "")),
+
             e("k-web1", nil, 0, .knownHost(host: "10.0.1.21", port: 22, keyType: "ssh-ed25519", fingerprint: knownFingerprints["10.0.1.21"]!)),
             e("k-vps", nil, 1, .knownHost(host: "203.0.113.8", port: 2222, keyType: "ecdsa-sha2-nistp256", fingerprint: knownFingerprints["203.0.113.8"]!)),
         ]
     }
+
+    /// 能远程开机的离线设备 → 代发唤醒包的同网段在线设备（没列出的离线设备视为没上报网卡地址）
+    static let wakeRelays: [String: String] = [
+        "dev-reception": "OFFICE-PC-07",
+    ]
 
     /// 模拟 SSH 主机的主机密钥指纹（加密库里的 known_host 与模拟连接时报出的一致）
     static let knownFingerprints: [String: String] = [

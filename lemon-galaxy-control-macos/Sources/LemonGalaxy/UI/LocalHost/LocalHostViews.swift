@@ -139,6 +139,14 @@ struct LocalOverview: View {
                 stat(icon: "person.crop.circle", title: loc("local.account"),
                      value: host.status.accounts.first?.username ?? "—", color: p.text)
             }
+            Card {
+                HStack(spacing: 10) {
+                    Image(systemName: "lock.display").font(.system(size: 14)).foregroundStyle(p.secondaryText).frame(width: 20)
+                    ToggleRow(label: loc("local.lockOnEnd"), isOn: Binding(get: { host.lockOnEnd }, set: { host.setLockOnEnd($0) }),
+                              info: loc("local.lockOnEnd.info"))
+                }
+            }
+            .disabled(host.service == nil)
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     SectionLabel(text: loc("local.sessions"))

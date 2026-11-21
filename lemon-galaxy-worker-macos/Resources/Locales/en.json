@@ -245,6 +245,9 @@
   "update.downloading": "{0} of {1}",
   "update.downloaded": "{0} was saved to Downloads and opened. Drag LemonGalaxyWorker into Applications to replace the old version, then reopen it. Accounts and permissions are kept.",
   "update.reveal": "Show in Finder",
-  "update.done": "Done"
+  "update.done": "Done",
+  "general.security": "Security",
+  "general.lockOnEnd": "Lock screen when remote sessions end",
+  "general.lockOnEnd.info": "After someone has viewed this Mac's desktop remotely, the screen locks 10 seconds after all such sessions have ended. Automatic reconnects after a dropped connection do not trigger it, and terminal- or file-only sessions do not count."
  }
 }

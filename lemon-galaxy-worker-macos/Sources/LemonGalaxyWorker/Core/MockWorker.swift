@@ -157,6 +157,7 @@ final class MockWorkerService: HostService, @unchecked Sendable {
     private var platform: HostPlatform?
     private var listener: HostListener?
     private var remoteEnabled = true
+    private var lockOnEndOn = false
     private var accountList: [HostAccount] = []
     private var sessions: [HostSessionInfo] = []
     private var assist: AssistInfo?
@@ -257,6 +258,15 @@ final class MockWorkerService: HostService, @unchecked Sendable {
         log("policy", "", enabled ? (zh ? "已允许远程" : "Remote access enabled") : (zh ? "已禁止远程，断开所有连接" : "Remote access disabled; all sessions closed"))
         let l = lock.locked { listener }
         for s in ended { queue.async { l?.onSessionEnded(sessionId: s.id) } }
+        notify()
+    }
+
+    override func lockOnEnd() -> Bool { lock.locked { lockOnEndOn } }
+
+    override func setLockOnEnd(on: Bool) {
+        lock.locked { lockOnEndOn = on }
+        log("policy", "", on ? (zh ? "已开启远程结束后自动锁屏" : "Lock screen when remote sessions end: on")
+                             : (zh ? "已关闭远程结束后自动锁屏" : "Lock screen when remote sessions end: off"))
         notify()
     }
 

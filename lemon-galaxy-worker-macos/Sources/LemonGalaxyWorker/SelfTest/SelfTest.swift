@@ -264,6 +264,10 @@ enum SelfTest {
         model.refreshPermissions()
         shot("\(prefix)-15-permissions", window: window, host: host)
         model.page = .general
+        model.setLockOnEnd(true)
+        if !model.lockOnEnd || (model.worker as? MockWorkerHost)?.mockService?.lockOnEnd() != true {
+            problems.append("远程结束后自动锁屏没有设进被控服务")
+        }
         shot("\(prefix)-16-general", window: window, host: host)
         model.page = .about
         shot("\(prefix)-17-about", window: window, host: host)

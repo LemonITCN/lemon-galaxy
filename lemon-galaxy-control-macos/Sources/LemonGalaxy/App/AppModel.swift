@@ -4,12 +4,13 @@ import AppKit
 import SystemConfiguration
 
 enum NavSection: String, CaseIterable, Identifiable {
-    case hosts, sftp, ai, snippets, local, settings
+    case hosts, sftp, forwards, ai, snippets, local, settings
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .hosts: return "server.rack"
         case .sftp: return "folder"
+        case .forwards: return "arrow.left.arrow.right"
         case .ai: return "wand.and.stars"
         case .snippets: return "chevron.left.forwardslash.chevron.right"
         case .local: return "desktopcomputer"
@@ -32,6 +33,7 @@ enum ModalKind: Identifiable {
     case assistConnect
     case terminalSessions(deviceId: String, sessions: [TerminalSessionInfo])
     case confirm(ConfirmRequest)
+    case portForwardEditor(PortForwardDraft)
     var id: String {
         switch self {
         case .connectChooser(let d): return "chooser-" + d
@@ -41,6 +43,15 @@ enum ModalKind: Identifiable {
         case .assistConnect: return "assist"
         case .terminalSessions(let d, _): return "sessions-" + d
         case .confirm(let c): return "confirm-" + c.id
+        case .portForwardEditor(let d): return "pf-" + d.uid
+        }
+    }
+
+    /// 点遮罩空白处能不能关掉：内核在等回答的卡片、编辑中的表单都不行（免得误点丢掉输入）
+    var dismissOnBackground: Bool {
+        switch self {
+        case .secretPrompt, .hostKey, .portForwardEditor: return false
+        default: return true
         }
     }
 
@@ -75,6 +86,14 @@ struct Toast: Identifiable, Equatable {
     let id = UUID()
     let text: String
     let isError: Bool
+    /// 提示条上的一个操作按钮（如「在访达中显示」）
+    var action: ToastAction? = nil
+    static func == (a: Toast, b: Toast) -> Bool { a.id == b.id }
+}
+
+struct ToastAction {
+    let title: String
+    let run: () -> Void
 }
 
 /// 主窗口的全部状态。界面只通过它和 Bridge 层打交道。
@@ -121,6 +140,17 @@ final class AppModel: ObservableObject {
     let update = UpdateModel()
     /// 经设备转发中的 RDP（本机端口），底部提示条可以手动停止；退出登录、应用退出时全部关掉
     @Published private(set) var rdpForwards: [RdpForwardItem] = []
+    /// 正在运行的端口映射（加密库条目 id → 句柄）；退出登录、应用退出时全部停掉
+    @Published var forwards: [String: RunningForward] = [:]
+    /// 正在开启中的端口映射
+    @Published var forwardBusy: Set<String> = []
+    /// 端口映射上次开启失败的原因（详情页显示）
+    @Published var forwardErrors: [String: String] = [:]
+    @Published var selectedForward: String?
+    /// 本次登录是否已经自动开启过「登录后自动开启」的端口映射
+    var forwardsAutoStarted = false
+    /// 正在发送唤醒包的设备
+    @Published private(set) var waking: Set<String> = []
 
     private var peers: [String: PeerConnection] = [:]
     private var assistNames: [String: String] = [:]
@@ -172,7 +202,10 @@ final class AppModel: ObservableObject {
         attachHostIfReady()
         ai.reloadSummaries()
         Task { try? await client.refreshDevices() }
-        if clientState == .online { update.autoCheckIfDue() }
+        if clientState == .online {
+            update.autoCheckIfDue()
+            autoStartForwards()
+        }
     }
 
     /// 本机被控服务要等登录上线后内核才给（control 客户端）；上线、重连时都尝试接上
@@ -189,6 +222,7 @@ final class AppModel: ObservableObject {
 
     func logout() async {
         closeAllRdp()
+        stopAllForwards()
         closeAllTabs()
         try? await client.logout()
         phase = .login
@@ -206,18 +240,23 @@ final class AppModel: ObservableObject {
             server = client.server()
             attachHostIfReady()
             update.autoCheckIfDue()
+            autoStartForwards()
         }
     }
 
     func handleSessionRevoked() {
         closeAllRdp()
+        stopAllForwards()
         closeAllTabs()
         phase = .login
         showToast(L("login.revoked"), error: true)
     }
 
     func reloadDevices() { devices = client.devices() }
-    func reloadVault() { vault = client.vault() }
+    func reloadVault() {
+        vault = client.vault()
+        pruneForwards()
+    }
 
     // MARK: 加密库辅助
 
@@ -292,11 +331,11 @@ final class AppModel: ObservableObject {
 
     // MARK: 提示
 
-    func showToast(_ text: String, error: Bool = false) {
-        let t = Toast(text: text, isError: error)
+    func showToast(_ text: String, error: Bool = false, action: ToastAction? = nil) {
+        let t = Toast(text: text, isError: error, action: action)
         toast = t
         guard !selfTest else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + (error ? 5 : 2.5)) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + (action != nil ? 8 : error ? 5 : 2.5)) { [weak self] in
             if self?.toast == t { self?.toast = nil }
         }
     }
@@ -504,6 +543,30 @@ final class AppModel: ObservableObject {
     func activateDevice(_ id: String) {
         guard let d = device(id), !d.isSelf, d.kind != .mobile else { return }
         modal = .connectChooser(deviceId: id)
+    }
+
+    // MARK: 远程开机
+
+    /// 设备离线（服务器与局域网都看不到）、能被控、上报过网卡地址时才显示「远程开机」
+    func canWake(_ deviceId: String) -> Bool {
+        guard let d = device(deviceId), !d.isSelf, d.kind != .mobile, !d.online, !d.lanSeen else { return false }
+        return client.canWake(deviceId: deviceId)
+    }
+
+    /// 由本机或同一网络里在线的设备代发唤醒包，结果用提示条告诉用户经由谁发的
+    func wake(_ deviceId: String) {
+        guard !waking.contains(deviceId) else { return }
+        waking.insert(deviceId)
+        let name = deviceName(deviceId)
+        Task {
+            defer { waking.remove(deviceId) }
+            do {
+                let via = try await client.wakeDevice(deviceId: deviceId).map { $0.isEmpty ? L("wake.viaSelf") : $0 }
+                showToast(via.isEmpty ? L("wake.sentPlain", name) : L("wake.sent", name, via.joined(separator: L("wake.joiner"))))
+            } catch {
+                showToast(L("wake.failed", Self.describe(error)), error: true)
+            }
+        }
     }
 }
 

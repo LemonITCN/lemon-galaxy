@@ -15,6 +15,8 @@ final class LocalHostModel: ObservableObject {
     @Published var accessibilityGranted = false
     @Published var customCode = ""
     @Published var eventFilter = "all"
+    /// 远程看过桌面的会话都结束 10 秒后自动锁屏（被控服务里的本机设置）
+    @Published var lockOnEnd = false
     private(set) var service: HostService?
     private var adapter: HostListenerAdapter?
     private var platform: MacHostPlatform?
@@ -49,6 +51,7 @@ final class LocalHostModel: ObservableObject {
         status = s.status()
         accounts = s.accounts()
         events = s.recentEvents(limit: 200)
+        lockOnEnd = s.lockOnEnd()
         ControlBanner.shared.update(self)
         StatusMenu.shared.update(self)
     }
@@ -90,6 +93,12 @@ final class LocalHostModel: ObservableObject {
     }
 
     func disconnectAll() { service?.disconnectAll(); aiActivity = [:]; refresh() }
+
+    func setLockOnEnd(_ on: Bool) {
+        guard let service else { return }
+        service.setLockOnEnd(on: on)
+        lockOnEnd = service.lockOnEnd()
+    }
     func stopAi() { service?.stopAi(); aiActivity = [:]; refresh() }
 
     func startAssist() {

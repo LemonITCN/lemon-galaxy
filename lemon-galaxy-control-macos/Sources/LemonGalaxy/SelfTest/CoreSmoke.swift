@@ -1,10 +1,14 @@
 import Foundation
 
-/// --core-smoke <服务器地址> <用户名> <密码> [--ssh <主机:端口> <SSH 用户名> <私钥文件>]
+/// --core-smoke <服务器地址> <用户名> <密码> [--ssh <主机:端口> <SSH 用户名> <私钥文件>] [--wake-test]
 /// 不开窗口、不碰钥匙串（内存 SecureStore）、数据目录用临时目录，按顺序验证真内核绑定：
 /// core_init → login → 等上线 → devices → connect 第一台在线 worker → exec → 终端收发 → 列目录 → ai_models →（SSH 直连一段）→ logout。
 /// 带 --ssh 时：在加密库建临时 credential（私钥）与 ssh_host 条目 → connect_ssh（自动信任主机密钥）→ exec → 终端收发 →
-/// SFTP 列目录、上传、下载、比对、删除 → 端口转发 → 再连一次确认主机密钥已记录 → AI 对话以 SSH 主机为目标 → 删掉临时条目。
+/// SFTP 列目录、上传、下载、比对、删除 → 端口转发 → 端口映射规则（经 SSH 主机）→ 再连一次确认主机密钥已记录 →
+/// AI 对话以 SSH 主机为目标 → 删掉临时条目。
+/// 不带 --ssh 也会测：can_wake（在线设备、本机应为假）、端口映射规则（经设备，本机起一个只发一行标识的 TCP 服务做目标）、
+/// 本机被控的 lock_on_end 开关；对端有画面能力时测录像（打开画面 → start_recording → stop_recording → 文件非空）。
+/// --wake-test：最后打印一行 WAKE-TEST，等测试脚本结束被控端进程、设备变离线后测 can_wake 与 wake_device（唤醒包发给被控端自己的网卡）。
 /// 每步打印结果与耗时；全部通过退出码 0，否则 1。
 enum CoreSmoke {
     static func run(_ args: [String]) -> Int32 {
@@ -22,10 +26,11 @@ enum CoreSmoke {
             }
             ssh = spec
         }
+        let wakeTest = args.contains("--wake-test")
         let sem = DispatchSemaphore(value: 0)
         nonisolated(unsafe) var code: Int32 = 1
         Task.detached {
-            code = await Runner(server: server, user: user, pass: pass, ssh: ssh).run()
+            code = await Runner(server: server, user: user, pass: pass, ssh: ssh, wakeTest: wakeTest).run()
             sem.signal()
         }
         sem.wait()
@@ -104,6 +109,7 @@ private struct Runner {
     let user: String
     let pass: String
     let ssh: SshSpec?
+    let wakeTest: Bool
 
     func step<T>(_ name: String, _ body: () async throws -> T) async -> T? { await smokeStep(name, body) }
 
@@ -229,17 +235,258 @@ private struct Runner {
         } else {
             log("  对端没有声音能力，跳过收听")
         }
+        // 远程开机：在线设备与本机都不该能开
+        let wakeOnline = client.canWake(deviceId: target.id), wakeSelf = client.canWake(deviceId: client.deviceId())
+        log("  can_wake 在线设备=\(wakeOnline) 本机=\(wakeSelf)")
+        if wakeOnline || wakeSelf { log("失败 在线设备或本机不应显示远程开机"); failures += 1 }
+        if info.capabilities.contains("display") {
+            failures += await recordingSmoke(session: session)
+        } else {
+            log("  对端没有画面能力，跳过录像")
+        }
         session.disconnect()
+        failures += await portForwardSmoke(client: client, viaDevice: target.id, viaSshHost: nil, prompt: SmokePrompt())
+        failures += lockOnEndSmoke(client: client)
         failures += await updateCheck(client: client)
         if let ssh {
             failures += await SshSmoke(client: client, spec: ssh).run()
             failures += await rdpForward(client: client, viaDevice: target.id, port: ssh.port)
         }
+        if wakeTest { failures += await wakeSmoke(client: client, target: target.id) }
         if await step("logout", { try await client.logout() }) == nil { failures += 1 }
         log("  最终状态 \(client.state())")
         log(failures == 0 ? "全部通过" : "有 \(failures) 步失败")
         return failures == 0 ? 0 : 1
     }
+}
+
+// MARK: - 端口映射规则
+
+/// 本机 127.0.0.1 上只发一行标识就关连接的 TCP 服务（端口映射的目标）
+private final class BannerServer: @unchecked Sendable {
+    let port: UInt16
+    private let fd: Int32
+    private let lock = NSLock()
+    private var stopped = false
+    private(set) var accepted = 0
+
+    init?(banner: String) {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } } == 0
+        guard ok, listen(fd, 16) == 0 else { Darwin.close(fd); return nil }
+        var bound = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &bound) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) } }
+        self.fd = fd
+        self.port = UInt16(bigEndian: bound.sin_port)
+        let data = Array((banner + "\n").utf8)
+        Thread.detachNewThread { [self] in
+            while !lock.locked({ stopped }) {
+                var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                guard poll(&pfd, 1, 200) > 0 else { continue }
+                let c = accept(fd, nil, nil)
+                if c < 0 { continue }
+                lock.locked { accepted += 1 }
+                _ = data.withUnsafeBufferPointer { send(c, $0.baseAddress, $0.count, 0) }
+                Darwin.close(c)
+            }
+            Darwin.close(fd)
+        }
+    }
+
+    func stop() { lock.locked { stopped = true } }
+}
+
+/// 找一个当前空闲的本机端口（绑 0 再放掉）
+private func freeLocalPort() -> UInt16? {
+    guard let s = BannerServer(banner: "") else { return nil }
+    let p = s.port
+    s.stop()
+    Thread.sleep(forTimeInterval: 0.3)
+    return p
+}
+
+/// 加密库里的 port_forward 规则：建条目 → start_port_forward → 从本机端口读到目标服务的标识 → stop 后端口关闭 → 删条目。
+/// 经设备时另测固定本机端口与「没指定经由」的报错；经 SSH 主机时只测自动端口。
+private func portForwardSmoke(client: GalaxyClient, viaDevice: String?, viaSshHost: String?, prompt: SecretPrompt) async -> Int {
+    var failures = 0
+    let route = viaDevice != nil ? "经设备" : "经 SSH 主机"
+    let marker = "LEMON-PF-SMOKE-\(ProcessInfo.processInfo.processIdentifier)"
+    guard let server = BannerServer(banner: marker) else { log("失败 本机起不了测试 TCP 服务"); return 1 }
+    defer { server.stop() }
+    log("端口映射段（\(route)）：目标 127.0.0.1:\(server.port)")
+    let tag = "smoke-\(ProcessInfo.processInfo.processIdentifier)"
+    var created: [String] = []
+
+    func rule(_ label: String, local: UInt16, device: String?, ssh: String?) async -> VaultEntry? {
+        await smokeStep("vault_save(port_forward \(label))") {
+            try await client.vaultSave(entry: VaultEntry(id: "", folderId: nil, sort: 0,
+                                                         data: .portForward(label: tag + "-" + label, viaDeviceId: device, viaSshHostId: ssh, localPort: local,
+                                                                            remoteHost: "127.0.0.1", remotePort: server.port, autoStart: false, note: "smoke"),
+                                                         updatedAt: 0))
+        }
+    }
+
+    func exercise(_ e: VaultEntry, expectPort: UInt16?) async {
+        guard let f = await smokeStep("start_port_forward(\(route))", { try await client.startPortForward(entryId: e.id, prompt: prompt) }) else {
+            failures += 1
+            return
+        }
+        let port = f.localPort()
+        log("  本机 127.0.0.1:\(port) → 127.0.0.1:\(server.port)")
+        if let expectPort, port != expectPort { log("失败 本机端口应为 \(expectPort)"); failures += 1 }
+        if let banner = await smokeStep("经映射读标识", { try await Task.detached { try readBanner(port: port) }.value }) {
+            log("  读到 \(banner.trimmingCharacters(in: .whitespacesAndNewlines))")
+            if !banner.hasPrefix(marker) { log("失败 经映射读到的不对"); failures += 1 }
+        } else { failures += 1 }
+        f.stop()
+        let closed = await smokeStep("stop 后端口关闭") { () async throws -> Bool in
+            for _ in 0..<20 {
+                if (try? await Task.detached { try readBanner(port: port) }.value) == nil { return true }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            throw GalaxyError.Other(detail: "停止 2 秒后端口仍能连上")
+        }
+        if closed == nil { failures += 1 }
+    }
+
+    if let e = await rule("auto", local: 0, device: viaDevice, ssh: viaSshHost) {
+        created.append(e.id)
+        if case .portForward(_, let d, let h, let lp, _, let rp, _, _)? = client.vault().first(where: { $0.id == e.id })?.data {
+            if d != viaDevice || h != viaSshHost || lp != 0 || rp != server.port { log("失败 加密库读回的规则不对"); failures += 1 }
+        } else { log("失败 加密库里读不回这条规则"); failures += 1 }
+        await exercise(e, expectPort: nil)
+    } else { failures += 1 }
+
+    if viaDevice != nil {
+        if let fixed = freeLocalPort(), let e = await rule("fixed", local: fixed, device: viaDevice, ssh: nil) {
+            created.append(e.id)
+            await exercise(e, expectPort: fixed)
+        } else { failures += 1 }
+        // 没指定经由：保存可能被拒，保存成功的话开启必须报错
+        if let e = try? await client.vaultSave(entry: VaultEntry(id: "", folderId: nil, sort: 0,
+                                                                 data: .portForward(label: tag + "-novia", viaDeviceId: nil, viaSshHostId: nil, localPort: 0,
+                                                                                    remoteHost: "127.0.0.1", remotePort: server.port, autoStart: false, note: ""),
+                                                                 updatedAt: 0)) {
+            created.append(e.id)
+            do {
+                let f = try await client.startPortForward(entryId: e.id, prompt: prompt)
+                f.stop()
+                log("失败 没指定经由的规则不应能开启")
+                failures += 1
+            } catch {
+                log("  没指定经由的规则开启报错（应该的）：\(AppModel.describe(error))")
+            }
+        } else {
+            log("  没指定经由的规则保存被拒（应该的）")
+        }
+    }
+    log("  测试服务共被连 \(server.accepted) 次")
+    for id in created {
+        if await smokeStep("vault_delete(\(id))", { try await client.vaultDelete(id: id) }) == nil { failures += 1 }
+    }
+    return failures
+}
+
+// MARK: - 远程开机
+
+/// 等被控端离线（脚本看到 WAKE-TEST 后结束它）→ can_wake 应为真 → wake_device 返回代发设备（本机为空字符串）
+private func wakeSmoke(client: GalaxyClient, target: String) async -> Int {
+    log("WAKE-TEST 等待被控端离线")
+    let offline = await smokeStep("等待被控端离线") { () async throws -> Bool in
+        for _ in 0..<60 {
+            try? await client.refreshDevices()
+            if client.devices().first(where: { $0.id == target })?.online == false { return true }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        throw GalaxyError.Other(detail: "30 秒内被控端没有变成离线")
+    }
+    guard offline != nil else { return 1 }
+    let can = client.canWake(deviceId: target)
+    log("  can_wake（离线被控端）= \(can)")
+    guard can else {
+        // 被控端只上报有私网 IPv4、非随机化的网卡 MAC；本机只有随机 MAC 的无线网卡或不在私网时就没有，这时 wake_device 应报错
+        log("  注意：被控端没有上报可唤醒的网卡地址（本机网卡是随机 MAC、不在私网，或被控端程序较旧），只验证 wake_device 报错")
+        do {
+            let v = try await client.wakeDevice(deviceId: target)
+            log("失败 不能远程开机的设备 wake_device 却成功：\(v)")
+            return 1
+        } catch {
+            log("  wake_device 报错（应该的）：\(AppModel.describe(error))")
+            return 0
+        }
+    }
+    guard let via = await smokeStep("wake_device", { try await client.wakeDevice(deviceId: target) }) else { return 1 }
+    log("  代发设备 \(via.map { $0.isEmpty ? "本机" : $0 })")
+    return via.isEmpty ? 1 : 0
+}
+
+// MARK: - 远程结束后自动锁屏（本机被控）
+
+private func lockOnEndSmoke(client: GalaxyClient) -> Int {
+    guard let h = client.host() else {
+        log("  本机被控服务还没有，跳过 lock_on_end")
+        return 0
+    }
+    let before = h.lockOnEnd()
+    h.setLockOnEnd(on: !before)
+    let flipped = h.lockOnEnd()
+    h.setLockOnEnd(on: before)
+    let restored = h.lockOnEnd()
+    log("  lock_on_end 原来 \(before) → 改后 \(flipped) → 改回 \(restored)")
+    if flipped == before || restored != before { log("失败 lock_on_end 读回不对"); return 1 }
+    log("通过 set_lock_on_end / lock_on_end")
+    return 0
+}
+
+// MARK: - 录像
+
+private final class SmokeVideoSink: VideoSink, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _frames = 0
+    private var _keyframes = 0
+    var frames: Int { lock.locked { _frames } }
+    func onConfig(codec: VideoCodec, width: UInt32, height: UInt32) { log("  [画面] \(codec) \(width)×\(height)") }
+    func onFrame(data: Data, ptsUs: UInt64, keyframe: Bool) { lock.locked { _frames += 1; if keyframe { _keyframes += 1 } } }
+    func onClosed(reason: String) { log("  [画面] 关闭：\(reason)") }
+    func onCursor(x: Int32, y: Int32, visible: Bool) {}
+}
+
+/// 打开第一块屏 → 等到帧 → 录 3 秒（不带声音）→ 停止，检查文件存在且非空 → 关画面
+private func recordingSmoke(session: PeerSession) async -> Int {
+    var failures = 0
+    guard let displays = await smokeStep("list_displays", { try await session.listDisplays() }), let d = displays.first(where: \.primary) ?? displays.first else {
+        return 1
+    }
+    let sink = SmokeVideoSink()
+    guard let ch = await smokeStep("open_display", {
+        try await session.openDisplay(options: DisplayOptions(displayId: d.id, maxFps: 15, bitrateKbps: 2_000, codecs: [.h264], viewOnly: true), sink: sink)
+    }) else { return 1 }
+    defer { ch.stop() }
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lemongalaxy-rec-smoke-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let path = dir.appendingPathComponent(RemoteDesktopModel.recordingFileName(device: "smoke", at: Clock.nowMs)).path
+    if await smokeStep("start_recording", { try await ch.startRecording(path: path, withAudio: false) }) == nil { return 1 }
+    if !ch.isRecording() { log("失败 start_recording 后 is_recording 为假"); failures += 1 }
+    try? await Task.sleep(nanoseconds: 3_000_000_000)
+    log("  3 秒内收到 \(sink.frames) 帧")
+    if let info = await smokeStep("stop_recording", { try ch.stopRecording() }) {
+        let sizes = info.paths.map { (try? FileManager.default.attributesOfItem(atPath: $0)[.size] as? NSNumber)?.uint64Value ?? 0 }
+        log("  文件 \(info.paths.map { ($0 as NSString).lastPathComponent }) 大小 \(sizes) 时长 \(info.durationMs) ms 共 \(info.bytes) 字节")
+        if info.paths.isEmpty || sizes.contains(0) { log("失败 录像文件为空或不存在"); failures += 1 }
+    } else { failures += 1 }
+    if ch.isRecording() { log("失败 stop_recording 后仍在录"); failures += 1 }
+    if (try? ch.stopRecording()) != nil { log("失败 没在录时 stop_recording 应报错"); failures += 1 }
+    return failures
 }
 
 // MARK: - 检查更新
@@ -508,6 +755,10 @@ private struct SshSmoke {
         } else { failures += 1 }
 
         session.disconnect()
+        // 加密库里的端口映射规则经这台 SSH 主机（主机密钥已记录，不该再问）
+        let pfPrompt = SmokePrompt()
+        failures += await portForwardSmoke(client: client, viaDevice: nil, viaSshHost: hostId, prompt: pfPrompt)
+        if pfPrompt.hostKeyAsks != 0 || pfPrompt.asks != 0 { log("失败 经 SSH 主机的端口映射不应再询问"); failures += 1 }
         let closed = await step("ssh.disconnect") { () async throws -> Bool in
             for _ in 0..<50 {
                 if session.isClosed() { return true }

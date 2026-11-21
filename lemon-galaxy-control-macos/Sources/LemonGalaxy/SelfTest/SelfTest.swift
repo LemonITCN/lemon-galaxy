@@ -54,6 +54,8 @@ enum SelfTest {
         Clock.frozenMs = 1_795_225_692_000      // 2026-11-21 09:48:12（北京时间）
         let fakeHome = makeFakeHome()
         LocalFileSource.homeOverride = fakeHome.path
+        // 录像写进假主目录里的「影片」，不碰真的 ~/Movies
+        RemoteDesktopModel.recordingDirOverride = fakeHome.appendingPathComponent("Movies/LemonGalaxy", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: fakeHome.deletingLastPathComponent()) }
         RemoteVideoNSView.snapshotMode = true
         checkAudioConversion()
@@ -332,6 +334,24 @@ enum SelfTest {
         app.closeAllRdp()
         app.selection = nil
 
+        // 远程开机：离线且上报过网卡地址的设备才有按钮
+        if !app.canWake("dev-reception") { problems.append("前台电脑离线且同网段有在线设备，应能远程开机") }
+        if app.canWake("dev-nas") { problems.append("NAS 没上报网卡地址，不应显示远程开机") }
+        if app.canWake("dev-build") || app.canWake("dev-self") || app.canWake("dev-phone") { problems.append("在线设备、本机、手机不应显示远程开机") }
+        app.selection = "dev:dev-reception"
+        shot("\(prefix)-18-hosts-device-wake", app, window: window, host: host)
+        app.modal = .connectChooser(deviceId: "dev-reception")
+        shot("\(prefix)-18b-hosts-wake-chooser", app, window: window, host: host)
+        app.modal = nil
+        app.wake("dev-reception")
+        wait("远程开机") { !app.waking.contains("dev-reception") && app.toast != nil }
+        if app.toast?.isError != false || app.toast?.text.contains("OFFICE-PC-07") != true {
+            problems.append("远程开机应提示经由的设备：\(app.toast?.text ?? "无提示")")
+        }
+        shot("\(prefix)-19-hosts-wake-sent", app, window: window, host: host)
+        app.toast = nil
+        app.selection = nil
+
         // 3. 终端
         app.openTerminal(deviceId: "dev-build")
         if let t = app.activeTab as? TerminalTabModel {
@@ -443,6 +463,30 @@ enum SelfTest {
             }
             r.setVolume(1)
         }
+        // 录像：正在收听声音，with_audio 应为真；录制中红点 + 计时，停止后提示保存位置
+        if let r = app.activeTab as? RemoteDesktopModel {
+            if !r.canRecord { problems.append("画面开着时应能录像") }
+            r.startRecording()
+            wait("开始录像") { r.recording != nil && !r.recordBusy }
+            if let rec = r.recording {
+                let mock = (rec.channel as? MockDisplayChannel)?.lastRecording
+                if !rec.withAudio || mock?.withAudio != true { problems.append("正在收听声音时录像应带声音") }
+                if mock?.path != rec.path { problems.append("录像路径没有传给内核") }
+                let name = (rec.path as NSString).lastPathComponent
+                if !rec.path.hasPrefix(RemoteDesktopModel.recordingDir.path + "/") || !name.hasPrefix("LemonGalaxy-") || !name.hasSuffix(".mp4") {
+                    problems.append("录像文件名或位置不对：\(rec.path)")
+                }
+                if !FileManager.default.fileExists(atPath: RemoteDesktopModel.recordingDir.path) { problems.append("录像目录没有建") }
+                r.recording?.startedMs = Clock.nowMs - 83_000
+                (rec.channel as? MockDisplayChannel)?.backdateRecording(by: 83)
+            }
+            shot("\(prefix)-44-remote-recording", app, window: window, host: host, settle: 0.2)
+            r.stopRecording()
+            if r.recording != nil { problems.append("停止后仍在录像") }
+            if app.toast?.action == nil || app.toast?.isError == true { problems.append("停止录像后应提示保存位置并能在访达中显示：\(app.toast?.text ?? "无提示")") }
+            shot("\(prefix)-45-remote-recording-saved", app, window: window, host: host, settle: 0.2)
+            app.toast = nil
+        }
 
         // 6. AI 智能体
         app.selectHome(.ai)
@@ -484,6 +528,71 @@ enum SelfTest {
         app.selectedSnippet = "n-docker"
         shot("\(prefix)-60-snippets", app, window: window, host: host)
 
+        // 7b. 端口映射：「生产库 Postgres」设了登录后自动开启，登录上线时已经开着
+        app.selectHome(.forwards)
+        wait("自动开启端口映射") { app.forwards["p-pg"] != nil }
+        if let f = app.forwards["p-pg"], f.port != 15432 { problems.append("固定本机端口的映射端口不对：\(f.port)") }
+        if app.forwards["p-grafana"] != nil { problems.append("没设自动开启的映射不应自动开") }
+        app.startForward("p-grafana")
+        wait("开启端口映射（自动端口）") { app.forwards["p-grafana"] != nil }
+        // 经由的设备离线：开启失败，记下原因
+        app.startForward("p-nas")
+        wait("经由离线设备的映射报错") { app.forwardErrors["p-nas"] != nil && !app.forwardBusy.contains("p-nas") }
+        if app.forwards["p-nas"] != nil { problems.append("经由离线设备的映射不应开成功") }
+        // 经由 SSH 主机：主机密钥确认走与 SSH 连接相同的卡片
+        app.startForward("p-router")
+        if wait("端口映射的主机密钥确认", { if case .hostKey = app.modal { return true }; return false }) {
+            if case .hostKey(let r)? = app.modal { r.respond(true); app.modal = nil }
+            wait("经由 SSH 主机的映射") { app.forwards["p-router"] != nil }
+        }
+        app.toast = nil
+        app.selectedForward = nil
+        shot("\(prefix)-62-forwards", app, window: window, host: host)
+        app.selectedForward = "p-nas"
+        shot("\(prefix)-63-forward-detail-error", app, window: window, host: host)
+        app.selectedForward = "p-pg"
+        shot("\(prefix)-63-forward-detail", app, window: window, host: host)
+        app.editForward("p-router")
+        if case .portForwardEditor(let d)? = app.modal {
+            if d.via != "s:s-router" || d.localPort != "8080" || d.remotePort != "80" || d.sort != 2 || d.autoStart { problems.append("编辑草稿读回不对") }
+        } else { problems.append("编辑端口映射应弹出编辑卡片") }
+        app.editForward(nil)
+        if case .portForwardEditor(let d)? = app.modal, d.sort != 4 || !d.isNew { problems.append("新建端口映射应排在最后：\(d.sort)") }
+        app.editForward("p-pg")
+        shot("\(prefix)-64-forward-editor", app, window: window, host: host)
+        let bad = PortForwardDraft()
+        bad.label = zh ? "内网数据库" : "Internal DB"
+        bad.remoteHost = "db internal"
+        bad.remotePort = "70000"
+        bad.localPort = "abc"
+        bad.showErrors = true
+        if bad.build() != nil || bad.problems.count != 4 { problems.append("端口映射校验不对：\(bad.problems)") }
+        app.modal = .portForwardEditor(bad)
+        shot("\(prefix)-65-forward-editor-invalid", app, window: window, host: host)
+        app.modal = nil
+        // 新建 → 保存 → 删除（删除前先停）
+        let draft = PortForwardDraft()
+        draft.via = "d:dev-imac"
+        draft.remoteHost = "127.0.0.1"
+        draft.remotePort = "5900"
+        var newId: String?
+        if let e = draft.build() {
+            if case .portForward(let label, let vd, let vs, let lp, _, _, _, _) = e.data, label != "127.0.0.1:5900" || vd != "dev-imac" || vs != nil || lp != 0 {
+                problems.append("新建端口映射组装不对：\(e.data)")
+            }
+            Task { newId = await app.save(e)?.id }
+            wait("保存端口映射") { newId != nil }
+        } else { problems.append("合法的端口映射草稿组装失败：\(draft.problems)") }
+        if let id = newId {
+            app.startForward(id)
+            wait("开启新建的映射") { app.forwards[id] != nil }
+            let handle = app.forwards[id]?.handle as? MockPortForward
+            Task { await app.delete(id) }
+            wait("删除端口映射") { app.forwardRule(id) == nil && app.forwards[id] == nil }
+            if handle?.stopped != true { problems.append("规则删掉后映射应停止") }
+        }
+        app.toast = nil
+
         // 8. 本机被控
         if let mock = (app.client as? MockGalaxyClient)?.mockHost {
             mock.simulateSession(user: "alice", device: "OFFICE-PC-07", ai: true)
@@ -492,6 +601,8 @@ enum SelfTest {
         pump(0.4)
         app.selectHome(.local)
         app.localPage = .overview
+        app.host.setLockOnEnd(true)
+        if !app.host.lockOnEnd || (app.client as? MockGalaxyClient)?.mockHost.lockOnEnd() != true { problems.append("远程结束后自动锁屏没有设进被控服务") }
         shot("\(prefix)-70-local-overview", app, window: window, host: host)
         app.localPage = .accounts
         shot("\(prefix)-71-local-accounts", app, window: window, host: host)
@@ -565,6 +676,25 @@ enum SelfTest {
         shot("\(prefix)-91-compact-terminal", app, window: window, host: host)
         settings.autoHideList = true
         settings.sidebarCompact = false
+
+        // 录像中关掉远程桌面标签：录像自动结束并提示保存位置
+        if let r = app.tabs.compactMap({ $0 as? RemoteDesktopModel }).first {
+            app.activeTabId = r.id
+            r.startRecording()
+            wait("再次开始录像") { r.recording != nil && !r.recordBusy }
+            let ch = r.recording?.channel
+            app.toast = nil
+            app.closeTab(r.id)
+            if ch?.isRecording() != false || r.recording != nil { problems.append("关标签后录像没有结束") }
+            if app.toast?.action == nil { problems.append("关标签结束录像后应提示保存位置") }
+            app.toast = nil
+        }
+
+        // 退出登录：运行中的端口映射全部停掉
+        let running = app.forwards.values.compactMap { $0.handle as? MockPortForward }
+        if running.isEmpty { problems.append("此时应有运行中的端口映射") }
+        app.stopAllForwards()
+        if running.contains(where: { !$0.stopped }) || !app.forwards.isEmpty { problems.append("全部停止后仍有映射在运行") }
 
         // 收尾
         app.closeAllTabs()

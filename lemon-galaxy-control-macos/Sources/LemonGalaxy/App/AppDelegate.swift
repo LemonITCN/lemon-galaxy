@@ -30,8 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // 经设备转发的 RDP 端口随应用一起关掉
+        // 经设备转发的 RDP 端口、端口映射随应用一起关掉
         app?.closeAllRdp()
+        app?.stopAllForwards()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

@@ -35,6 +35,9 @@ final class RemoteDesktopModel: TabModel {
     @Published var audioBusy = false
     @Published var audioVolume: Double
     private(set) var audio: AudioPlayback?
+    /// 正在录像（内核把收到的 H.264 / Opus 原样封装成分片 MP4，不重新编码）
+    @Published var recording: Recording?
+    @Published var recordBusy = false
     private var closed = false
     private var peerWatch: AnyCancellable?
     let videoView = RemoteVideoNSView()
@@ -103,6 +106,8 @@ final class RemoteDesktopModel: TabModel {
 
     func open(_ id: UInt32) async {
         guard let peer else { return }
+        // 切屏、改帧率要重开画面：录像随旧画面结束（内核 stop 时也会自动结束），这里先停下来给出保存位置
+        if recording != nil { stopRecording() }
         channel?.stop()
         channel = nil
         displayId = id
@@ -144,6 +149,7 @@ final class RemoteDesktopModel: TabModel {
 
     /// 被控端结束了画面（对方断开、权限收回、屏幕拔掉等）
     func displayClosed(_ reason: String) {
+        if recording != nil { stopRecording() }
         phase = .failed(reason.isEmpty ? L("remote.closed") : reason)
         live = false
     }
@@ -185,6 +191,8 @@ final class RemoteDesktopModel: TabModel {
             if reason != nil {
                 self?.privacyOn = false
                 self?.stopAudio()
+                // 会话断了：录像到此为止
+                if self?.recording != nil { self?.stopRecording() }
             }
         }
     }
@@ -252,6 +260,107 @@ final class RemoteDesktopModel: TabModel {
         }
     }
 
+    // MARK: 录像
+
+    struct Recording {
+        /// 录在哪个画面通道上（切屏后 channel 换了，停录像要找原来那个）
+        let channel: DisplayChannel
+        let path: String
+        var startedMs: Int64
+        let withAudio: Bool
+    }
+
+    /// 录像保存位置：~/Movies/LemonGalaxy（selftest 换成临时目录）
+    static var recordingDirOverride: URL?
+    static var recordingDir: URL {
+        recordingDirOverride ?? FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("LemonGalaxy", isDirectory: true)
+    }
+
+    /// LemonGalaxy-<设备名>-<yyyyMMdd-HHmmss>.mp4；设备名里不能进文件名的字符换成 -
+    nonisolated static func recordingFileName(device: String, at ms: Int64) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        let bad = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.newlines).union(.controlCharacters)
+        var name = device.unicodeScalars.map { bad.contains($0) ? "-" : String($0) }.joined().trimmingCharacters(in: .whitespaces)
+        if name.isEmpty { name = "device" }
+        return "LemonGalaxy-\(name)-\(f.string(from: Date(timeIntervalSince1970: TimeInterval(ms) / 1000))).mp4"
+    }
+
+    var canRecord: Bool { channel != nil && phase == .streaming }
+
+    func toggleRecording() {
+        if recording != nil { stopRecording() } else { startRecording() }
+    }
+
+    /// 开始录像：正在收听声音时一起录
+    func startRecording() {
+        guard let channel, recording == nil, !recordBusy, phase == .streaming else { return }
+        recordBusy = true
+        let dir = Self.recordingDir
+        let withAudio = audioOn
+        let path = dir.appendingPathComponent(Self.recordingFileName(device: title, at: Clock.nowMs)).path
+        Task {
+            defer { recordBusy = false }
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try await channel.startRecording(path: path, withAudio: withAudio)
+                // 等待期间标签关了或画面换了：旧画面停掉时内核已自动结束，这里不再记
+                if closed || self.channel !== channel {
+                    _ = try? channel.stopRecording()
+                    return
+                }
+                recording = Recording(channel: channel, path: path, startedMs: Clock.nowMs, withAudio: withAudio)
+            } catch {
+                if !closed { app?.showToast(L("remote.record.failed", AppModel.describe(error)), error: true) }
+            }
+        }
+    }
+
+    /// 停止录像并提示保存位置。画面已被内核关掉（断线、切屏）时内核已自动结束录像，stop_recording 会报「没在录」，按已知路径提示
+    func stopRecording() {
+        guard let rec = recording else { return }
+        recording = nil
+        var paths = [rec.path]
+        var durationMs = UInt64(max(0, Clock.nowMs - rec.startedMs))
+        var failure: String?
+        do {
+            let info = try rec.channel.stopRecording()
+            if !info.paths.isEmpty { paths = info.paths }
+            durationMs = info.durationMs
+        } catch {
+            failure = AppModel.describe(error)
+        }
+        let fm = FileManager.default
+        if failure != nil, !paths.contains(where: { fm.fileExists(atPath: $0) }) {
+            app?.showToast(L("remote.record.failed", failure ?? ""), error: true)
+            return
+        }
+        let duration = Self.clock(Int64(durationMs))
+        let text = paths.count > 1 ? L("remote.record.savedMany", duration, paths.count)
+            : L("remote.record.saved", duration, (paths[0] as NSString).lastPathComponent)
+        app?.showToast(text, action: ToastAction(title: L("remote.record.reveal")) { Self.reveal(paths) })
+    }
+
+    /// 在访达里选中录像文件；文件不在（例如模拟内核）时打开所在文件夹
+    static func reveal(_ paths: [String]) {
+        let urls = paths.filter { FileManager.default.fileExists(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+        if urls.isEmpty {
+            let dir = paths.first.map { URL(fileURLWithPath: $0).deletingLastPathComponent() } ?? recordingDir
+            NSWorkspace.shared.open(dir)
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting(urls)
+        }
+    }
+
+    /// 毫秒 → 00:12 / 1:02:03
+    nonisolated static func clock(_ ms: Int64) -> String {
+        let t = max(0, ms / 1000)
+        let h = t / 3600, m = t / 60 % 60, sec = t % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%02d:%02d", m, sec)
+    }
+
     // MARK: 剪贴板同步（文字）：本机变化推给远端；切回窗口时拉取远端
     private func setupClipboardSync() {
         clipboardTimer?.invalidate()
@@ -284,6 +393,8 @@ final class RemoteDesktopModel: TabModel {
 
     override func close() {
         closed = true
+        // 关标签时录像随之结束并提示保存位置（要在 channel.stop 之前，才拿得到内核给的文件信息）
+        if recording != nil { stopRecording() }
         stopAudio()
         // 关掉远程桌面标签时顺手关隐私屏（同一会话可能还被终端、文件标签用着，被控端不会自动关）
         if privacyOn, let peer, peer.closedReason == nil {
@@ -646,6 +757,7 @@ struct RemoteToolbar: View {
                 tab.clipboardSync.toggle()
             }
             if tab.audioSupported { RemoteAudioControl(tab: tab) }
+            RemoteRecordButton(tab: tab)
             if tab.privacySupported { privacyToggle }
             Spacer(minLength: 8)
             stats
@@ -802,5 +914,41 @@ struct RemoteAudioVolumePanel: View {
         }
         .padding(14)
         .frame(width: 240)
+    }
+}
+
+/// 录像按钮：没在录时是圆形录制图标；录制中显示红点与计时，点一下停止
+struct RemoteRecordButton: View {
+    @ObservedObject var tab: RemoteDesktopModel
+    @Environment(\.palette) var p
+    @Environment(\.loc) var loc
+    @State private var hover = false
+
+    var body: some View {
+        if let rec = tab.recording {
+            Button { tab.stopRecording() } label: {
+                HStack(spacing: 5) {
+                    Circle().fill(p.danger).frame(width: 7, height: 7)
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        Text(verbatim: RemoteDesktopModel.clock(Clock.nowMs - rec.startedMs))
+                            .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                    }
+                    Image(systemName: "stop.fill").font(.system(size: 8, weight: .bold)).opacity(hover ? 1 : 0.7)
+                }
+                .foregroundStyle(p.danger)
+                .padding(.horizontal, 8).frame(height: 24)
+                .background(RoundedRectangle(cornerRadius: 6).fill(p.danger.opacity(hover ? 0.2 : 0.13)))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hover = $0 }
+            .help(loc("remote.record.stop"))
+        } else if tab.recordBusy {
+            ProgressView().controlSize(.mini).frame(width: 26, height: 24)
+        } else {
+            IconButton(icon: "record.circle", help: loc("remote.record.start")) { tab.startRecording() }
+                .disabled(!tab.canRecord)
+                .opacity(tab.canRecord ? 1 : 0.45)
+        }
     }
 }

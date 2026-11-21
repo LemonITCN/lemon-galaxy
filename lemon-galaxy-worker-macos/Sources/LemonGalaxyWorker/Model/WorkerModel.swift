@@ -48,6 +48,8 @@ final class WorkerModel: ObservableObject {
     @Published var assistServer = ""
     @Published var assistError: String?
     @Published var disconnecting: Set<String> = []
+    /// 远程看过桌面的会话都结束 10 秒后自动锁屏（被控服务里的本机设置，默认关）
+    @Published var lockOnEnd = false
     let updater: WorkerUpdater
     private(set) var service: HostService?
     private var listener: WorkerListener?
@@ -137,6 +139,7 @@ final class WorkerModel: ObservableObject {
         status = s.status()
         accounts = status.accounts
         events = s.recentEvents(limit: 300)
+        lockOnEnd = s.lockOnEnd()
         let live = Set(status.sessions.map(\.id))
         aiActivity = aiActivity.filter { live.contains($0.key) }
         UIHooks.update(self)
@@ -204,6 +207,12 @@ final class WorkerModel: ObservableObject {
     }
 
     func disconnectAll() { service?.disconnectAll(); aiActivity = [:]; refresh() }
+
+    func setLockOnEnd(_ on: Bool) {
+        guard let service else { return }
+        service.setLockOnEnd(on: on)
+        lockOnEnd = service.lockOnEnd()
+    }
 
     /// 断开一个会话
     func disconnect(_ s: HostSessionInfo) {
