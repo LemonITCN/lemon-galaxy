@@ -727,6 +727,27 @@ impl GalaxyClient {
         .await
     }
 
+    // ---------------- 远程开机 ----------------
+
+    /// 能不能远程开机：设备离线、能被控、上报过网卡地址（界面据此显示「远程开机」）。
+    pub fn can_wake(&self, device_id: String) -> bool {
+        let Ok(d) = parse_dev(&device_id) else { return false };
+        self.inner.devices.lock().iter().find(|x| x.id == d).map(galaxy_client::wake::can_wake).unwrap_or(false)
+    }
+
+    /// 远程开机：由本机（与目标同一网络时）或同一网络里在线的设备代发唤醒包。
+    /// 返回代发设备的名字，空字符串表示本机。目标要在主板 / 网卡设置里开启网络唤醒。
+    pub async fn wake_device(&self, device_id: String) -> Result<Vec<String>> {
+        let inner = self.inner.clone();
+        run(async move {
+            let d = parse_dev(&device_id)?;
+            let c = inner.online.lock().as_ref().map(|o| o.connector.clone()).ok_or_else(|| GalaxyError::Network { detail: "尚未连上服务器".into() })?;
+            let list = inner.devices.lock().clone();
+            Ok(galaxy_client::wake::wake(&c, &list, inner.identity.device_id, d).await?)
+        })
+        .await
+    }
+
     // ---------------- 连接 ----------------
 
     pub async fn connect(&self, device_id: String) -> Result<Arc<PeerSession>> {

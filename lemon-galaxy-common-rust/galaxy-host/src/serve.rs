@@ -322,6 +322,40 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
             *sink.ctl.lock() = None;
             writer.abort();
         }
+        StreamOpen::Audio(req) => {
+            if !p.audio {
+                fio::write(&mut send, &AudioOut::Error(denied("没有听声音的权限"))).await?;
+                return Ok(());
+            }
+            if !req.codecs.contains(&AudioCodec::Opus) {
+                fio::write(&mut send, &AudioOut::Error(PeerError::new("unsupported", "没有双方都支持的声音编码"))).await?;
+                return Ok(());
+            }
+            let channel = NEXT_CHANNEL.fetch_add(1, Ordering::Relaxed).max(1);
+            let platform = host.platform.read().clone();
+            let id = match host.audio.subscribe(&platform, conn.clone(), channel, req.bitrate_kbps) {
+                Ok(id) => id,
+                Err(e) => {
+                    fio::write(&mut send, &AudioOut::Error(PeerError::new("unsupported", e))).await?;
+                    return Ok(());
+                }
+            };
+            host.log(&sid, &sess.from_user_name, "audio", "收听声音", false);
+            let r = fio::write(
+                &mut send,
+                &AudioOut::Started { codec: AudioCodec::Opus, sample_rate: crate::audio::SAMPLE_RATE, channels: crate::audio::CHANNELS as u8, channel },
+            )
+            .await;
+            if r.is_ok() {
+                // 主控端发 Stop、关流或断线都算结束
+                while let Ok(Some(m)) = fio::read::<_, AudioIn>(&mut recv).await {
+                    match m {
+                        AudioIn::Stop => break,
+                    }
+                }
+            }
+            host.audio.unsubscribe(id);
+        }
         StreamOpen::Clipboard => {
             fio::write(&mut send, &MgmtResp::Error(PeerError::new("unsupported", "请使用管理请求同步剪贴板"))).await?;
         }
@@ -426,26 +460,7 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
 }
 
 async fn wake_on_lan(mac: &str) -> Result<(), String> {
-    let hex: String = mac.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    if hex.len() != 12 {
-        return Err("MAC 地址格式错误".into());
-    }
-    let bytes: Vec<u8> = (0..6).map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0)).collect();
-    let mut pkt = vec![0xffu8; 6];
-    for _ in 0..16 {
-        pkt.extend_from_slice(&bytes);
-    }
-    let s = tokio::net::UdpSocket::bind("0.0.0.0:0").await.map_err(|e| e.to_string())?;
-    s.set_broadcast(true).map_err(|e| e.to_string())?;
-    for port in [9u16, 7] {
-        let _ = s.send_to(&pkt, ("255.255.255.255", port)).await;
-    }
-    for i in galaxy_net::ifaces::list() {
-        if let Some(b) = i.broadcast {
-            let _ = s.send_to(&pkt, (b, 9)).await;
-        }
-    }
-    Ok(())
+    galaxy_net::wol::send_magic(mac).await
 }
 
 async fn run_helper(exe: &std::path::Path, sess: &ActiveSession, op: FileOp, recv: &mut quinn::RecvStream, send: &mut quinn::SendStream) -> anyhow::Result<()> {

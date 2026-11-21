@@ -26,6 +26,21 @@ impl EncodedFrameSink {
     }
 }
 
+/// 平台层采到系统声音后推给内核。
+#[derive(uniffi::Object)]
+pub struct AudioPcmSink {
+    inner: Arc<dyn galaxy_host::audio::AudioSink>,
+}
+
+#[uniffi::export]
+impl AudioPcmSink {
+    /// `pcm` 是交错排列的 32 位浮点样本（小端），采样率与声道数随系统。
+    pub fn push(&self, pcm: Vec<u8>, sample_rate: u32, channels: u32) {
+        let samples: Vec<f32> = pcm.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        self.inner.push_pcm(&samples, sample_rate, channels.clamp(1, 64) as u16);
+    }
+}
+
 /// 把原生平台层适配成内核的 HostPlatform。
 struct PlatformBridge(Arc<dyn HostPlatform>);
 
@@ -63,6 +78,19 @@ impl hp::HostPlatform for PlatformBridge {
     }
     fn clipboard_set(&self, d: pp::ClipboardData) {
         self.0.clipboard_set(d.into())
+    }
+    fn set_privacy(&self, on: bool) -> bool {
+        self.0.set_privacy(on)
+    }
+    fn start_audio(&self, sink: Arc<dyn galaxy_host::audio::AudioSink>) -> std::result::Result<(), String> {
+        if self.0.start_audio(Arc::new(AudioPcmSink { inner: sink })) {
+            Ok(())
+        } else {
+            Err("无法采集声音（请确认已授权「屏幕录制」）".into())
+        }
+    }
+    fn stop_audio(&self) {
+        self.0.stop_audio()
     }
     fn capabilities(&self) -> Vec<String> {
         self.0.capabilities()

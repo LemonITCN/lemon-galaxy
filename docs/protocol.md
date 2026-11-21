@@ -21,7 +21,8 @@
 ### 2.1 认证
 
 1. 服务器 → `{"t":"hello","nonce":"b64","server_time":ms}`
-2. 客户端 → `{"t":"auth","device_id":"hex32","signature":"b64"}`，签名内容 `"lemon-galaxy/ws-auth/v1" || nonce`，用设备身份密钥。
+2. 客户端 → `{"t":"auth","device_id":"hex32","signature":"b64","macs":["AA:BB:CC:DD:EE:FF"]?}`，签名内容 `"lemon-galaxy/ws-auth/v1" || nonce`，用设备身份密钥。
+   被控连接附带本机网卡 MAC（有私网 IPv4、非虚拟、非随机化地址，最多 8 个），服务器记下供远程开机用。
    已登录设备同时带 HTTP 头 `Authorization: Bearer <session_token>`；临时协助模式（未登录）用 `?assist=1` 且不带令牌。
 3. 服务器 → `{"t":"ready","device_id":"...","public_ip":"1.2.3.4","udp_port":7443,"assist_code":"123456789"?}`
 
@@ -158,7 +159,7 @@ HelloAck {
   host: HostInfo { device_id, hostname, platform, os_version, arch, app_version },
   account: Option<u64>,               // 以哪个账号的身份被控（协助模式为 None）
   permissions: Permissions { view, control, files, terminal, clipboard, audio, ai_cap },
-  capabilities: Vec<String>,          // "terminal" "files" "exec" "display" "input" "clipboard" "port_forward" "screenshot" "ui_tree"
+  capabilities: Vec<String>,          // "terminal" "files" "exec" "display" "input" "clipboard" "port_forward" "screenshot" "ui_tree" "privacy" "audio"
 }
 ```
 之后控制流用于心跳、会话级事件（被控端本地用户断开、权限变化）。
@@ -176,6 +177,7 @@ HelloAck {
 | `PortForward { host, port }` | 被控端回 `Ok` 后双向透传字节 |
 | `Display { display_id, codecs, max_fps, bitrate_kbps }` | 被控端回 `Started { width, height, codec, channel }`；画面走 DATAGRAM；本流上 主控→被控 `Input(InputEvent)` / `RequestKeyframe` / `SetBitrate` / `Stop`，被控→主控 `Cursor{...}` / `Resized{...}` |
 | `Clipboard` | 双向 `Update { kind, data }` |
+| `Audio { codecs, bitrate_kbps }` | 被控端回 `Started { codec, sample_rate, channels, channel }` 或 `Error`；声音走 DATAGRAM（8.5）；主控端发 `Stop` 或关流即停止 |
 
 `origin`：`User` 或 `Ai { conversation, step }`。被控端对 AI 发起的操作单独套用 AI 上限与绝对禁止清单（ai-agent.md），并单独记日志。
 
@@ -200,3 +202,13 @@ InputEvent =
   Touch { id, phase, x, y }              // 触控模式
   SpecialCombo { kind: CtrlAltDel|LockScreen|... }
 ```
+
+### 8.5 声音
+
+```
+channel u8 | seq u32 LE | 一个 Opus 包（48 kHz 立体声，20 毫秒）
+```
+- 被控端每台机器只采一路系统声音（Windows WASAPI 环回、macOS ScreenCaptureKit），统一转成 48 kHz 立体声后 Opus 编码一次，分发给所有在听的会话；
+  第一个会话开始听时才开始采集，最后一个停止时关掉。没有声音时平台层不给数据，也就不发包，`seq` 只在发包时递增。
+- 主控端按 `seq` 发现丢包，最多用解码器的丢包补偿补 3 包（60 毫秒），迟到的旧包丢弃。播放端先攒 40 毫秒再出声，积压超过 250 毫秒丢旧的，延迟不累积。
+- 权限：需要账号策略里的 `audio`；被控端没有声音输出设备（服务器、虚拟机）时能力列表里没有 `audio`。

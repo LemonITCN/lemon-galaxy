@@ -18,6 +18,8 @@ pub enum ToAgent {
     ClipboardSet { data: ClipboardData },
     Ping { id: u64 },
     Privacy { id: u64, on: bool },
+    StartAudio { id: u64 },
+    StopAudio,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -31,13 +33,17 @@ pub enum FromAgent {
     Clipboard { id: u64, data: Option<ClipboardData> },
     Pong { id: u64 },
     PrivacyResult { id: u64, result: Result<(), String> },
+    /// 开始采集声音的结果：成功时是采样率与声道数
+    AudioStarted { id: u64, result: Result<(u32, u16), String> },
+    /// 交错排列的浮点样本
+    Audio { pcm: Vec<f32>, rate: u32, channels: u16 },
     Log { error: bool, text: String },
 }
 
 impl FromAgent {
     pub fn reply_id(&self) -> Option<u64> {
         match self {
-            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::PrivacyResult { id, .. } => Some(*id),
+            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::PrivacyResult { id, .. } | Self::AudioStarted { id, .. } => Some(*id),
             _ => None,
         }
     }

@@ -1,6 +1,7 @@
 //! LemonGalaxy 被控端内核。
 
 pub mod accounts;
+pub mod audio;
 pub mod exec;
 pub mod files;
 pub mod fio;

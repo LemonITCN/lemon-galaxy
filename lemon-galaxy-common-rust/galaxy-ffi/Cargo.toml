@@ -23,7 +23,7 @@ bindgen = ["uniffi/cli"]
 galaxy-proto.workspace = true
 galaxy-crypto.workspace = true
 galaxy-net.workspace = true
-galaxy-client.workspace = true
+galaxy-client = { workspace = true, features = ["playback"] }
 galaxy-host.workspace = true
 galaxy-agent.workspace = true
 anyhow.workspace = true

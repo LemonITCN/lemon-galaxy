@@ -55,7 +55,7 @@
 - 终端用 ConPTY（Windows 10 1809 / Server 2019 起），更老的系统退回按行发送的简化终端。
 - 协议里的路径一律用「/」：Windows 写成 `/C:/Users/x`，`/` 列出各个盘。
 - 数据目录：管理员为 `%ProgramData%\LemonGalaxy\worker`（只给 SYSTEM 与管理员组），普通用户为 `%LOCALAPPDATA%\LemonGalaxy\worker`。
-- 目前要求 Windows 10 / Server 2016 起（Rust 标准库的要求）；Windows 7 / 8 需要改用 win7 编译目标，后续再做。
+- 正式包要求 Windows 10 / Server 2016 起（Rust 标准库的要求）；另用 win7 编译目标出一份 Windows 7 SP1 / 8 兼容版（`windows7` 发布文件，截屏退回 GDI）。
 
 ### 3.1 远程桌面（Windows / macOS 被控）
 

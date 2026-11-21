@@ -4,6 +4,7 @@
 //! 正在进行的画面自动续上。
 
 use super::ipc::{read_msg, write_msg, FromAgent, ToAgent};
+use galaxy_host::audio::AudioSink;
 use galaxy_host::platform::{CaptureStarted, FrameSink, HostPlatform};
 use galaxy_host::win as hw;
 use galaxy_proto::peer::{ClipboardData, DisplayInfo, ImageData, InputEvent, VideoCodec};
@@ -35,6 +36,9 @@ struct Inner {
     generation: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<FromAgent>>>,
     captures: Mutex<HashMap<u32, Capture>>,
+    audio: Mutex<Option<Arc<dyn AudioSink>>>,
+    /// (上次检查时间, 有没有声音输出设备)
+    has_audio: Mutex<(Option<std::time::Instant>, bool)>,
 }
 
 pub struct WinPlatform {
@@ -50,6 +54,8 @@ impl WinPlatform {
                 generation: AtomicU64::new(1),
                 pending: Mutex::new(HashMap::new()),
                 captures: Mutex::new(HashMap::new()),
+                audio: Mutex::new(None),
+                has_audio: Mutex::new((None, false)),
             }),
         });
         // 会话切换监视
@@ -64,7 +70,8 @@ impl WinPlatform {
                 if let Some(a) = inner.agent.lock().take() {
                     a.child.kill();
                 }
-                if !inner.captures.lock().is_empty() {
+                let audio = inner.audio.lock().is_some();
+                if !inner.captures.lock().is_empty() || audio {
                     let _ = ensure_agent(&inner);
                     restart_captures(&inner);
                 }
@@ -165,6 +172,12 @@ fn route(inner: &Inner, m: FromAgent) {
                 s.resized(width, height);
             }
         }
+        FromAgent::Audio { pcm, rate, channels } => {
+            let sink = inner.audio.lock().clone();
+            if let Some(s) = sink {
+                s.push_pcm(&pcm, rate, channels);
+            }
+        }
         FromAgent::Log { error, text } => {
             if error {
                 tracing::warn!("画面代理：{text}");
@@ -206,6 +219,11 @@ fn request(inner: &Arc<Inner>, make: impl FnOnce(u64) -> ToAgent, timeout: Durat
 }
 
 fn restart_captures(inner: &Arc<Inner>) {
+    if inner.audio.lock().is_some() {
+        if let Some(FromAgent::AudioStarted { result: Err(e), .. }) = request(inner, |id| ToAgent::StartAudio { id }, Duration::from_secs(8)) {
+            tracing::warn!("会话切换后重新采集声音失败：{e}");
+        }
+    }
     let caps: Vec<(u32, Capture)> = inner.captures.lock().iter().map(|(k, v)| (*k, v.clone())).collect();
     for (display, c) in caps {
         let r = request(inner, |id| ToAgent::StartCapture { id, display, max_fps: c.max_fps, bitrate_kbps: c.bitrate_kbps }, Duration::from_secs(8));
@@ -296,7 +314,44 @@ impl HostPlatform for WinPlatform {
         }
     }
 
+    fn start_audio(&self, sink: Arc<dyn AudioSink>) -> Result<(), String> {
+        *self.inner.audio.lock() = Some(sink);
+        match request(&self.inner, |id| ToAgent::StartAudio { id }, Duration::from_secs(8)) {
+            Some(FromAgent::AudioStarted { result: Ok((rate, ch)), .. }) => {
+                tracing::info!("开始采集声音（{rate} Hz × {ch}）");
+                Ok(())
+            }
+            Some(FromAgent::AudioStarted { result: Err(e), .. }) => {
+                *self.inner.audio.lock() = None;
+                Err(e)
+            }
+            _ => {
+                *self.inner.audio.lock() = None;
+                Err("画面代理没有响应".into())
+            }
+        }
+    }
+
+    fn stop_audio(&self) {
+        *self.inner.audio.lock() = None;
+        if self.inner.agent.lock().is_some() {
+            send(&self.inner, ToAgent::StopAudio);
+        }
+    }
+
     fn capabilities(&self) -> Vec<String> {
-        vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into()]
+        let mut c: Vec<String> = vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into()];
+        // 有没有声音输出设备：最多 30 秒查一次（服务器、虚拟机常常没有）
+        let has = {
+            let mut g = self.inner.has_audio.lock();
+            if g.0.map(|t| t.elapsed() > Duration::from_secs(30)).unwrap_or(true) {
+                *g = (Some(std::time::Instant::now()), super::audio::has_render_device());
+            }
+            g.1
+        };
+        if has {
+            c.push("audio".into());
+        }
+        c
     }
 }

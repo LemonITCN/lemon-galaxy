@@ -222,7 +222,9 @@ async fn session(
     };
     let Some(WsMsg::Hello { nonce, .. }) = hello else { anyhow::bail!("握手消息错误") };
     let sig = identity.key.sign(WS_AUTH_DOMAIN, &nonce);
-    let auth = WsMsg::Auth { device_id: identity.device_id, signature: sig, device_pubkey: Some(identity.key.public().to_vec()) };
+    // 被控连接（不是主控、不是临时协助）上报网卡 MAC，供远程开机
+    let macs = if token.is_none() && assist.is_none() { galaxy_net::ifaces::wake_macs() } else { vec![] };
+    let auth = WsMsg::Auth { device_id: identity.device_id, signature: sig, device_pubkey: Some(identity.key.public().to_vec()), macs };
     sink.send(Message::Text(auth.to_json().into())).await?;
 
     let mut ping = tokio::time::interval(Duration::from_secs(25));

@@ -195,6 +195,17 @@ impl PeerSession {
         run(async move { s.set_privacy(on).await.map_err(Into::into) }).await
     }
 
+    /// 开始收听被控端的系统声音，用本机默认输出设备播放。能力列表里有 "audio" 才支持。`volume` 0..1。
+    pub async fn start_audio(&self, volume: f32) -> Result<Arc<AudioPlayback>> {
+        let s = self.inner.clone();
+        run(async move {
+            let player = galaxy_client::playback::DevicePlayer::start(volume).map_err(|e| GalaxyError::Other { detail: e })?;
+            let ch = s.open_audio(96, player.clone()).await?;
+            Ok(Arc::new(AudioPlayback { ch: Mutex::new(Some(ch)), player }))
+        })
+        .await
+    }
+
     pub async fn wake_on_lan(&self, mac: String) -> Result<()> {
         let s = self.inner.clone();
         run(async move { s.mgmt(pp::MgmtReq::WakeOnLan { mac }).await.map(|_| ()).map_err(Into::into) }).await
@@ -570,6 +581,39 @@ impl DisplayChannel {
     }
     pub fn stop(&self) {
         let _ = self.tx.send(DispCmd::Stop);
+    }
+}
+
+/// 正在播放的远端声音。
+#[derive(uniffi::Object)]
+pub struct AudioPlayback {
+    ch: Mutex<Option<Arc<galaxy_client::audio::AudioChannel>>>,
+    player: Arc<galaxy_client::playback::DevicePlayer>,
+}
+
+#[uniffi::export]
+impl AudioPlayback {
+    pub fn set_volume(&self, volume: f32) {
+        self.player.set_volume(volume);
+    }
+    pub fn set_muted(&self, muted: bool) {
+        self.player.set_muted(muted);
+    }
+    pub fn is_active(&self) -> bool {
+        self.ch.lock().is_some()
+    }
+    /// 停止收听并关闭输出设备。
+    pub fn stop(&self) {
+        self.player.stop();
+        if let Some(ch) = self.ch.lock().take() {
+            rt().spawn(async move { ch.stop().await });
+        }
+    }
+}
+
+impl Drop for AudioPlayback {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

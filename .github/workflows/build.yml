@@ -423,6 +423,7 @@ jobs:
             ~/.cargo/git
             ~/.gradle/caches
             ~/.gradle/wrapper
+            ~/.m2/repository/org/robolectric
             target
           key: android-${{ hashFiles('Cargo.lock', 'lemon-galaxy-mobile-android/**/*.gradle.kts', 'lemon-galaxy-mobile-android/gradle/libs.versions.toml') }}
           restore-keys: android-
@@ -432,7 +433,9 @@ jobs:
           BASE="$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)"
           if [ -n "$LEMONGALAXY_BUILD_VERSION" ]; then V="${LEMONGALAXY_BUILD_VERSION#v}"; else V="$BASE.$GITHUB_RUN_NUMBER"; fi
           export LEMONGALAXY_VERSION_NAME="$V" LEMONGALAXY_VERSION_CODE="$GITHUB_RUN_NUMBER"
-          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
+          # Robolectric 首次要从 Maven 下载系统镜像，偶尔网络失败：失败时重试一次
+          ./gradlew --no-daemon :app:testDebugUnitTest || { echo "单元测试失败，重试一次"; ./gradlew --no-daemon :app:testDebugUnitTest; }
+          ./gradlew --no-daemon :app:assembleRelease
           APK="$(ls app/build/outputs/apk/release/*.apk | head -1)"
           unzip -l "$APK" | grep libgalaxy_ffi.so
           mkdir -p ../out && cp "$APK" ../out/LemonGalaxy-Android.apk

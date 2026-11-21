@@ -1,4 +1,5 @@
 mod agent;
+mod audio;
 mod capture;
 mod clipboard;
 mod compat;

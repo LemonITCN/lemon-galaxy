@@ -66,7 +66,12 @@ pub trait HostPlatform: Send + Sync {
     fn ui_tree(&self, display_id: u32, max_nodes: u32) -> Option<String>;
     fn clipboard_get(&self) -> Option<ClipboardData>;
     fn clipboard_set(&self, data: ClipboardData);
-    /// 已获得的系统授权对应的能力："display" "screenshot" "input" "ui_tree" "clipboard"
+    /// 隐私屏：本机屏幕黑掉、本地键鼠失效，远端照常看到和操作。返回是否做到了（不支持返回 false）。
+    fn set_privacy(&self, on: bool) -> bool;
+    /// 开始采集系统声音，样本推给 `sink`；不支持或没授权返回 false。同一时间只有一路。
+    fn start_audio(&self, sink: std::sync::Arc<crate::host::AudioPcmSink>) -> bool;
+    fn stop_audio(&self);
+    /// 已获得的系统授权对应的能力："display" "screenshot" "input" "ui_tree" "clipboard" "privacy" "audio"
     fn capabilities(&self) -> Vec<String>;
 }
 

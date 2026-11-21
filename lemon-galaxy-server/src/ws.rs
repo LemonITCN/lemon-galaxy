@@ -84,7 +84,7 @@ async fn run_ws(st: St, sock: WebSocket, ip: IpAddr, q: WsQuery) -> anyhow::Resu
         Ok(None)
     })
     .await??;
-    let Some(WsMsg::Auth { device_id, signature, device_pubkey }) = auth else {
+    let Some(WsMsg::Auth { device_id, signature, device_pubkey, macs }) = auth else {
         anyhow::bail!("未认证");
     };
     let assist = q.assist == Some(1);
@@ -160,6 +160,14 @@ async fn run_ws(st: St, sock: WebSocket, ip: IpAddr, q: WsQuery) -> anyhow::Resu
         .unwrap_or_default();
 
     let client_role = q.role.as_deref() == Some("client") && !assist;
+    // 被控连接上报的网卡 MAC（远程开机用）
+    if !client_role && !assist && !macs.is_empty() {
+        let mut list: Vec<String> = macs.iter().filter_map(|m| galaxy_proto::normalize_mac(m)).collect();
+        list.dedup();
+        list.truncate(8);
+        let (raw5, joined) = (raw.clone(), list.join(","));
+        let _ = st.db.call(move |c| c.execute("UPDATE devices SET macs = ?1 WHERE id = ?2", params![joined, raw5])).await;
+    }
     let assist_code = if assist { Some(alloc_assist_code(&st, device_id)) } else { None };
     let (tx, mut rx) = mpsc::unbounded_channel::<WsMsg>();
     let serial = st.hub.next_serial();

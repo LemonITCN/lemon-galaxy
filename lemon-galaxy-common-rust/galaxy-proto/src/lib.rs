@@ -48,3 +48,24 @@ pub fn now_ms() -> i64 {
 pub fn now_secs() -> i64 {
     now_ms() / 1000
 }
+
+/// 规范化 MAC 地址（接受 `-` `:` 分隔或不分隔，大小写均可）为 `AA:BB:CC:DD:EE:FF`，不合法返回 None。
+pub fn normalize_mac(s: &str) -> Option<String> {
+    let hex: String = s.chars().filter(|c| !matches!(c, ':' | '-' | ' ')).collect();
+    if hex.len() != 12 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let up = hex.to_ascii_uppercase();
+    Some((0..6).map(|i| &up[i * 2..i * 2 + 2]).collect::<Vec<_>>().join(":"))
+}
+
+#[cfg(test)]
+mod mac_tests {
+    #[test]
+    fn normalize() {
+        assert_eq!(super::normalize_mac("aa-bb-cc-00-11-22").as_deref(), Some("AA:BB:CC:00:11:22"));
+        assert_eq!(super::normalize_mac("AABBCC001122").as_deref(), Some("AA:BB:CC:00:11:22"));
+        assert_eq!(super::normalize_mac("aa:bb:cc:00:11"), None);
+        assert_eq!(super::normalize_mac("zz:bb:cc:00:11:22"), None);
+    }
+}

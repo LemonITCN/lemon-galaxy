@@ -33,3 +33,13 @@ vt100 = "0.18"
 hex.workspace = true
 sha2.workspace = true
 base64.workspace = true
+opus.workspace = true
+cpal = { version = "0.18", optional = true }
+
+[features]
+# 本机声卡播放远端声音（客户端用；Linux 命令行工具不需要）
+playback = ["dep:cpal"]
+
+[target.'cfg(all(windows, target_arch = "aarch64", target_env = "gnu"))'.dependencies]
+# 只影响本机交叉检查用的 MinGW ARM64（正式包用 MSVC）：libopus 在这里没有 ARM CPU 检测方法，关掉 SIMD
+opusic-sys = { version = "0.7", features = ["no-simd"] }

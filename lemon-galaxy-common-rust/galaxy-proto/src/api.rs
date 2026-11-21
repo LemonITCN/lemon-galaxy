@@ -152,6 +152,12 @@ pub struct ClientDevice {
     pub public_ip: String,
     #[serde(with = "crate::b64")]
     pub device_pubkey: Vec<u8>,
+    /// 最近一次连上服务器时的公网 IP（离线设备也有），用来找同一网络里的设备
+    #[serde(default)]
+    pub last_ip: String,
+    /// 网卡 MAC（远程开机用）
+    #[serde(default)]
+    pub macs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

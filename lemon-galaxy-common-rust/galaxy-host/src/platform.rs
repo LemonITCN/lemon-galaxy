@@ -41,6 +41,11 @@ pub trait HostPlatform: Send + Sync {
     fn set_privacy(&self, _on: bool) -> bool {
         false
     }
+    /// 开始采集系统声音，样本推给 `sink`（见 audio.rs）。同一时间只有一路。
+    fn start_audio(&self, _sink: Arc<dyn crate::audio::AudioSink>) -> Result<(), String> {
+        Err("此设备不支持传声音".into())
+    }
+    fn stop_audio(&self) {}
     fn capabilities(&self) -> Vec<String> {
         vec![]
     }
@@ -49,3 +54,19 @@ pub trait HostPlatform: Send + Sync {
 /// 无图形界面（Linux 命令行 worker）。
 pub struct NoPlatform;
 impl HostPlatform for NoPlatform {}
+
+/// 端到端测试用：没有画面，只有一路 440 Hz 测试音（环境变量 LEMON_GALAXY_TEST_TONE=1 时 Linux 被控端使用）。
+#[derive(Default)]
+pub struct TonePlatform(crate::audio::ToneSource);
+impl HostPlatform for TonePlatform {
+    fn start_audio(&self, sink: Arc<dyn crate::audio::AudioSink>) -> Result<(), String> {
+        self.0.start(sink);
+        Ok(())
+    }
+    fn stop_audio(&self) {
+        self.0.stop()
+    }
+    fn capabilities(&self) -> Vec<String> {
+        vec!["audio".into()]
+    }
+}

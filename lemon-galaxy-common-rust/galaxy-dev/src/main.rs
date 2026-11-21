@@ -8,6 +8,8 @@
 //! galaxy-dev --data <目录> put <设备> <本地文件> <远端路径>
 //! galaxy-dev --data <目录> get <设备> <远端路径> <本地文件>
 //! galaxy-dev --data <目录> term-test <设备>     打开终端、执行命令、断开、接续，验证断线继承
+//! galaxy-dev --data <目录> audio-test <设备> [秒] 收听远端声音（不播放），打印样本数、均方根与估算频率
+//! galaxy-dev --data <目录> wake <设备ID前缀>      远程开机：找同一网络里在线的设备代发唤醒包
 //! galaxy-dev --data <目录> assist <设备码> <验证码> <命令>
 //! galaxy-dev --data <目录> vault-test
 //! galaxy-dev release-sign <文件>            用环境变量 LEMONGALAXY_RELEASE_SIGNING_KEY（base64 私钥种子）签名，写出 <文件>.sig
@@ -145,7 +147,15 @@ async fn main() -> anyhow::Result<()> {
             let (api, _s, _) = load(&dir, &id)?;
             let resp: galaxy_proto::api::ListResp<galaxy_proto::api::ClientDevice> = api.get("/devices").await?;
             for d in resp.items {
-                println!("{}  {:<8} {:<8} {:<20} {}", d.id, d.kind.as_str(), d.platform.as_str(), d.hostname, if d.online { "在线" } else { "离线" });
+                println!(
+                    "{}  {:<8} {:<8} {:<20} {}  {}",
+                    d.id,
+                    d.kind.as_str(),
+                    d.platform.as_str(),
+                    d.hostname,
+                    if d.online { "在线" } else { "离线" },
+                    if d.macs.is_empty() { "-".to_string() } else { d.macs.join(",") }
+                );
             }
         }
         "vault-test" => {
@@ -165,6 +175,22 @@ async fn main() -> anyhow::Result<()> {
             let mut v2 = galaxy_client::vault::Vault::new(s.user_id, &secrets);
             v2.sync(&api).await?;
             println!("加密库条目 {} 个，刚写入的 {} 能解密：{}", v2.entries.len(), e.id, v2.entries.contains_key(&e.id));
+        }
+        "wake" => {
+            let (api, s, _) = load(&dir, &id)?;
+            let resp: galaxy_proto::api::ListResp<galaxy_proto::api::ClientDevice> = api.get("/devices").await?;
+            let t = args.get(1).cloned().unwrap_or_default();
+            let target = resp.items.iter().find(|d| d.id.to_hex().starts_with(&t) && d.id != id.device_id).map(|d| d.id).ok_or_else(|| anyhow::anyhow!("找不到设备 {t}"))?;
+            let server = ServerAddr::parse(&s.server).map_err(anyhow::Error::msg)?;
+            let signal = SignalClient::start(server.clone(), id.clone(), Some(s.token.clone()), None);
+            signal.wait_connected(Duration::from_secs(5)).await;
+            let ms = galaxy_net::MagicSock::bind(0)?;
+            let ep = galaxy_net::quic::endpoint(ms.clone(), false)?;
+            let pk: [u8; 32] = s.account_pubkey.as_slice().try_into()?;
+            let c = Connector::new(ms, ep, signal, id.clone(), server, pk, s.cert.clone());
+            let via = galaxy_client::wake::wake(&c, &resp.items, id.device_id, target).await?;
+            let names: Vec<String> = via.into_iter().map(|v| if v.is_empty() { "本机".to_string() } else { v }).collect();
+            println!("已发送唤醒包，代发：{}", names.join("、"));
         }
         "assist" => {
             let (session, _c) = connect(&dir, &id, None, Some((&args[1], &args[2]))).await?;
@@ -207,6 +233,15 @@ async fn main() -> anyhow::Result<()> {
                     println!("\n下载完成");
                 }
                 "term-test" => term_test(&session).await?,
+                "audio-test" => {
+                    let secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
+                    let stats = Arc::new(galaxy_client::audio::PcmStats::default());
+                    let ch = session.open_audio(96, stats.clone()).await?;
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                    ch.stop().await;
+                    let (frames, rms, freq) = stats.summary();
+                    println!("声音：{:.2} 秒，均方根 {rms:.3}，估算频率 {freq:.0} Hz", frames as f64 / 48_000.0);
+                }
                 "ai" => ai_run(&dir, &id, session.clone(), &args[2..]).await?,
                 "stat" => println!("{:?}", session.fs_stat(&args[2]).await),
                 "watch" => {

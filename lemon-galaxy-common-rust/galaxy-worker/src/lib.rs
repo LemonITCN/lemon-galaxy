@@ -567,6 +567,14 @@ fn civil(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// 平台层：系统自带的；端到端测试时（LEMON_GALAXY_TEST_TONE=1）换成只有一路测试音的平台层。
+fn platform_for(os: &dyn WorkerOs) -> Option<Arc<dyn galaxy_host::platform::HostPlatform>> {
+    if std::env::var("LEMON_GALAXY_TEST_TONE").is_ok_and(|v| v == "1") {
+        return Some(Arc::new(galaxy_host::platform::TonePlatform::default()));
+    }
+    os.host_platform()
+}
+
 /// 运行被控服务，直到 `stop` 完成。命令行 `run` 与 Windows 服务共用。
 pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl std::future::Future<Output = ()>) -> i32 {
     let st = HostState::load(&dir.join("host.json"));
@@ -593,7 +601,7 @@ pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl s
             return 1;
         }
     };
-    if let Some(p) = os.host_platform() {
+    if let Some(p) = platform_for(&*os) {
         host.set_platform(p);
     }
     tracing::info!("LemonGalaxy worker {VERSION} 已启动，设备 {}", host.identity.device_id);
@@ -702,7 +710,7 @@ async fn assist(os: &dyn WorkerOs, rest: &[String]) -> i32 {
         }
     }
     host.set_events(Arc::new(Ask));
-    if let Some(p) = os.host_platform() {
+    if let Some(p) = platform_for(&*os) {
         host.set_platform(p);
     }
     let code = host.start_assist();

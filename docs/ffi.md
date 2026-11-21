@@ -43,6 +43,8 @@ vault() -> [VaultEntry]
 async vault_save(entry) -> VaultEntry    id 为空则新建
 async vault_delete(id)
 
+can_wake(device_id) -> Bool             离线、能被控、上报过网卡地址时为真
+async wake_device(device_id) -> [String] 远程开机：本机或同一网络（同公网 IP）里在线的设备代发唤醒包，返回代发设备名（空串为本机）
 async connect(device_id) -> PeerSession
 async connect_assist(device_code, verification_code) -> PeerSession   会等被控端本人点允许（最多约 2 分钟）
 
@@ -80,6 +82,8 @@ async open_display(DisplayOptions{display_id, max_fps, bitrate_kbps, codecs, vie
 async screenshot(display_id, max_width) -> ImageData
 async clipboard_get() -> ClipboardData? / clipboard_set(ClipboardData)      Text{text} | Image{image} | Files{paths}
 async forward_port(local_port, remote_host, remote_port) -> PortForward     local_port() / stop()
+async set_privacy(on)                                                     能力列表有 "privacy" 才支持（需要控制权限）
+async start_audio(volume) -> AudioPlayback                                能力列表有 "audio" 才支持
 async wake_on_lan(mac)
 ```
 
@@ -90,6 +94,9 @@ async wake_on_lan(mac)
   `Transfer`：`cancel()`、`pause()`、`resume()`。
 - `DisplayChannel`：`send_input(InputEvent)`、`request_keyframe()`、`set_bitrate(kbps)`、`stop()`。
   `VideoSink`：`on_config(codec, width, height)`（分辨率变化时会再次调用）、`on_frame(annexb, pts_us, keyframe)`、`on_cursor(x, y, visible)`（被控屏幕像素）、`on_closed(reason)`。
+- `AudioPlayback`：`set_volume(0..1)`、`set_muted(Bool)`、`is_active()`、`stop()`。内核收 Opus 数据报、解码（丢包补偿）后直接用本机默认输出设备播放
+  （macOS / iOS CoreAudio、Windows WASAPI、安卓 AAudio），界面层只放开关与音量。iOS 播放前要把 AVAudioSession 设成 playback；
+  Mac 应用要链接 AudioToolbox 并弱链接 CoreAudio（内核引用了 macOS 14.2 才有的接口，弱链接后 macOS 13 照样能启动）。
 - `InputEvent`：`MouseMove{x,y}`、`MouseButton{button: PointerButton, down, x, y}`、`Wheel{dx,dy}`、`Key{hid_usage, down}`、`Text{text}`、`Touch{id, phase: TouchPhase, x, y}`、`SpecialCombo{combo: ComboKey}`。
   坐标为被控屏幕像素。`PointerButton`：Left/Right/Middle/Back/Forward。`ComboKey`：CtrlAltDel/LockScreen/AltTab/WinKey/TaskManager/ShowDesktop。
 
@@ -151,9 +158,11 @@ recent_events(limit) -> [HostEvent]
 ```
 
 `HostPlatform`（界面层实现）：`list_displays`、`start_capture(display_id, CaptureOptions, EncodedFrameSink) -> CaptureStarted?`、`stop_capture`、`request_keyframe`、`set_bitrate`、
-`inject(InputEvent)`、`screenshot(display_id, max_w, max_h) -> ImageData?`、`ui_tree(display_id, max_nodes) -> String?`、`clipboard_get/set`、`capabilities() -> [String]`
-（已获得系统授权的能力：`display`、`screenshot`、`input`、`ui_tree`、`clipboard`）。
+`inject(InputEvent)`、`screenshot(display_id, max_w, max_h) -> ImageData?`、`ui_tree(display_id, max_nodes) -> String?`、`clipboard_get/set`、
+`set_privacy(on) -> Bool`、`start_audio(AudioPcmSink) -> Bool`、`stop_audio()`、`capabilities() -> [String]`
+（已获得系统授权的能力：`display`、`screenshot`、`input`、`ui_tree`、`clipboard`、`privacy`、`audio`）。
 `EncodedFrameSink`（内核实现）：`push(annexb, pts_us, keyframe)`、`set_resolution(width, height)`。
+`AudioPcmSink`（内核实现）：`push(pcm, sample_rate, channels)`，`pcm` 是交错排列的 32 位浮点样本（小端），格式随系统；内核统一转成 48 kHz 立体声、Opus 编码一次后分发给所有在听的会话。
 
 `HostListener`：`on_status`、`on_assist_request(request_id, from_user, from_device)`（弹窗后调 `respond_assist`）、`on_session_started`、`on_session_ended`、`on_ai_activity`。
 

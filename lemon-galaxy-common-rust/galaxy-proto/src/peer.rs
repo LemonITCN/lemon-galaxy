@@ -85,6 +85,8 @@ pub enum StreamOpen {
     PortForward { host: String, port: u16 },
     Display(DisplayRequest),
     Clipboard,
+    /// 远端声音（docs/protocol.md 8.5）。放在最后，老版本被控端解不出来会直接关流。
+    Audio(AudioRequest),
 }
 
 /// 功能流被拒绝等通用错误。
@@ -428,9 +430,70 @@ impl VideoFragHeader {
     }
 }
 
+// ---------------- 声音 ----------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioCodec {
+    Opus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioRequest {
+    pub codecs: Vec<AudioCodec>,
+    /// 期望码率，被控端可能调整
+    pub bitrate_kbps: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AudioOut {
+    /// 声音包走 DATAGRAM，首字节是 `channel`
+    Started { codec: AudioCodec, sample_rate: u32, channels: u8, channel: u8 },
+    Error(PeerError),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AudioIn {
+    Stop,
+}
+
+/// 声音数据报：`channel u8 | seq u32 LE | 一个 Opus 包（20 毫秒）`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioPacketHeader {
+    pub channel: u8,
+    pub seq: u32,
+}
+
+impl AudioPacketHeader {
+    pub const LEN: usize = 5;
+
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.push(self.channel);
+        out.extend_from_slice(&self.seq.to_le_bytes());
+    }
+
+    pub fn decode(b: &[u8]) -> Option<(Self, usize)> {
+        if b.len() < Self::LEN {
+            return None;
+        }
+        Some((Self { channel: b[0], seq: u32::from_le_bytes(b[1..5].try_into().ok()?) }, Self::LEN))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audio_header_roundtrip() {
+        let h = AudioPacketHeader { channel: 9, seq: 0xdead_beef };
+        let mut v = Vec::new();
+        h.encode(&mut v);
+        v.extend_from_slice(b"opus");
+        let (d, pos) = AudioPacketHeader::decode(&v).unwrap();
+        assert_eq!(d, h);
+        assert_eq!(&v[pos..], b"opus");
+        assert!(AudioPacketHeader::decode(&v[..4]).is_none());
+    }
+
     #[test]
     fn frag_header_roundtrip() {
         for idx in [0u16, 3] {

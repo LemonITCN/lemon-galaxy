@@ -59,6 +59,32 @@ pub fn list() -> Vec<Iface> {
     out
 }
 
+/// 用于远程开机的网卡 MAC（有私网 IPv4、不像虚拟网卡的），格式 `AA:BB:CC:DD:EE:FF`。
+pub fn wake_macs() -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for i in list() {
+        let IpAddr::V4(v4) = i.ip else { continue };
+        if i.virtual_like || !v4.is_private() {
+            continue;
+        }
+        if let Ok(Some(m)) = mac_address::mac_address_by_name(&i.name) {
+            let b = m.bytes();
+            // 全零与本地管理地址（随机化 MAC、虚拟网卡）唤醒不了
+            if b == [0; 6] || b[0] & 0x02 != 0 {
+                continue;
+            }
+            let s = m.to_string().to_ascii_uppercase();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
 /// 是否私网 / 局域网地址。
 pub fn is_private(ip: &IpAddr) -> bool {
     match ip {

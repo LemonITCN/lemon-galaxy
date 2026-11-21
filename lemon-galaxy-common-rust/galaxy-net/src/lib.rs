@@ -17,6 +17,7 @@ pub mod magicsock;
 pub mod quic;
 pub mod relay_tcp;
 pub mod tls;
+pub mod wol;
 
 pub use addr::ServerAddr;
 pub use magicsock::{MagicSock, PathInfo};

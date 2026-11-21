@@ -441,7 +441,7 @@ async fn list_devices(State(st): State<St>, User(s): User) -> AppResult<Json<Lis
         .db
         .call(move |c| {
             let mut stmt = c.prepare(
-                "SELECT d.id, d.kind, d.platform, d.os_version, d.arch, d.hostname, d.app_version, d.last_seen_at, da.cert, da.cert_sig, d.pubkey
+                "SELECT d.id, d.kind, d.platform, d.os_version, d.arch, d.hostname, d.app_version, d.last_seen_at, da.cert, da.cert_sig, d.pubkey, d.last_ip, d.macs
                  FROM device_accounts da JOIN devices d ON d.id = da.device_id WHERE da.user_id = ?1 AND da.status = 'active'
                  ORDER BY d.hostname",
             )?;
@@ -459,6 +459,8 @@ async fn list_devices(State(st): State<St>, User(s): User) -> AppResult<Json<Lis
                         r.get::<_, Option<Vec<u8>>>(8)?,
                         r.get::<_, Option<Vec<u8>>>(9)?,
                         r.get::<_, Vec<u8>>(10)?,
+                        r.get::<_, String>(11)?,
+                        r.get::<_, String>(12)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -468,7 +470,7 @@ async fn list_devices(State(st): State<St>, User(s): User) -> AppResult<Json<Lis
     let hub = st.hub.devices.read();
     let items = rows
         .into_iter()
-        .filter_map(|(id, kind, platform, os, arch, host, ver, seen, cert, sig, pk)| {
+        .filter_map(|(id, kind, platform, os, arch, host, ver, seen, cert, sig, pk, last_ip, macs)| {
             let did = DeviceId::from_slice(&id)?;
             let online = hub.get(&did);
             Some(ClientDevice {
@@ -485,6 +487,8 @@ async fn list_devices(State(st): State<St>, User(s): User) -> AppResult<Json<Lis
                 cert_signature: sig,
                 public_ip: online.map(|o| o.public_ip.to_string()).unwrap_or_default(),
                 device_pubkey: pk,
+                last_ip,
+                macs: macs.split(',').filter(|m| !m.is_empty()).map(String::from).collect(),
             })
         })
         .collect();

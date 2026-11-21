@@ -135,6 +135,19 @@ impl PeerSession {
         Ok((s, r))
     }
 
+    pub(crate) async fn open_stream(&self, open: StreamOpen) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+        self.open(open).await
+    }
+
+    /// 首字节为 `channel` 的数据报交给 `tx`。
+    pub(crate) fn register_datagrams(&self, channel: u8, tx: mpsc::Sender<Bytes>) {
+        self.video.lock().insert(channel, tx);
+    }
+
+    pub(crate) fn unregister_datagrams(&self, channel: u8) {
+        self.video.lock().remove(&channel);
+    }
+
     // ---------------- 终端 ----------------
 
     pub async fn open_terminal(&self, open: TerminalOpen, sink: Arc<dyn TerminalSink>) -> Result<Arc<TerminalChannel>> {
@@ -544,7 +557,7 @@ impl PeerSession {
     }
 }
 
-fn peer_err(e: PeerError) -> ClientError {
+pub(crate) fn peer_err(e: PeerError) -> ClientError {
     match e.code.as_str() {
         "permission_denied" | "ai_denied" | "forbidden" => ClientError::Permission(e.message),
         "not_found" => ClientError::NotFound(e.message),

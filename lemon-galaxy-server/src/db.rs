@@ -6,6 +6,19 @@ use std::path::Path;
 
 pub type Pool = r2d2::Pool<SqliteConnectionManager>;
 
+/// 老数据库补列（新建的库在 SCHEMA 里已经有）。
+fn migrate(c: &Connection) -> rusqlite::Result<()> {
+    let has = |table: &str, col: &str| -> rusqlite::Result<bool> {
+        let mut st = c.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names = st.query_map([], |r| r.get::<_, String>(1))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(names.iter().any(|n| n == col))
+    };
+    if !has("devices", "macs")? {
+        c.execute_batch("ALTER TABLE devices ADD COLUMN macs TEXT NOT NULL DEFAULT ''")?;
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct Db {
     pool: Pool,
@@ -73,7 +86,8 @@ CREATE TABLE IF NOT EXISTS devices (
   app_version TEXT NOT NULL DEFAULT '',
   last_seen_at INTEGER NOT NULL DEFAULT 0,
   last_ip TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  macs TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS device_accounts (
@@ -191,6 +205,7 @@ impl Db {
             let c = Connection::open(path)?;
             c.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;")?;
             c.execute_batch(SCHEMA)?;
+            migrate(&c)?;
         }
         let manager = SqliteConnectionManager::file(path).with_init(|c| {
             c.execute_batch(

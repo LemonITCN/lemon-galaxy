@@ -33,6 +33,9 @@ pub enum WsMsg {
         /// 临时协助模式（未登录）时提供设备公钥
         #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::b64::opt")]
         device_pubkey: Option<Vec<u8>>,
+        /// 被控连接上报本机网卡 MAC，用于远程开机（同账号其他设备在同一局域网时代发唤醒包）
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        macs: Vec<String>,
     },
     Ready {
         device_id: DeviceId,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 端到端测试：本机起服务器 + 被控端 + 开发用主控端，验证登录、连接（直连 / UDP 中转 / TCP 中转）、
-# 命令执行、终端断线继承、文件传输。
+# 命令执行、终端断线继承、远端声音（测试音）、文件传输、远程开机。
 # Linux / macOS：有免密 sudo 时再以 root 运行被控端，验证切换系统用户与降权文件操作。
 # Windows（Git Bash）：有管理员权限时再装成 SYSTEM 服务，验证命令与文件以指定账号身份执行。
 #   scripts/e2e.sh <二进制目录>
@@ -33,7 +33,7 @@ step "主控端首次登录（改密码、生成账号密钥）"
 
 step "被控端登录并运行"
 LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" login --server "$ADDR" --user alice --system-user "$(id -un)" | tail -2
-"$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" run >"$WORK/worker.log" 2>&1 &
+LEMON_GALAXY_TEST_TONE=1 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" run >"$WORK/worker.log" 2>&1 &
 WPID=$!
 PIDS+=($WPID)
 sleep 2
@@ -57,6 +57,12 @@ fi
 
 step "终端断线继承"
 check "接续后环境变量还在（断线继承）：true" timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" term-test ""
+
+step "远端声音（被控端以测试音代替系统声音，440 Hz）"
+AUD="$(timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" audio-test "" 3 2>&1 | grep -v -E 'INFO|DEBUG' || true)"
+echo "$AUD" | tail -2
+echo "$AUD" | grep "声音：" | sed -E 's/.*声音：([0-9.]+) 秒，均方根 ([0-9.]+)，估算频率 ([0-9]+) Hz.*/\1 \2 \3/' |
+  awk '{ ok = ($1 >= 2.0 && $2 >= 0.25 && $2 <= 0.45 && $3 >= 400 && $3 <= 480); exit ok ? 0 : 1 }' || fail "远端声音不对：$AUD"
 
 step "文件上传下载（8MB）"
 head -c 8000000 /dev/urandom >"$WORK/big.bin"
@@ -83,6 +89,23 @@ for mode in udp tcp; do
   esac
 done
 kill "$WPID" 2>/dev/null || true
+
+step "远程开机（第一台被控端离线，由同一网络里的第二台代发唤醒包）"
+W1="$(od -An -tx1 "$WORK/worker/keys/device_id" | tr -d ' \n')"
+sleep 1
+"$BIN/galaxy-dev" --data "$WORK/ctl" devices >"$WORK/devices.txt" 2>&1 || true
+cat "$WORK/devices.txt"
+if grep "^$W1" "$WORK/devices.txt" | grep -qE "([0-9A-F]{2}:){5}[0-9A-F]{2}"; then
+  LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker2" login --server "$ADDR" --user alice --system-user "$(id -un)" | tail -1
+  "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker2" run >"$WORK/worker2.log" 2>&1 &
+  W2PID=$!
+  PIDS+=($W2PID)
+  sleep 2
+  check "已发送唤醒包" timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" wake "${W1:0:8}"
+  kill "$W2PID" 2>/dev/null || true
+else
+  echo "这台机器的网卡没有可用于唤醒的地址（随机化 MAC 或只有虚拟网卡），跳过"
+fi
 
 if [ "$WIN" = 0 ] && sudo -n true 2>/dev/null; then
   step "以 root 运行被控端，终端与文件以普通用户身份执行"

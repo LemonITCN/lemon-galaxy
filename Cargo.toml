@@ -23,6 +23,7 @@ publish = false
 rust-version = "1.85"
 
 [workspace.dependencies]
+opus = "0.4"
 galaxy-proto = { path = "lemon-galaxy-common-rust/galaxy-proto" }
 galaxy-crypto = { path = "lemon-galaxy-common-rust/galaxy-crypto" }
 galaxy-net = { path = "lemon-galaxy-common-rust/galaxy-net" }
@@ -73,6 +74,7 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 quinn-proto = { version = "0.11", default-features = false, features = ["rustls-ring"] }
 socket2 = { version = "0.5", features = ["all"] }
 if-addrs = "0.13"
+mac_address = "1.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json", "stream", "http2"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake", "__rustls-tls"] }
 webpki-roots = "0.26"

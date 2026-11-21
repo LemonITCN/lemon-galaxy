@@ -264,7 +264,7 @@ action 取值：`admin.login`、`admin.login_failed`、`admin.logout`、`admin.c
   ```json
   { "id": "hex32", "kind": "worker", "platform": "linux", "os_version": "", "arch": "", "hostname": "web-01",
     "app_version": "", "online": true, "last_seen_at": 0, "cert": "b64", "cert_signature": "b64",
-    "public_ip": "1.2.3.4" }
+    "public_ip": "1.2.3.4", "last_ip": "1.2.3.4", "macs": ["AA:BB:CC:DD:EE:FF"] }
   ```
 - `DELETE /api/v1/devices/{id}`（Bearer）→ 从本账号移除该设备（远程注销）
 - `GET /api/v1/account/revocations`（Bearer）→ `{ "list": "b64", "signature": "b64" }`；`PUT` 同结构（由主控端用账号签名密钥签）

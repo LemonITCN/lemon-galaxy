@@ -112,6 +112,8 @@ pub struct HostService {
     pub(crate) sessions: Mutex<HashMap<String, Arc<ActiveSession>>>,
     pub terms: Arc<TermManager>,
     pub platform: RwLock<Arc<dyn HostPlatform>>,
+    /// 远端声音分发
+    pub audio: Arc<crate::audio::AudioHub>,
     /// 开着隐私屏的会话
     pub privacy_owner: parking_lot::Mutex<Option<String>>,
     /// 已停止（换服务器等）：不再重连信令
@@ -158,6 +160,7 @@ impl HostService {
             sessions: Default::default(),
             terms: Arc::new(TermManager::default()),
             platform: RwLock::new(Arc::new(NoPlatform)),
+            audio: crate::audio::AudioHub::new(),
             privacy_owner: parking_lot::Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
             lan_stop,
@@ -709,8 +712,15 @@ impl HostService {
                 }
             }
         }
+        if perms.audio && pc.iter().any(|x| x == "audio") {
+            c.push("audio".into());
+        }
         if perms.control && pc.iter().any(|x| x == "input") {
             c.push("input".into());
+        }
+        // 隐私屏要有控制权限（开着时被控端本地键鼠失效）
+        if perms.control && pc.iter().any(|x| x == "privacy") {
+            c.push("privacy".into());
         }
         if perms.clipboard && pc.iter().any(|x| x == "clipboard") {
             c.push("clipboard".into());

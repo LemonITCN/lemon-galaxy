@@ -72,6 +72,7 @@ pub fn main() -> i32 {
     }
     let mut captures: HashMap<u32, Arc<CaptureCtl>> = HashMap::new();
     let mut privacy: Option<super::privacy::Privacy> = None;
+    let mut audio_stop: Option<Arc<AtomicBool>> = None;
     let stdin = std::io::stdin();
     let mut r = std::io::BufReader::new(stdin.lock());
     loop {
@@ -95,6 +96,25 @@ pub fn main() -> i32 {
                     Ok(())
                 };
                 let _ = out_tx.send(FromAgent::PrivacyResult { id, result });
+            }
+            ToAgent::StartAudio { id } => {
+                if let Some(s) = audio_stop.take() {
+                    s.store(true, Ordering::Relaxed);
+                }
+                let stop = Arc::new(AtomicBool::new(false));
+                let out = out_tx.clone();
+                let result = super::audio::start(stop.clone(), move |pcm, rate, channels| {
+                    let _ = out.send(FromAgent::Audio { pcm, rate, channels });
+                });
+                if result.is_ok() {
+                    audio_stop = Some(stop);
+                }
+                let _ = out_tx.send(FromAgent::AudioStarted { id, result });
+            }
+            ToAgent::StopAudio => {
+                if let Some(s) = audio_stop.take() {
+                    s.store(true, Ordering::Relaxed);
+                }
             }
             ToAgent::ListDisplays { id } => {
                 let list = monitors().iter().map(|m| m.info()).collect();
@@ -354,6 +374,20 @@ pub fn selftest() -> i32 {
             }
             Err(e) => println!("  隐私屏：{e}"),
         }
+    }
+    // 声音：只报告，不算失败（服务器、虚拟机常常没有声音设备）
+    let stop = Arc::new(AtomicBool::new(false));
+    let got = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let g2 = got.clone();
+    match super::audio::start(stop.clone(), move |pcm, _, _| {
+        g2.fetch_add(pcm.len() as u64, Ordering::Relaxed);
+    }) {
+        Ok((rate, ch)) => {
+            std::thread::sleep(Duration::from_millis(500));
+            stop.store(true, Ordering::Relaxed);
+            println!("  声音采集：{rate} Hz × {ch} 声道，0.5 秒内收到 {} 个样本（没有在播放时为 0）", got.load(Ordering::Relaxed));
+        }
+        Err(e) => println!("  声音采集：{e}"),
     }
     if ok {
         0
