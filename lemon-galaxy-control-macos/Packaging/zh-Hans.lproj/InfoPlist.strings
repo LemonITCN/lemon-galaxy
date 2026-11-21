@@ -1,0 +1,3 @@
+/* 系统授权弹窗里的说明文字 */
+"NSScreenCaptureUsageDescription" = "LemonGalaxy 会把本机屏幕共享给你允许的人查看和控制。";
+"NSLocalNetworkUsageDescription" = "LemonGalaxy 需要在局域网内发现你的设备并直接连接。";

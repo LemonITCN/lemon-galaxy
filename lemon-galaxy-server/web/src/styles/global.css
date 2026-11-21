@@ -1,0 +1,306 @@
+/* 全局样式：antdv-next 负责组件，这里只放自绘部分的颜色变量和通用排版。 */
+:root {
+  --lg-brand: #7cb518;
+  --lg-brand-text: #4c7a0c;
+  --lg-lime: #a3d52b;
+  --lg-brand-bg: #f1f8e3;
+
+  --lg-bg: #f4f6f8;
+  --lg-surface: #ffffff;
+  --lg-surface-2: #f8fafb;
+  --lg-border: #e3e7ec;
+  --lg-border-soft: #eceff3;
+  --lg-text: #161a1f;
+  --lg-text-2: #565d68;
+  --lg-text-3: #868d98;
+  --lg-hover: #f1f3f6;
+  --lg-code-bg: #f3f5f8;
+  --lg-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+
+  --lg-success: #23874a;
+  --lg-success-bg: #e8f6ee;
+  --lg-warning: #a86605;
+  --lg-warning-bg: #fdf3e1;
+  --lg-danger: #c92f37;
+  --lg-danger-bg: #fdecec;
+  --lg-info: #2a62d6;
+  --lg-info-bg: #ebf1fd;
+  --lg-neutral: #5f6672;
+  --lg-neutral-bg: #eff1f4;
+
+  /* 侧栏在两种主题下都是深色 */
+  --lg-sider-bg: #101318;
+  --lg-sider-border: #1c2027;
+  --lg-sider-text: #a3aab4;
+  --lg-sider-text-2: #6b737e;
+
+  /* 图表 */
+  --lg-chart-1: #7cb518;
+  --lg-chart-2: #2a62d6;
+  --lg-chart-3: #c98a12;
+  --lg-chart-4: #8a5cd6;
+  --lg-chart-grid: #eceff3;
+
+  --lg-mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --lg-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Helvetica Neue', Arial, sans-serif;
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --lg-brand: #9bcb2b;
+  --lg-brand-text: #b5e03f;
+  --lg-brand-bg: rgba(163, 213, 43, 0.12);
+
+  --lg-bg: #0f1114;
+  --lg-surface: #16191e;
+  --lg-surface-2: #1b1f25;
+  --lg-border: #2c323b;
+  --lg-border-soft: #222730;
+  --lg-text: #e6e9ed;
+  --lg-text-2: #a2a9b3;
+  --lg-text-3: #737b86;
+  --lg-hover: #1f242b;
+  --lg-code-bg: #1d2128;
+  --lg-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+
+  --lg-success: #54c784;
+  --lg-success-bg: rgba(84, 199, 132, 0.13);
+  --lg-warning: #e8b04e;
+  --lg-warning-bg: rgba(232, 176, 78, 0.13);
+  --lg-danger: #f06a71;
+  --lg-danger-bg: rgba(240, 106, 113, 0.13);
+  --lg-info: #7aa5ff;
+  --lg-info-bg: rgba(122, 165, 255, 0.13);
+  --lg-neutral: #a2a9b3;
+  --lg-neutral-bg: rgba(162, 169, 179, 0.12);
+
+  --lg-sider-bg: #0b0d10;
+  --lg-sider-border: #1a1e24;
+
+  --lg-chart-1: #a3d52b;
+  --lg-chart-2: #6f9cff;
+  --lg-chart-3: #e8b04e;
+  --lg-chart-4: #b08cf0;
+  --lg-chart-grid: #232831;
+  color-scheme: dark;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--lg-bg);
+  color: var(--lg-text);
+  font-family: var(--lg-font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.mono {
+  font-family: var(--lg-mono);
+  font-size: 12.5px;
+}
+
+.muted {
+  color: var(--lg-text-3);
+}
+
+.secondary {
+  color: var(--lg-text-2);
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+/* ---------- 页面骨架 ---------- */
+
+.page {
+  max-width: 1560px;
+  margin: 0 auto;
+  padding: 22px 28px 48px;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+  min-height: 34px;
+}
+
+.page-head h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.page-head .count {
+  color: var(--lg-text-3);
+  font-size: 14px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.page-head .spacer,
+.toolbar .spacer,
+.panel-head .spacer {
+  flex: 1;
+}
+
+.panel {
+  background: var(--lg-surface);
+  border: 1px solid var(--lg-border-soft);
+  border-radius: 10px;
+  box-shadow: var(--lg-shadow);
+  min-width: 0;
+}
+
+.panel + .panel {
+  margin-top: 16px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 50px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--lg-border-soft);
+  font-weight: 600;
+  font-size: 14.5px;
+}
+
+.panel-body {
+  padding: 16px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--lg-border-soft);
+}
+
+/* 表格行可点 */
+.clickable-row {
+  cursor: pointer;
+}
+
+/* 表格放进 panel 时去掉多余圆角 */
+.panel .ant-table-wrapper .ant-table {
+  background: transparent;
+}
+
+.panel > .ant-table-wrapper .ant-table-pagination {
+  padding: 0 16px;
+}
+
+/* 头像（首字母） */
+.avatar {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--lg-brand-bg);
+  color: var(--lg-brand-text);
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.avatar.off {
+  background: var(--lg-neutral-bg);
+  color: var(--lg-text-3);
+}
+
+/* 名称 + 次要信息的两行单元格 */
+.cell-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cell-main .name {
+  font-weight: 560;
+  color: var(--lg-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cell-main .sub {
+  font-size: 12px;
+  color: var(--lg-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+
+/* 表单：设置项一行一个（左标签右控件） */
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 16px;
+}
+
+.switch-cell {
+  display: grid;
+  justify-items: start;
+}
+
+/* a-select 的根元素拿不到 scoped 属性，等宽字体只能写在全局 */
+.lg-mono-select .ant-select-selection-item-content,
+.lg-mono-select .ant-select-selection-search-input {
+  font-family: var(--lg-mono);
+}
+
+/* 代码块 */
+.code-block {
+  font-family: var(--lg-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  background: var(--lg-code-bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+/* 底部操作条 */
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+@media (max-width: 900px) {
+  .page {
+    padding: 16px 14px 40px;
+  }
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "id": "galaxy-dark",
+  "name": "Galaxy Dark",
+  "dark": true,
+  "order": 0,
+  "foreground": "#E3E6EB",
+  "background": "#171A21",
+  "cursor": "#4C82F7",
+  "selection": "#2C3A55",
+  "ansi": [
+    "#1F232B",
+    "#F2555A",
+    "#34C77B",
+    "#F0B43A",
+    "#4C82F7",
+    "#B07CF2",
+    "#2EC4D6",
+    "#D5D9E0",
+    "#5C6575",
+    "#FF7A7E",
+    "#5BE09A",
+    "#FFD066",
+    "#79A2FF",
+    "#CDA0FF",
+    "#5EE0EE",
+    "#FFFFFF"
+  ]
+}

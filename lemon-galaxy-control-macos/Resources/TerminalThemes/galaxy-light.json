@@ -1,0 +1,28 @@
+{
+  "id": "galaxy-light",
+  "name": "Galaxy Light",
+  "dark": false,
+  "order": 1,
+  "foreground": "#1F2430",
+  "background": "#FFFFFF",
+  "cursor": "#2F6BEE",
+  "selection": "#D3E1FB",
+  "ansi": [
+    "#1F2430",
+    "#D93036",
+    "#1E9E5A",
+    "#B07800",
+    "#2F6BEE",
+    "#8A4FD8",
+    "#0E8FA0",
+    "#C5CAD3",
+    "#6B7385",
+    "#F2555A",
+    "#2EB872",
+    "#D69A00",
+    "#4C82F7",
+    "#A570F0",
+    "#19A9BC",
+    "#F5F6F8"
+  ]
+}

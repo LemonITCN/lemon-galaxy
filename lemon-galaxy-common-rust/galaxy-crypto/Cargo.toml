@@ -1,0 +1,26 @@
+[package]
+name = "galaxy-crypto"
+description = "LemonGalaxy 密码学：账号密钥、设备证书、OPAQUE、加密库、局域网发现密钥、协助口令认证"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+galaxy-proto.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+ed25519-dalek.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+argon2.workspace = true
+opaque-ke.workspace = true
+spake2.workspace = true
+zeroize.workspace = true
+subtle.workspace = true
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+hex.workspace = true

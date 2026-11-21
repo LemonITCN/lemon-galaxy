@@ -1,0 +1,28 @@
+{
+  "id": "github-dark",
+  "name": "GitHub Dark",
+  "dark": true,
+  "order": 12,
+  "foreground": "#E6EDF3",
+  "background": "#0D1117",
+  "cursor": "#2F81F7",
+  "selection": "#1F3A5F",
+  "ansi": [
+    "#484F58",
+    "#FF7B72",
+    "#3FB950",
+    "#D29922",
+    "#58A6FF",
+    "#BC8CFF",
+    "#39C5CF",
+    "#B1BAC4",
+    "#6E7681",
+    "#FFA198",
+    "#56D364",
+    "#E3B341",
+    "#79C0FF",
+    "#D2A8FF",
+    "#56D4DD",
+    "#FFFFFF"
+  ]
+}

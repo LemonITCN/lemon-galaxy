@@ -1,0 +1,28 @@
+{
+  "id": "tomorrow-night",
+  "name": "Tomorrow Night",
+  "dark": true,
+  "order": 10,
+  "foreground": "#C5C8C6",
+  "background": "#1D1F21",
+  "cursor": "#C5C8C6",
+  "selection": "#373B41",
+  "ansi": [
+    "#1D1F21",
+    "#CC6666",
+    "#B5BD68",
+    "#F0C674",
+    "#81A2BE",
+    "#B294BB",
+    "#8ABEB7",
+    "#C5C8C6",
+    "#969896",
+    "#CC6666",
+    "#B5BD68",
+    "#F0C674",
+    "#81A2BE",
+    "#B294BB",
+    "#8ABEB7",
+    "#FFFFFF"
+  ]
+}

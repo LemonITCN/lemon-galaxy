@@ -1,0 +1,46 @@
+[package]
+name = "lemon-galaxy-server"
+description = "LemonGalaxy 服务器：账号、设备、信令、打洞协助、中转、加密库同步、大模型网关、Web 管理后台"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lemon-galaxy-server"
+path = "src/main.rs"
+
+[dependencies]
+galaxy-proto.workspace = true
+galaxy-crypto.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+hex.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+argon2.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+rcgen.workspace = true
+reqwest.workspace = true
+time.workspace = true
+uuid.workspace = true
+axum = { version = "0.8.9", features = ["ws", "macros"] }
+r2d2 = "0.8.10"
+r2d2_sqlite = { version = "0.37.1", features = ["bundled"] }
+totp-rs = { version = "6.0.0", features = ["otpauth", "gen_secret"] }
+rust-embed = "8.14.0"
+mime_guess = "2.0.5"
+ipnet = "2.12.2"
+clap = { version = "4.6.9", features = ["derive", "env"] }
+tower-http = { version = "0.7.1", features = ["set-header", "compression-gzip"] }
+socket2.workspace = true

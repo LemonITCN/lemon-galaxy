@@ -1,0 +1,26 @@
+[package]
+name = "galaxy-net"
+description = "LemonGalaxy 连接层：魔法套接字、两端探测、中转客户端、局域网发现、QUIC、端到端握手"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+galaxy-proto.workspace = true
+galaxy-crypto.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+quinn.workspace = true
+socket2.workspace = true
+if-addrs.workspace = true
+tokio-tungstenite.workspace = true

@@ -1,0 +1,27 @@
+{
+  "id": "lemon-light",
+  "name": "LemonGalaxy Light",
+  "dark": false,
+  "order": 1,
+  "foreground": "#2B2E3A",
+  "background": "#FAFAFC",
+  "cursor": "#3A5BD9",
+  "colors": [
+    "#2B2E3A",
+    "#D73A49",
+    "#22863A",
+    "#B08800",
+    "#005CC5",
+    "#6F42C1",
+    "#1B7C83",
+    "#6A737D",
+    "#959DA5",
+    "#CB2431",
+    "#28A745",
+    "#DBAB09",
+    "#2188FF",
+    "#8A63D2",
+    "#3192AA",
+    "#D1D5DA"
+  ]
+}

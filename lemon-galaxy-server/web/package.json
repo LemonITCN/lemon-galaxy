@@ -1,0 +1,31 @@
+{
+  "name": "lemon-galaxy-admin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LemonGalaxy 服务器 Web 管理后台（Vue 3 + antdv-next）",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:mock": "vite --mode mock",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "build": "vue-tsc --noEmit -p tsconfig.json && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@antdv-next/icons": "1.1.2",
+    "antdv-next": "1.7.1",
+    "dayjs": "1.11.23",
+    "vue": "3.5.45",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@antdv-next/auto-import-resolver": "1.2.0",
+    "@types/node": "22.20.5",
+    "@vitejs/plugin-vue": "6.0.10",
+    "typescript": "5.9.3",
+    "unplugin-vue-components": "30.0.0",
+    "vite": "7.3.7",
+    "vue-tsc": "3.2.9"
+  }
+}

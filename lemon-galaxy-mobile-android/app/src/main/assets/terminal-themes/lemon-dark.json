@@ -1,0 +1,27 @@
+{
+  "id": "lemon-dark",
+  "name": "LemonGalaxy Dark",
+  "dark": true,
+  "order": 0,
+  "foreground": "#D7DAE5",
+  "background": "#141622",
+  "cursor": "#C6E35A",
+  "colors": [
+    "#1E2130",
+    "#F2777A",
+    "#99CC99",
+    "#FFCC66",
+    "#6699CC",
+    "#CC99CC",
+    "#66CCCC",
+    "#D3D0C8",
+    "#747369",
+    "#F99157",
+    "#B5E08C",
+    "#FFD98A",
+    "#8AB4E8",
+    "#E2B5E2",
+    "#8AE0E0",
+    "#F2F0EC"
+  ]
+}

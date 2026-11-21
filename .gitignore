@@ -1,0 +1,20 @@
+/target
+**/target/
+.DS_Store
+*.swp
+*.log
+/dist/
+/build/
+node_modules/
+# 本机签名与密钥，绝不进仓库
+**/.sign-identity
+**/keystore/
+*.jks
+*.keystore
+*.p12
+*.p8
+.env
+.env.*
+# 本机测试数据
+/.devdata/
+lemon-galaxy-server/web/dist/

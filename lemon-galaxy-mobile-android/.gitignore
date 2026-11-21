@@ -1,0 +1,12 @@
+.gradle/
+build/
+/local.properties
+.idea/
+*.iml
+.DS_Store
+.kotlin/
+captures/
+# 正式签名密钥和密码，不进仓库（丢了就没法覆盖升级已装的正式版）
+/keystore/
+# 内核编译产物（由 buildRustCore 生成到 app/build 下，这里防止误拷到源码目录）
+/app/src/main/jniLibs/

@@ -1,0 +1,31 @@
+[package]
+name = "galaxy-host"
+description = "LemonGalaxy 被控端内核：接受连接、端到端认证、权限、终端、文件、命令执行、画面与输入（平台钩子）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+galaxy-proto.workspace = true
+galaxy-crypto.workspace = true
+galaxy-net.workspace = true
+galaxy-client.workspace = true
+galaxy-agent.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+bytes.workspace = true
+hex.workspace = true
+quinn.workspace = true
+vt100 = "0.15"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["term", "process", "signal", "user", "fs", "ioctl", "hostname"] }
+libc = "0.2"

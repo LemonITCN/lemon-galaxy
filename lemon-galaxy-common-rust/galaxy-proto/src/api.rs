@@ -1,0 +1,246 @@
+//! 客户端 HTTP 接口（docs/api.md 第二部分）的请求与响应。
+
+use crate::{AiMode, DeviceId, DeviceKind, Platform};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ErrorInfo {
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ErrorBody {
+    pub error: ErrorInfo,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OkBody {
+    pub ok: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServerInfoResp {
+    pub server_name: String,
+    pub version: String,
+    #[serde(with = "crate::b64")]
+    pub server_sign_pubkey: Vec<u8>,
+    pub min_client_version: String,
+    pub features: Vec<String>,
+    pub udp_port: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeviceRegistration {
+    pub device_id: DeviceId,
+    #[serde(with = "crate::b64")]
+    pub device_pubkey: Vec<u8>,
+    pub kind: DeviceKind,
+    pub platform: Platform,
+    #[serde(default)]
+    pub os_version: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub app_version: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LoginStartReq {
+    pub username: String,
+    #[serde(with = "crate::b64")]
+    pub opaque_request: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LoginStartResp {
+    pub login_id: String,
+    #[serde(with = "crate::b64")]
+    pub opaque_response: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LoginFinishReq {
+    pub login_id: String,
+    #[serde(with = "crate::b64")]
+    pub opaque_finalization: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_code: Option<String>,
+    pub device: DeviceRegistration,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserSelf {
+    pub id: u64,
+    pub username: String,
+    pub display_name: String,
+    pub ai_enabled: bool,
+    #[serde(default)]
+    pub totp_enabled: bool,
+}
+
+/// 账号机密（加密后）及公钥。
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct AccountMaterial {
+    pub epoch: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::b64::opt")]
+    pub pubkey: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::b64::opt")]
+    pub wrapped_secrets: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::b64::opt")]
+    pub nonce: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LoginFinishResp {
+    pub session_token: String,
+    pub user: UserSelf,
+    pub must_change_password: bool,
+    pub account: AccountMaterial,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PasswordStartReq {
+    #[serde(with = "crate::b64")]
+    pub registration_request: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PasswordStartResp {
+    #[serde(with = "crate::b64")]
+    pub registration_response: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PasswordFinishReq {
+    #[serde(with = "crate::b64")]
+    pub registration_upload: Vec<u8>,
+    pub account: AccountMaterial,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CertUploadReq {
+    #[serde(with = "crate::b64")]
+    pub cert: Vec<u8>,
+    #[serde(with = "crate::b64")]
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClientDevice {
+    pub id: DeviceId,
+    pub kind: DeviceKind,
+    pub platform: Platform,
+    #[serde(default)]
+    pub os_version: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub app_version: String,
+    pub online: bool,
+    pub last_seen_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::b64::opt")]
+    pub cert: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::b64::opt")]
+    pub cert_signature: Option<Vec<u8>>,
+    #[serde(default)]
+    pub public_ip: String,
+    #[serde(with = "crate::b64")]
+    pub device_pubkey: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListResp<T> {
+    pub items: Vec<T>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RevocationsWire {
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::b64::opt")]
+    pub list: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::b64::opt")]
+    pub signature: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultItemWire {
+    pub id: String,
+    pub kind: String,
+    #[serde(with = "crate::b64")]
+    pub ciphertext: Vec<u8>,
+    #[serde(with = "crate::b64")]
+    pub nonce: Vec<u8>,
+    pub version: i64,
+    pub deleted: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultListResp {
+    pub items: Vec<VaultItemWire>,
+    pub version: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultPutReq {
+    pub kind: String,
+    #[serde(with = "crate::b64")]
+    pub ciphertext: Vec<u8>,
+    #[serde(with = "crate::b64")]
+    pub nonce: Vec<u8>,
+    pub base_version: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VersionResp {
+    pub version: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AiModelInfo {
+    pub provider_id: u64,
+    pub provider_name: String,
+    pub id: String,
+    pub name: String,
+    pub vision: bool,
+    pub tools: bool,
+    pub context_length: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AiModelsResp {
+    pub enabled: bool,
+    pub max_mode: AiMode,
+    pub items: Vec<AiModelInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TotpSetupResp {
+    pub secret: String,
+    pub otpauth_uri: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TotpCodeReq {
+    pub code: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateLatestResp {
+    pub available: bool,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub sha256: String,
+    #[serde(default)]
+    pub signature: String,
+}
