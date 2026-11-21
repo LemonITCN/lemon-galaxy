@@ -309,3 +309,24 @@ final class MockDesktopRenderer {
     /// 记事本「保存」按钮在截图里的位置（AI 点击演示用）
     var saveButtonPoint: CGPoint { CGPoint(x: editorRect.maxX - 39 * u, y: editorRect.minY + 15 * u) }
 }
+
+/// 模拟远端声音：不出声，只记下音量、静音与是否在播（界面开关与单元测试用）。
+final class MockAudioPlayback: AudioPlayback, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
+    private let lock = NSLock()
+    private var active = true
+    private var _volume: Float
+    private var _muted = false
+
+    init(volume: Float) {
+        _volume = min(max(volume, 0), 1)
+        super.init(noHandle: NoHandle())
+    }
+
+    var volume: Float { lock.locked { _volume } }
+    var muted: Bool { lock.locked { _muted } }
+    override func isActive() -> Bool { lock.locked { active } }
+    override func setVolume(volume: Float) { lock.locked { _volume = min(max(volume, 0), 1) } }
+    override func setMuted(muted: Bool) { lock.locked { _muted = muted } }
+    override func stop() { lock.locked { active = false } }
+}

@@ -174,8 +174,9 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
             }
             switch decision {
             case .deny(let reason):
-                let r = ToolResultView(ok: false, summary: (zh ? "用户拒绝" : "Denied by user") + (reason.map { (zh ? "：" : ": ") + $0 } ?? ""),
-                                       output: "", image: nil, denied: true)
+                var summary: String = zh ? "用户拒绝" : "Denied by user"
+                if let reason { summary += (zh ? "：" : ": ") + reason }
+                let r = ToolResultView(ok: false, summary: summary, output: "", image: nil, denied: true)
                 emit(.toolFinished(callId: callId, result: r))
                 record(.tool(call: call, result: r))
                 return nil

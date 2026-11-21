@@ -4,7 +4,7 @@ import GalaxyKit
 // 真内核冒烟测试（macOS 上用 xcframework 的 macOS 切片跑，验证 GalaxyKit 的适配层与 iOS 端用的同一套模型）：
 //   swift run galaxy-core-smoke <服务器地址> <用户名> <密码> [--no-ai] [--keep-device]
 // 内存 SecureStore、临时数据目录，按 iOS 主控端的配置（platform=ios, device_kind=mobile）登录，依次验证：
-// 登录 → 上线 → 设备列表 → 加密库读写 → 连接 worker → 命令执行 → 终端收发 → 文件读写 → 上传下载 → AI 对话 → SSH 直连 → RDP 转发 → 隐私屏 → 清理本机设备 → 登出。
+// 登录 → 上线 → 设备列表 → 加密库读写 → 连接 worker → 命令执行 → 终端收发 → 文件读写 → 上传下载 → AI 对话 → SSH 直连 → RDP 转发 → 隐私屏 → 远端声音 → 清理本机设备 → 登出。
 // 每步打印结果与耗时；全部通过退出码 0，否则 1。
 
 let started = Date()
@@ -316,6 +316,20 @@ final class Smoke {
             }
         } else {
             log("  对端能力里没有 privacy：界面不显示隐私屏开关（这台被控端：\(info.capabilities.joined(separator: ",")))")
+        }
+
+        // 远端声音：内核用本机默认输出播放（冒烟测试音量 0，不出声），停止后不再活动
+        if info.capabilities.contains("audio") {
+            _ = await step("start_audio / stop") {
+                let p = try await peer.session.startAudio(volume: 0)
+                try await Task.sleep(nanoseconds: 1_500_000_000)
+                guard p.isActive() else { throw GalaxyError.Other(detail: "开始播放后 is_active 为假") }
+                p.setMuted(muted: true)
+                p.stop()
+                guard !p.isActive() else { throw GalaxyError.Other(detail: "停止后 is_active 仍为真") }
+            }
+        } else {
+            log("  对端能力里没有 audio：界面不显示声音开关（这台被控端：\(info.capabilities.joined(separator: ",")))")
         }
 
         account.setLanDiscovery(false)

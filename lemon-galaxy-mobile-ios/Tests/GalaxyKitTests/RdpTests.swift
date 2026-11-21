@@ -89,4 +89,28 @@ final class MockRdpAndPrivacyTests: XCTestCase {
             XCTAssertFalse(describeError(error).isEmpty)
         }
     }
+
+    func testAudioCapabilityAndPlayback() async throws {
+        let a = makeAccount()
+        _ = try await a.login(server: "127.0.0.1:17443#sha256-vS0YoCAj63KxITahXYerlvFetFcrpl-Yz0rZJ7ecgw8", username: "alice", password: "x", totp: nil)
+        let win = try await a.peer("dev-office")
+        XCTAssertTrue(win.info.capabilities.contains("audio"))
+        let p = try await win.session.startAudio(volume: 0.8)
+        XCTAssertTrue(p.isActive())
+        p.setVolume(volume: 1.5)
+        p.setMuted(muted: true)
+        let m = try XCTUnwrap(p as? MockAudioPlayback)
+        XCTAssertEqual(m.volume, 1)
+        XCTAssertTrue(m.muted)
+        p.stop()
+        XCTAssertFalse(p.isActive())
+        // 对方没给听声音的权限：能力里没有 audio，硬开也报错
+        let imac = try await a.peer("dev-imac")
+        XCTAssertFalse(imac.info.capabilities.contains("audio"))
+        do { _ = try await imac.session.startAudio(volume: 1); XCTFail("没有权限时应当报错") } catch {
+            XCTAssertFalse(describeError(error).isEmpty)
+        }
+        let linux = try await a.peer("dev-build")
+        XCTAssertFalse(linux.info.capabilities.contains("audio"))
+    }
 }

@@ -28,6 +28,8 @@ final class AppSettings: ObservableObject {
     @Published var defaultQuality: VideoQuality { didSet { d.set(defaultQuality.rawValue, forKey: "defaultQuality") } }
     @Published var defaultAiMode: AiMode { didSet { d.set(defaultAiMode.key, forKey: "defaultAiMode") } }
     @Published var remoteMouseMode: Bool { didSet { d.set(remoteMouseMode, forKey: "remoteMouseMode") } }
+    /// 远程桌面播放被控端声音（默认开，记住用户的选择）
+    @Published var remoteAudio: Bool { didSet { d.set(remoteAudio, forKey: "remoteAudio") } }
     @Published var terminalInputBox: Bool { didSet { d.set(terminalInputBox, forKey: "terminalInputBox") } }
     @Published var showHiddenFiles: Bool { didSet { d.set(showHiddenFiles, forKey: "showHiddenFiles") } }
     @Published var fileSort: FileSort { didSet { d.set(fileSort.rawValue, forKey: "fileSort") } }
@@ -50,6 +52,7 @@ final class AppSettings: ObservableObject {
         defaultQuality = VideoQuality(rawValue: d.string(forKey: "defaultQuality") ?? "") ?? .auto
         defaultAiMode = AiMode.fromKey(d.string(forKey: "defaultAiMode")) ?? .confirmDangerous
         remoteMouseMode = d.bool(forKey: "remoteMouseMode")
+        remoteAudio = d.object(forKey: "remoteAudio") as? Bool ?? true
         terminalInputBox = d.bool(forKey: "terminalInputBox")
         showHiddenFiles = d.bool(forKey: "showHiddenFiles")
         fileSort = FileSort(rawValue: d.string(forKey: "fileSort") ?? "") ?? .name

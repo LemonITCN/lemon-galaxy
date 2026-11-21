@@ -130,7 +130,7 @@ public enum TerminalKeys {
     /// - appCursor: 远端开了应用光标模式（DECCKM，vim / less 等全屏程序会开）时方向键用 ESC O x
     /// - ctrl / alt / shift：xterm 修饰参数（方向键等带修饰时用 CSI 1;m x）
     public static func bytes(_ key: TerminalKey, appCursor: Bool = false, ctrl: Bool = false, alt: Bool = false, shift: Bool = false) -> [UInt8] {
-        let mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)
+        let mod: Int = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)
         func csi(_ s: String) -> [UInt8] { [esc] + Array(("[" + s).utf8) }
         func cursor(_ c: String) -> [UInt8] {
             if mod > 1 { return csi("1;\(mod)" + c) }

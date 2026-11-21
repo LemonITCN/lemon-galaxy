@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import CoreVideo
+import AVFoundation
 import Combine
 import GalaxyKit
 
@@ -29,6 +30,9 @@ final class RemoteSession: ObservableObject, Identifiable {
     /// 隐私屏：被控端本地屏幕黑掉、本地键鼠失效（会话结束时被控端自动关闭）
     @Published private(set) var privacyOn = false
     @Published private(set) var privacyBusy = false
+    /// 远端声音：内核用本机默认输出播放；开关记在设置里（默认开），画面打开后自动开始
+    @Published private(set) var audioOn = false
+    @Published private(set) var audioBusy = false
     let canvas = RemoteCanvasView()
     weak var app: AppModel?
 
@@ -39,6 +43,10 @@ final class RemoteSession: ObservableObject, Identifiable {
     private var statsTimer: Timer?
     private var foreground = true
     private var closeWatch: AnyCancellable?
+    private var audio: AudioPlayback?
+    /// 每次开始或停止声音加一：开到一半被关掉、切后台或会话结束时，迟到的结果直接丢弃
+    private var audioGeneration = 0
+    private var stopped = false
 
     init(app: AppModel, deviceId: String, title: String, platform: Platform) {
         self.app = app
@@ -84,6 +92,67 @@ final class RemoteSession: ObservableObject, Identifiable {
     }
     var viewOnly: Bool { !(peer?.info.permissions.control ?? true) }
 
+    /// 对端能力里有 "audio"（对方给了听声音的权限且系统能采集）才显示声音开关
+    var supportsAudio: Bool { peer?.info.capabilities.contains("audio") ?? false }
+
+    /// 用户点开关：记住选择并立即开始或停止
+    func setAudio(_ on: Bool) {
+        app?.settings.remoteAudio = on
+        if on { startAudio() } else { stopAudio() }
+    }
+
+    private func startAudioIfWanted() {
+        if app?.settings.remoteAudio ?? false { startAudio() }
+    }
+
+    private func startAudio() {
+        guard let peer, supportsAudio, audio == nil, !audioBusy, foreground, !stopped else { return }
+        audioBusy = true
+        audioGeneration += 1
+        let gen = audioGeneration
+        Task {
+            var playback: AudioPlayback?
+            var failure: Error?
+            do {
+                try RemoteAudioSession.acquire()
+                do {
+                    playback = try await peer.session.startAudio(volume: 1)
+                } catch {
+                    RemoteAudioSession.release()
+                    throw error
+                }
+            } catch {
+                failure = error
+            }
+            guard gen == audioGeneration else {
+                // 等待期间被关掉了：这一路不要了
+                if let playback {
+                    playback.stop()
+                    RemoteAudioSession.release()
+                }
+                return
+            }
+            audioBusy = false
+            if let playback {
+                audio = playback
+                audioOn = true
+            } else if let failure, !isCancellation(failure) {
+                app?.showToast(L("remote.soundFailed", describeError(failure)), error: true)
+            }
+        }
+    }
+
+    /// 停止播放（不改设置里的开关）
+    private func stopAudio() {
+        audioGeneration += 1
+        audioBusy = false
+        audioOn = false
+        guard let a = audio else { return }
+        audio = nil
+        a.stop()
+        RemoteAudioSession.release()
+    }
+
     func start() {
         statsTimer?.invalidate()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -93,6 +162,7 @@ final class RemoteSession: ObservableObject, Identifiable {
                 self.frames = 0
             }
         }
+        stopAudio()
         Task { [weak self] in
             guard let self, let app = self.app else { return }
             do {
@@ -100,6 +170,8 @@ final class RemoteSession: ObservableObject, Identifiable {
                 peer = p
                 closeWatch = p.$closedReason.compactMap { $0 }.receive(on: DispatchQueue.main).sink { [weak self] reason in
                     self?.status = .failed(reason.isEmpty ? L("remote.closed") : reason)
+                    // 会话断了，声音通道也随之失效
+                    self?.stopAudio()
                 }
                 displays = try await p.session.listDisplays()
                 guard let first = displays.first(where: \.primary) ?? displays.first else {
@@ -145,6 +217,7 @@ final class RemoteSession: ObservableObject, Identifiable {
                                                                                  codecs: VideoDecoder.supportedCodecs, viewOnly: viewOnly),
                                                          sink: adapter)
             canvas.viewOnly = viewOnly
+            startAudioIfWanted()
         } catch {
             status = .failed(describeError(error))
         }
@@ -205,21 +278,53 @@ final class RemoteSession: ObservableObject, Identifiable {
         }
     }
 
-    /// 切后台：系统会让解码会话失效，回来后重建并请求关键帧
+    /// 切后台：系统会让解码会话失效，回来后重建并请求关键帧；
+    /// 声音在后台放不了（没有后台音频模式），先停掉，回来后按开关重新开始
     func setForeground(_ fg: Bool) {
         guard fg != foreground else { return }
         foreground = fg
         if fg {
             canvas.displayLayer.flush()
             channel?.requestKeyframe()
+            if channel != nil { startAudioIfWanted() }
+        } else {
+            stopAudio()
         }
     }
 
     func stop() {
+        stopped = true
+        stopAudio()
         statsTimer?.invalidate()
         channel?.stop()
         channel = nil
         decoder.invalidate()
         canvas.displayLayer.flushAndRemoveImage()
+    }
+}
+
+/// 远端声音用的系统音频会话。
+/// 类别用 .playback：声音是用户在工具栏里主动开的，静音键打开时也应当听得到；
+/// 加 .mixWithOthers：远程桌面的声音只是辅助，不打断本机正在播放的音乐或播客，也不抢「正在播放」。
+/// 几个远程桌面同时开声音时按引用计数，最后一个停了才交还会话（通知其他 App 可以恢复）。
+@MainActor
+enum RemoteAudioSession {
+    private static var users = 0
+
+    static func acquire() throws {
+        if users == 0 {
+            let s = AVAudioSession.sharedInstance()
+            try s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try s.setActive(true)
+        }
+        users += 1
+    }
+
+    static func release() {
+        guard users > 0 else { return }
+        users -= 1
+        if users == 0 {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
 }

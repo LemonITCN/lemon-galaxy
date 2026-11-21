@@ -45,6 +45,10 @@ let package = Package(
                 .linkedFramework("SystemConfiguration"),
                 .linkedFramework("Security"),
                 .linkedFramework("IOKit", .when(platforms: [.macOS])),
+                // 远端声音播放（cpal：RemoteIO / CoreAudio 输出，iOS 上经 AVAudioSession 取输出配置）
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("AVFAudio"),
                 .linkedLibrary("resolv"),
                 .linkedLibrary("iconv"),
             ]

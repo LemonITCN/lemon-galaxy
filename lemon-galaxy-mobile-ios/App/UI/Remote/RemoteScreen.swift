@@ -19,7 +19,7 @@ struct RemoteCanvasHost: UIViewRepresentable {
     }
 }
 
-/// 远程桌面：画面占满，右侧一个可拖动的悬浮球，点开是工具栏（屏幕、画质、输入方式、键盘、快捷键、剪贴板、断开）。
+/// 远程桌面：画面占满，右侧一个可拖动的悬浮球，点开是工具栏（屏幕、画质、输入方式、键盘、快捷键、声音、隐私屏、剪贴板、断开）。
 struct RemoteScreen: View {
     @ObservedObject var session: RemoteSession
     var onMinimize: (() -> Void)?
@@ -107,81 +107,12 @@ struct RemoteScreen: View {
         .accessibilityLabel(loc("remote.toolbar"))
     }
 
+    // 工具栏拆成小块、字符串先算好再交给视图：大的 ViewBuilder 表达式在较慢的机器上会超出编译器的类型检查时限
     private var toolbar: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Text(session.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                if let p = session.peer { PathBadge(path: p.path, light: true) }
-                if let d = session.display {
-                    Text("\(d.width)×\(d.height) · \(session.fps) fps")
-                        .font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(0.7))
-                }
-                Spacer(minLength: 0)
-                InfoButton(text: loc("remote.modeInfo"))
-                    .environment(\.palette, Palettes.make("galaxy", dark: true))
-            }
-            .padding(.horizontal, 8)
+            toolbarHeader
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
-                    if let onMinimize {
-                        ToolButton(icon: "chevron.down", label: loc("session.minimize")) { onMinimize() }
-                    }
-                    Menu {
-                        ForEach(session.displays, id: \.id) { d in
-                            Button {
-                                session.switchDisplay(d.id)
-                            } label: {
-                                Label(d.name + "  \(d.width)×\(d.height)" + (d.primary ? " · " + loc("remote.primary") : "") + (d.isVirtual ? " · " + loc("remote.virtual") : ""),
-                                      systemImage: d.id == session.displayId ? "checkmark" : "display")
-                            }
-                        }
-                    } label: { ToolLabel(icon: "display.2", label: loc("remote.display")) }
-                    Menu {
-                        ForEach(VideoQuality.allCases) { q in
-                            Button {
-                                session.setQuality(q)
-                            } label: {
-                                Label(loc("quality." + q.rawValue) + (q.bitrateKbps > 0 ? " · \(q.bitrateKbps / 1000) Mbps" : ""),
-                                      systemImage: q == session.quality ? "checkmark" : "dial.medium")
-                            }
-                        }
-                    } label: { ToolLabel(icon: "sparkles.tv", label: loc("quality." + session.quality.rawValue)) }
-                    ToolButton(icon: session.mouseMode ? "cursorarrow.motionlines" : "hand.tap",
-                               label: loc(session.mouseMode ? "remote.modeMouse" : "remote.modeTouch"), active: session.mouseMode) {
-                        session.mouseMode.toggle()
-                        app.settings.remoteMouseMode = session.mouseMode
-                    }
-                    ToolButton(icon: "keyboard", label: loc("remote.keyboard"), active: session.keyboardShown) {
-                        setKeyboard(!session.keyboardShown)
-                        toolbarOpen = false
-                    }
-                    Menu {
-                        let list = RemoteShortcuts.list(for: session.platform)
-                        Section {
-                            ForEach(list.filter { $0.group == 0 }) { s in
-                                Button(loc("combo." + s.id)) { session.send(s.events) }
-                            }
-                        }
-                        Section {
-                            ForEach(list.filter { $0.group == 1 }) { s in
-                                Button(loc("combo." + s.id)) { session.send(s.events) }
-                            }
-                        }
-                    } label: { ToolLabel(icon: "command", label: loc("remote.shortcuts")) }
-                    if session.supportsPrivacy {
-                        ToolButton(icon: session.privacyOn ? "eye.slash.fill" : "eye.slash", label: loc("remote.privacy"), active: session.privacyOn) {
-                            session.setPrivacy(!session.privacyOn)
-                        }
-                        .disabled(session.privacyBusy)
-                    }
-                    Menu {
-                        Button { session.sendClipboard() } label: { Label(loc("remote.sendClipboard"), systemImage: "arrow.up.doc.on.clipboard") }
-                        Button { session.fetchClipboard() } label: { Label(loc("remote.getClipboard"), systemImage: "arrow.down.doc") }
-                    } label: { ToolLabel(icon: "doc.on.clipboard", label: loc("remote.clipboard")) }
-                    ToolButton(icon: "xmark.circle", label: loc("remote.disconnect"), danger: true) {
-                        app.sessions.close(session.id)
-                    }
-                }
+                toolbarButtons
             }
         }
         .padding(.vertical, 10)
@@ -189,6 +120,136 @@ struct RemoteScreen: View {
         .frame(maxWidth: 720)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(hex: "#1B1E2B").opacity(0.94)))
         .shadow(color: .black.opacity(0.4), radius: 14, y: 6)
+    }
+
+    private var toolbarHeader: some View {
+        HStack(spacing: 10) {
+            Text(session.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+            if let p = session.peer { PathBadge(path: p.path, light: true) }
+            if let d = session.display {
+                let stats: String = "\(d.width)×\(d.height) · \(session.fps) fps"
+                Text(stats)
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(0.7))
+            }
+            Spacer(minLength: 0)
+            InfoButton(text: loc("remote.modeInfo"))
+                .environment(\.palette, Palettes.make("galaxy", dark: true))
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private var toolbarButtons: some View {
+        HStack(spacing: 2) {
+            if let onMinimize {
+                ToolButton(icon: "chevron.down", label: loc("session.minimize")) { onMinimize() }
+            }
+            displayMenu
+            qualityMenu
+            inputModeButton
+            ToolButton(icon: "keyboard", label: loc("remote.keyboard"), active: session.keyboardShown) {
+                setKeyboard(!session.keyboardShown)
+                toolbarOpen = false
+            }
+            shortcutsMenu
+            if session.supportsAudio { soundButton }
+            if session.supportsPrivacy { privacyButton }
+            clipboardMenu
+            ToolButton(icon: "xmark.circle", label: loc("remote.disconnect"), danger: true) {
+                app.sessions.close(session.id)
+            }
+        }
+    }
+
+    private func displayTitle(_ d: DisplayInfo) -> String {
+        var t: String = d.name + "  \(d.width)×\(d.height)"
+        if d.primary { t += " · " + loc("remote.primary") }
+        if d.isVirtual { t += " · " + loc("remote.virtual") }
+        return t
+    }
+
+    private var displayMenu: some View {
+        Menu {
+            ForEach(session.displays, id: \.id) { (d: DisplayInfo) in
+                let icon: String = d.id == session.displayId ? "checkmark" : "display"
+                Button {
+                    session.switchDisplay(d.id)
+                } label: {
+                    Label(displayTitle(d), systemImage: icon)
+                }
+            }
+        } label: { ToolLabel(icon: "display.2", label: loc("remote.display")) }
+    }
+
+    private func qualityTitle(_ q: VideoQuality) -> String {
+        let name: String = loc("quality." + q.rawValue)
+        guard q.bitrateKbps > 0 else { return name }
+        return name + " · \(q.bitrateKbps / 1000) Mbps"
+    }
+
+    private var qualityMenu: some View {
+        Menu {
+            ForEach(VideoQuality.allCases) { (q: VideoQuality) in
+                let icon: String = q == session.quality ? "checkmark" : "dial.medium"
+                Button {
+                    session.setQuality(q)
+                } label: {
+                    Label(qualityTitle(q), systemImage: icon)
+                }
+            }
+        } label: { ToolLabel(icon: "sparkles.tv", label: loc("quality." + session.quality.rawValue)) }
+    }
+
+    private var inputModeButton: some View {
+        let mouse: Bool = session.mouseMode
+        let icon: String = mouse ? "cursorarrow.motionlines" : "hand.tap"
+        let label: String = loc(mouse ? "remote.modeMouse" : "remote.modeTouch")
+        return ToolButton(icon: icon, label: label, active: mouse) {
+            session.mouseMode.toggle()
+            app.settings.remoteMouseMode = session.mouseMode
+        }
+    }
+
+    private var shortcutsMenu: some View {
+        let list: [RemoteShortcut] = RemoteShortcuts.list(for: session.platform)
+        let common: [RemoteShortcut] = list.filter { $0.group == 0 }
+        let system: [RemoteShortcut] = list.filter { $0.group == 1 }
+        return Menu {
+            Section {
+                ForEach(common) { (s: RemoteShortcut) in
+                    Button(loc("combo." + s.id)) { session.send(s.events) }
+                }
+            }
+            Section {
+                ForEach(system) { (s: RemoteShortcut) in
+                    Button(loc("combo." + s.id)) { session.send(s.events) }
+                }
+            }
+        } label: { ToolLabel(icon: "command", label: loc("remote.shortcuts")) }
+    }
+
+    private var soundButton: some View {
+        let on: Bool = session.audioOn
+        let icon: String = on ? "speaker.wave.2.fill" : "speaker.slash"
+        return ToolButton(icon: icon, label: loc("remote.sound"), active: on) {
+            session.setAudio(!on)
+        }
+        .disabled(session.audioBusy)
+    }
+
+    private var privacyButton: some View {
+        let on: Bool = session.privacyOn
+        let icon: String = on ? "eye.slash.fill" : "eye.slash"
+        return ToolButton(icon: icon, label: loc("remote.privacy"), active: on) {
+            session.setPrivacy(!on)
+        }
+        .disabled(session.privacyBusy)
+    }
+
+    private var clipboardMenu: some View {
+        Menu {
+            Button { session.sendClipboard() } label: { Label(loc("remote.sendClipboard"), systemImage: "arrow.up.doc.on.clipboard") }
+            Button { session.fetchClipboard() } label: { Label(loc("remote.getClipboard"), systemImage: "arrow.down.doc") }
+        } label: { ToolLabel(icon: "doc.on.clipboard", label: loc("remote.clipboard")) }
     }
 }
 

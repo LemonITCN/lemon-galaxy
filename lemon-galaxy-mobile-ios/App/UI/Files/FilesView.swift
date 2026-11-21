@@ -127,94 +127,142 @@ struct FileBrowserView: View {
         let entry: FileEntry?
     }
 
+    // 修饰符按用途分几段写：一整条长链在较慢的机器上类型检查会超时
     var body: some View {
+        withSheets(withDialogs(withNavigation(content)))
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             breadcrumb
-            List {
-                if let e = model.error {
-                    Section {
-                        Label(e, systemImage: "exclamationmark.triangle").foregroundStyle(p.danger)
-                        Button(loc("common.retry")) { Task { await model.refresh() } }
-                    }
-                    .galaxyRow()
-                }
-                let rows = model.searchResults ?? model.sorted(settings)
-                if rows.isEmpty && !model.loading && model.error == nil {
-                    EmptyState(icon: model.searchResults == nil ? "folder" : "magnifyingglass",
-                               title: loc(model.searchResults == nil ? "files.empty" : "search.empty"))
-                        .listRowBackground(Color.clear)
-                }
-                ForEach(rows, id: \.path) { e in
-                    FileRow(entry: e, showPath: model.searchResults != nil)
-                        .contentShape(Rectangle())
-                        .onTapGesture { open(e) }
-                        .contextMenu { actions(e) }
-                        .swipeActions {
-                            Button(role: .destructive) { deleting = e } label: { Label(loc("common.delete"), systemImage: "trash") }
-                            Button { prompt = NamePrompt(title: loc("common.rename"), initial: e.name, entry: e) } label: { Label(loc("common.rename"), systemImage: "pencil") }
-                                .tint(p.accent)
-                        }
-                        .galaxyRow()
-                }
-            }
-            .listStyle(.plain)
-            .galaxyList()
-            .overlay { if model.loading && model.entries.isEmpty { ProgressView() } }
-            .refreshable { await model.refresh() }
+            list
+                .listStyle(.plain)
+                .galaxyList()
+                .overlay { if model.loading && model.entries.isEmpty { ProgressView() } }
+                .refreshable { await model.refresh() }
         }
         .background(p.background)
-        .navigationTitle(model.name)
-        .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query, prompt: loc("files.search"))
-        .onSubmit(of: .search) { Task { await model.search(query, content: searchContent) } }
-        .onChange(of: query) { q in if q.isEmpty { model.searchResults = nil } }
-        .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button(action: onChangeTarget) { Image(systemName: "chevron.left") }
-                    .accessibilityLabel(loc("files.changeTarget"))
+    }
+
+    private var list: some View {
+        List {
+            if let e = model.error {
+                Section {
+                    Label(e, systemImage: "exclamationmark.triangle").foregroundStyle(p.danger)
+                    Button(loc("common.retry")) { Task { await model.refresh() } }
+                }
+                .galaxyRow()
             }
-            ToolbarItem(placement: .primaryAction) { moreMenu }
+            let searching: Bool = model.searchResults != nil
+            let rows: [FileEntry] = model.searchResults ?? model.sorted(settings)
+            if rows.isEmpty && !model.loading && model.error == nil {
+                emptyState(searching: searching)
+            }
+            ForEach(rows, id: \.path) { (e: FileEntry) in
+                fileRow(e, searching: searching)
+            }
         }
-        .task { await model.start() }
-        .confirmationDialog(selected?.name ?? "", isPresented: Binding(get: { selected != nil }, set: { if !$0 { selected = nil } }),
-                            titleVisibility: .visible, presenting: selected) { e in actions(e) }
-        .alert(prompt?.title ?? "", isPresented: Binding(get: { prompt != nil }, set: { if !$0 { prompt = nil } }), presenting: prompt) { pr in
-            NamePromptActions(prompt: pr) { name in
-                Task {
-                    if let e = pr.entry { await model.rename(e, to: name) } else { await model.mkdir(name) }
+    }
+
+    private func withNavigation<V: View>(_ v: V) -> some View {
+        v.navigationTitle(model.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, prompt: loc("files.search"))
+            .onSubmit(of: .search) { Task { await model.search(query, content: searchContent) } }
+            .onChange(of: query) { (q: String) in if q.isEmpty { model.searchResults = nil } }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(action: onChangeTarget) { Image(systemName: "chevron.left") }
+                        .accessibilityLabel(loc("files.changeTarget"))
+                }
+                ToolbarItem(placement: .primaryAction) { moreMenu }
+            }
+            .task { await model.start() }
+    }
+
+    private var selectedShown: Binding<Bool> { Binding(get: { selected != nil }, set: { if !$0 { selected = nil } }) }
+    private var promptShown: Binding<Bool> { Binding(get: { prompt != nil }, set: { if !$0 { prompt = nil } }) }
+    private var deletingShown: Binding<Bool> { Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }) }
+    private var shareItem: Binding<ShareItem?> {
+        Binding(get: { shareURL.map { ShareItem(url: $0) } }, set: { if $0 == nil { shareURL = nil } })
+    }
+
+    private func deleteMessage(_ e: FileEntry) -> Text {
+        Text(loc(e.kind == .dir ? "files.deleteDirMessage" : "files.deleteFileMessage"))
+    }
+
+    private func withDialogs<V: View>(_ v: V) -> some View {
+        let selectedName: String = selected?.name ?? ""
+        let promptTitle: String = prompt?.title ?? ""
+        let deleteTitle: String = loc("files.deleteTitle", deleting?.name ?? "")
+        return v
+            .confirmationDialog(selectedName, isPresented: selectedShown, titleVisibility: .visible, presenting: selected) { (e: FileEntry) in actions(e) }
+            .alert(promptTitle, isPresented: promptShown, presenting: prompt) { (pr: NamePrompt) in
+                NamePromptActions(prompt: pr) { name in
+                    Task {
+                        if let e = pr.entry { await model.rename(e, to: name) } else { await model.mkdir(name) }
+                    }
                 }
             }
-        }
-        .alert(loc("files.deleteTitle", deleting?.name ?? ""), isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), presenting: deleting) { e in
-            Button(loc("common.delete"), role: .destructive) { Task { await model.delete(e) } }
-            Button(loc("common.cancel"), role: .cancel) {}
-        } message: { e in Text(loc(e.kind == .dir ? "files.deleteDirMessage" : "files.deleteFileMessage")) }
-        .sheet(item: $chmodTarget) { e in
+            .alert(deleteTitle, isPresented: deletingShown, presenting: deleting) { (e: FileEntry) in
+                Button(loc("common.delete"), role: .destructive) { Task { await model.delete(e) } }
+                Button(loc("common.cancel"), role: .cancel) {}
+            } message: { (e: FileEntry) in deleteMessage(e) }
+    }
+
+    private func withSheets<V: View>(_ v: V) -> some View {
+        v.sheet(item: $chmodTarget) { (e: FileEntry) in
             ChmodSheet(entry: e) { mode in Task { await model.chmod(e, mode) } }
         }
-        .sheet(item: $editing) { e in
+        .sheet(item: $editing) { (e: FileEntry) in
             TextFileEditor(model: model, entry: e).environmentObject(app)
         }
-        .sheet(item: Binding(get: { shareURL.map { ShareItem(url: $0) } }, set: { if $0 == nil { shareURL = nil } })) { item in
+        .sheet(item: shareItem) { (item: ShareItem) in
             ShareSheet(items: [item.url])
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { r in
             if case .success(let urls) = r { Task { await model.upload(urls) } }
         }
         .photosPicker(isPresented: $photoPicker, selection: $photos, matching: .any(of: [.images, .videos]))
-        .onChange(of: photos) { items in
-            guard !items.isEmpty else { return }
-            let picked = items
-            photos = []
-            Task {
-                for (i, item) in picked.enumerated() {
-                    guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
-                    let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
-                    let stamp = Int(Date().timeIntervalSince1970)
-                    await model.upload(data: data, name: "IMG_\(stamp)_\(i + 1).\(ext)")
-                }
+        .onChange(of: photos) { (items: [PhotosPickerItem]) in uploadPicked(items) }
+    }
+
+    private func uploadPicked(_ items: [PhotosPickerItem]) {
+        guard !items.isEmpty else { return }
+        let picked = items
+        photos = []
+        Task {
+            for (i, item) in picked.enumerated() {
+                guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+                let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
+                let stamp = Int(Date().timeIntervalSince1970)
+                await model.upload(data: data, name: "IMG_\(stamp)_\(i + 1).\(ext)")
             }
         }
+    }
+
+    private func emptyState(searching: Bool) -> some View {
+        let icon: String = searching ? "magnifyingglass" : "folder"
+        let title: String = loc(searching ? "search.empty" : "files.empty")
+        return EmptyState(icon: icon, title: title)
+            .listRowBackground(Color.clear)
+    }
+
+    private func fileRow(_ e: FileEntry, searching: Bool) -> some View {
+        FileRow(entry: e, showPath: searching)
+            .contentShape(Rectangle())
+            .onTapGesture { open(e) }
+            .contextMenu { actions(e) }
+            .swipeActions { swipeButtons(e) }
+            .galaxyRow()
+    }
+
+    @ViewBuilder private func swipeButtons(_ e: FileEntry) -> some View {
+        Button(role: .destructive) { deleting = e } label: { Label(loc("common.delete"), systemImage: "trash") }
+        Button {
+            prompt = NamePrompt(title: loc("common.rename"), initial: e.name, entry: e)
+        } label: { Label(loc("common.rename"), systemImage: "pencil") }
+            .tint(p.accent)
     }
 
     private var breadcrumb: some View {

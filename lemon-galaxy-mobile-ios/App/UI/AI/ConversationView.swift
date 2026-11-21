@@ -96,7 +96,9 @@ struct ConversationView: View {
         HStack(spacing: 8) {
             if s.running && !s.waitingForUser {
                 ProgressView().controlSize(.mini)
-                Text(loc("ai.running") + (s.step > 0 ? " · " + loc("ai.step", s.step) : ""))
+                let stepText: String = s.step > 0 ? " · " + loc("ai.step", s.step) : ""
+                let running: String = loc("ai.running") + stepText
+                Text(running)
             } else if s.waitingForUser {
                 Image(systemName: "hand.raised.fill").foregroundStyle(p.warning)
                 Text(loc("ai.waiting"))

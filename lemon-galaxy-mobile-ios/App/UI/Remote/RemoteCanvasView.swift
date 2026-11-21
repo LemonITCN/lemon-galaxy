@@ -363,7 +363,10 @@ final class RemoteCanvasView: UIView, UIKeyInput {
             var events: [InputEvent] = []
             for ch in text {
                 guard let (usage, shift) = Hid.usage(for: ch) else { continue }
-                events += Hid.combo(m + (shift && !m.contains(Hid.shift) ? [Hid.shift] : []) + [usage])
+                var keys: [UInt32] = m
+                if shift && !m.contains(Hid.shift) { keys.append(Hid.shift) }
+                keys.append(usage)
+                events += Hid.combo(keys)
             }
             consumeMods()
             emit(events)

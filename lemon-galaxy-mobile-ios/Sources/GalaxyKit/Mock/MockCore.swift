@@ -401,6 +401,14 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
         }
     }
 
+    override func startAudio(volume: Float) async throws -> AudioPlayback {
+        await client.delay(120)
+        guard MockData.capabilities(for: device).contains("audio") else {
+            throw GalaxyError.Permission(detail: client.zh ? "这台设备不能听声音" : "Sound is not available on this device")
+        }
+        return MockAudioPlayback(volume: volume)
+    }
+
     override func disconnect() {
         guard !closed else { return }
         closed = true
