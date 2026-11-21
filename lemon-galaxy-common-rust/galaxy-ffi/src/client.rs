@@ -668,6 +668,11 @@ impl GalaxyClient {
         let inner = self.inner.clone();
         run(async move {
             let _: serde_json::Value = inner.api()?.delete(&format!("/devices/{device_id}")).await?;
+            // 移除的是本机：服务器已作废本机的登录，直接退出到登录页
+            if device_id.eq_ignore_ascii_case(&inner.identity.device_id.to_hex()) {
+                inner.local_logout();
+                return Ok(());
+            }
             inner.refresh_devices().await
         })
         .await

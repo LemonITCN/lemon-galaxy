@@ -474,22 +474,22 @@ pub fn helper_main(args: &[String]) -> i32 {
             let groups: Vec<nix::unistd::Gid> = user
                 .as_ref()
                 .and_then(|u| {
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(not(target_vendor = "apple"))]
                     {
                         std::ffi::CString::new(u.name.clone()).ok().and_then(|c| nix::unistd::getgrouplist(&c, u.gid).ok())
                     }
-                    #[cfg(target_os = "macos")]
+                    #[cfg(target_vendor = "apple")]
                     {
                         let _ = u;
                         None
                     }
                 })
                 .unwrap_or_else(|| vec![gid.into()]);
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             if nix::unistd::setgroups(&groups).is_err() {
                 return 3;
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             let _ = groups;
             if nix::unistd::setgid(gid.into()).is_err() || nix::unistd::setuid(uid.into()).is_err() {
                 return 3;

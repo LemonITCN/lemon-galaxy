@@ -62,8 +62,16 @@ xcodebuild -create-xcframework "${ARGS[@]}" -output "$DEST" >/dev/null
 GEN="$ROOT/lemon-galaxy-control-macos/Sources/LemonGalaxy/Core/Generated"
 mkdir -p "$GEN"
 cp "$OUT/swift/galaxy_ffi.swift" "$GEN/galaxy_ffi.swift"
-# iOS 工程（若存在）也用同一份
-if [ -d "$ROOT/lemon-galaxy-mobile-ios" ]; then
+# 其他 Apple 工程（若存在）也用同一份。iOS 工程只在带 --ios 时覆盖（否则产物里没有 iOS 切片）
+for P in lemon-galaxy-worker-macos; do
+  if [ -d "$ROOT/$P" ]; then
+    mkdir -p "$ROOT/$P/Vendor" "$ROOT/$P/Sources/Generated"
+    rm -rf "$ROOT/$P/Vendor/LemonGalaxyCore.xcframework"
+    cp -R "$DEST" "$ROOT/$P/Vendor/"
+    cp "$OUT/swift/galaxy_ffi.swift" "$ROOT/$P/Sources/Generated/galaxy_ffi.swift"
+  fi
+done
+if [ "$IOS" = 1 ] && [ -d "$ROOT/lemon-galaxy-mobile-ios" ]; then
   mkdir -p "$ROOT/lemon-galaxy-mobile-ios/Vendor" "$ROOT/lemon-galaxy-mobile-ios/Sources/Generated"
   rm -rf "$ROOT/lemon-galaxy-mobile-ios/Vendor/LemonGalaxyCore.xcframework"
   cp -R "$DEST" "$ROOT/lemon-galaxy-mobile-ios/Vendor/"

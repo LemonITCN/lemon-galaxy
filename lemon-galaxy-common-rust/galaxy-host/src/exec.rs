@@ -147,9 +147,9 @@ fn spawn(req: &ExecRequest, user: &SysUser, shell: &str) -> std::io::Result<Spaw
                 return Err(std::io::Error::last_os_error());
             }
             if switch {
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(target_vendor = "apple"))]
                 let n = groups.len() as libc::size_t;
-                #[cfg(target_os = "macos")]
+                #[cfg(target_vendor = "apple")]
                 let n = groups.len() as libc::c_int;
                 if libc::setgroups(n, groups.as_ptr()) < 0 || libc::setgid(gid) < 0 || libc::setuid(uid) < 0 {
                     return Err(std::io::Error::last_os_error());

@@ -312,6 +312,35 @@ jobs:
           path: out/LemonGalaxy-macOS.dmg
           if-no-files-found: error
 
+  ios:
+    name: iOS 客户端（不签名构建）
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - name: 选用最新的正式版 Xcode
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_[0-9]*.app | grep -v -i -E 'beta|rc' | sort -V | tail -1)"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+      - name: 更新 Rust
+        run: rustup update stable --no-self-update && rustup default stable && rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-ios-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-ios-
+      - name: 内核 xcframework（含 iOS）
+        run: scripts/build-ffi-apple.sh --ios
+      - name: 构建与单元测试
+        working-directory: lemon-galaxy-mobile-ios
+        run: |
+          python3 scripts/gen-bridge-mirror.py
+          scripts/build.sh --test
+          ls -l build/*.ipa
+
   android:
     name: 安卓客户端
     runs-on: ubuntu-24.04

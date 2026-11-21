@@ -16,6 +16,7 @@ path = "src/bin/uniffi-bindgen.rs"
 required-features = ["bindgen"]
 
 [features]
+decoder = ["dep:openh264"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
@@ -39,9 +40,9 @@ bytes.workspace = true
 uuid.workspace = true
 uniffi = { version = "=0.32.0" }
 
-# 桌面端（Windows 主控端）用的 H.264 软解；手机端用系统硬件解码，不编进去
-[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-openh264 = "0.9"
+# H.264 软解（Windows 主控端用，打开 decoder 特性才编进去；其他端用系统硬件解码）。
+# Swift / Kotlin 绑定不开这个特性生成，各平台的库与绑定保持一致。
+openh264 = { version = "0.9", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"

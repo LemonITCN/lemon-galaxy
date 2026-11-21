@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 OUT="${OUT:-$ROOT/lemon-galaxy-control-windows/LemonGalaxy/Core/Generated}"
 if [ -z "${LIB:-}" ]; then
-  cargo build -p galaxy-ffi --lib --release
+  cargo build -p galaxy-ffi --lib --release --features decoder
   case "$(uname -s)" in
     Darwin) LIB="$ROOT/target/release/libgalaxy_ffi.dylib" ;;
     MINGW* | MSYS* | CYGWIN*) LIB="$ROOT/target/release/galaxy_ffi.dll" ;;

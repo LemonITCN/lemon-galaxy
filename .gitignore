@@ -22,5 +22,14 @@ lemon-galaxy-server/web/dist/
 lemon-galaxy-control-macos/Vendor/
 lemon-galaxy-control-macos/Sources/LemonGalaxy/Core/Generated/galaxy_ffi.swift
 lemon-galaxy-mobile-ios/Vendor/
+lemon-galaxy-mobile-ios/Sources/Generated/galaxy_ffi.swift
+lemon-galaxy-worker-macos/Vendor/
+lemon-galaxy-worker-macos/Sources/Generated/galaxy_ffi.swift
 lemon-galaxy-mobile-android/app/src/main/java/uniffi/
 .claude/
+# Windows 主控端：生成的 C# 绑定（scripts/gen-csharp-bindings.sh）、编译产物、发布包与自测截图
+lemon-galaxy-control-windows/LemonGalaxy/Core/Generated/galaxy_ffi.cs
+lemon-galaxy-control-windows/LemonGalaxy/bin/
+lemon-galaxy-control-windows/LemonGalaxy/obj/
+lemon-galaxy-control-windows/dist/
+lemon-galaxy-control-windows/selftest/
