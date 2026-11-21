@@ -67,6 +67,9 @@ internal static class AppInfo
 
     public static string CacheDir => IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LemonGalaxy", "cache");
 
+    /// <summary>远程桌面复制粘贴文件下载到这里：%LOCALAPPDATA%\LemonGalaxy\clipboard\&lt;时间戳&gt;-&lt;随机数&gt;\（启动时删掉一天前的）</summary>
+    public static string ClipboardDir => IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LemonGalaxy", "clipboard");
+
     /// <summary>exe 所在目录</summary>
     public static string BaseDir => AppDomain.CurrentDomain.BaseDirectory;
 

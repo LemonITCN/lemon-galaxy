@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text;
 
 namespace LemonGalaxy.Core.Mock;
@@ -440,12 +441,25 @@ internal sealed class MockPeer : ICorePeer
     private bool closed;
     private MockFileClient? files;
     private Timer? timer;
+    private readonly object clipLock = new();
+    private ClipboardData? remoteClipboard;
 
     public MockPeer(MockClient client, DeviceInfo device)
     {
         this.client = client;
         this.device = device;
         current = MockData.PathFor(device);
+        remoteClipboard = new ClipboardData.Files(MockClipboardTransfer.RemoteSampleFiles(device, client.Zh));
+    }
+
+    public MockClient Client => client;
+    public DeviceInfo Device => device;
+
+    /// <summary>模拟的对方剪贴板：开始时是对方复制好的两项（演示「对方复制 → 本机粘贴」），推送文字或文件后跟着变</summary>
+    public ClipboardData? RemoteClipboard
+    {
+        get { lock (clipLock) return remoteClipboard; }
+        set { lock (clipLock) remoteClipboard = value; }
     }
 
     public PeerInfo Info() => new(device.Id, device.Hostname, device.Platform, device.OsVersion, device.Arch, MockData.Username(device),
@@ -517,10 +531,17 @@ internal sealed class MockPeer : ICorePeer
     public async Task<ClipboardData?> ClipboardGet()
     {
         await client.Delay(80);
-        return new ClipboardData.Text(client.Zh ? "远端剪贴板里的文字" : "Text from the remote clipboard");
+        return RemoteClipboard;
     }
 
-    public Task ClipboardSet(ClipboardData data) => client.Delay(80);
+    public async Task ClipboardSet(ClipboardData data)
+    {
+        await client.Delay(80);
+        RemoteClipboard = data;
+    }
+
+    public ICoreClipboardTransfer ClipboardPushFiles(string[] localPaths, TransferListener listener) => MockClipboardTransfer.Push(this, localPaths, listener);
+    public ICoreClipboardTransfer ClipboardPullFiles(string[] remotePaths, string localDir, TransferListener listener) => MockClipboardTransfer.Pull(this, remotePaths, localDir, listener);
 
     public async Task<ICorePortForward> ForwardPort(ushort localPort, string remoteHost, ushort remotePort)
     {
@@ -537,6 +558,190 @@ internal sealed class MockPeer : ICorePeer
         if (!MockData.Capabilities(device).Contains("audio"))
             throw new GalaxyException.Permission(client.Zh ? "这台设备不能听声音" : "Sound is not available on this device");
         return new MockAudio(volume);
+    }
+}
+
+/// <summary>
+/// 模拟复制粘贴文件：按大小推进进度，传完再改对方剪贴板（推送）或在本机目录写真实的小文件（拉取，界面放进剪贴板的路径是真的）。
+/// 名字里带 fail 的在 60% 处失败；带 hold 的停在 45% 等取消（selftest 截进度条用）。超过 4 GB 或 1 万个文件时与内核一样报错。
+/// </summary>
+internal sealed class MockClipboardTransfer : ICoreClipboardTransfer
+{
+    private const ulong MaxBytes = 4UL << 30;
+    private const int MaxFiles = 10_000;
+    private static readonly Random Rand = new();
+
+    private readonly object lk = new();
+    private readonly ulong total;
+    private readonly bool hold, fail, zh;
+    private readonly Func<string[]> work;
+    private TransferListener? listener;
+    private Timer? timer;
+    private ulong done, step;
+    private bool finished;
+    private string[] result = Array.Empty<string>();
+    /// <summary>selftest 核对用</summary>
+    public bool Cancelled { get; private set; }
+
+    private MockClipboardTransfer(ulong total, string[] names, bool zh, double speedScale, TransferListener listener, string? immediateError, Func<string[]> work)
+    {
+        this.total = Math.Max(total, 1);
+        hold = names.Any(n => n.IndexOf("hold", StringComparison.OrdinalIgnoreCase) >= 0);
+        fail = names.Any(n => n.IndexOf("fail", StringComparison.OrdinalIgnoreCase) >= 0);
+        this.zh = zh;
+        this.listener = listener;
+        this.work = work;
+        if (immediateError != null)
+        {
+            ThreadPool.QueueUserWorkItem(_ => { lock (lk) Finish(immediateError); });
+            return;
+        }
+        // 模拟约 1.2 秒传完；selftest（倍率 0）几毫秒走完
+        step = speedScale == 0 ? this.total / 3 + 1 : Math.Max(this.total / 12, 1);
+        var period = speedScale == 0 ? 2 : 100;
+        lock (lk)
+        {
+            this.listener.OnProgress(0, this.total);
+            timer = new Timer(_ => Tick(), null, period, period);
+        }
+    }
+
+    private void Tick()
+    {
+        lock (lk)
+        {
+            if (finished) return;
+            done = Math.Min(total, done + step);
+            if (hold && done * 100 >= total * 45)
+            {
+                done = (total * 45 + 99) / 100;
+                listener?.OnProgress(done, total);
+                timer?.Dispose();
+                timer = null;
+                return;
+            }
+            listener?.OnProgress(done, total);
+            if (fail && done * 10 >= total * 6) Finish(zh ? "连接中断（模拟失败）" : "Connection lost (simulated failure)");
+            else if (done >= total)
+            {
+                try
+                {
+                    result = work();
+                    Finish(null);
+                }
+                catch (Exception e) { Finish(e.Message); }
+            }
+        }
+    }
+
+    private void Finish(string? error)
+    {
+        if (finished) return;
+        finished = true;
+        timer?.Dispose();
+        timer = null;
+        listener?.OnFinished(error);
+        listener = null;
+    }
+
+    public void Cancel()
+    {
+        lock (lk)
+        {
+            if (finished) return;
+            Cancelled = true;
+            Finish(zh ? "已取消" : "Cancelled");
+        }
+    }
+
+    public string[] Paths() { lock (lk) return result; }
+
+    private static string TooBig(bool zh) => zh ? "要复制的文件太多或太大（超过 4 GB 或 1 万个），请用文件管理传输" : "Too many or too large files to copy (over 4 GB or 10,000 files). Use file transfer instead.";
+
+    /// <summary>对方主目录（协议格式：Windows 是 /C:/Users/x）</summary>
+    private static string Home(DeviceInfo d) => d.Platform switch
+    {
+        Platform.Windows => "/C:/Users/" + MockData.Username(d),
+        Platform.Macos => "/Users/" + MockData.Username(d),
+        _ => "/home/" + MockData.Username(d),
+    };
+
+    /// <summary>远端路径的文件名（兼容反斜杠与结尾的斜杠）</summary>
+    public static string BaseName(string path) => path.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? path;
+
+    /// <summary>本机文件 → 对方暂存区 ~/.lemon-galaxy/clipboard/&lt;时间戳&gt;-&lt;随机数&gt;/，传完对方剪贴板就是它们</summary>
+    public static MockClipboardTransfer Push(MockPeer peer, string[] localPaths, TransferListener listener)
+    {
+        var zh = peer.Client.Zh;
+        ulong bytes = 0;
+        var files = 0;
+        string? error = localPaths.Length == 0 ? (zh ? "没有要复制的文件" : "Nothing to copy") : null;
+        foreach (var p in localPaths)
+        {
+            if (error != null) break;
+            if (Directory.Exists(p))
+            {
+                foreach (var f in Directory.EnumerateFiles(p, "*", SearchOption.AllDirectories))
+                {
+                    files++;
+                    try { bytes += (ulong)new FileInfo(f).Length; } catch { }
+                }
+            }
+            else if (File.Exists(p))
+            {
+                files++;
+                bytes += (ulong)new FileInfo(p).Length;
+            }
+            else error = zh ? $"读不了 {p}：文件不存在" : $"Cannot read {p}: no such file";
+            if (error == null && (bytes > MaxBytes || files > MaxFiles)) error = TooBig(zh);
+        }
+        int rnd;
+        lock (Rand) rnd = Rand.Next();
+        var stage = $"{Home(peer.Device)}/.lemon-galaxy/clipboard/{Clock.NowMs}-{rnd:x8}";
+        var names = localPaths.Select(p => IOPath.GetFileName(p.TrimEnd('\\', '/'))).ToArray();
+        return new MockClipboardTransfer(bytes, names, zh, peer.Client.Options.LatencyScale, listener, error, () =>
+        {
+            var staged = names.Select(n => stage + "/" + n).ToArray();
+            peer.RemoteClipboard = new ClipboardData.Files(staged);
+            return staged;
+        });
+    }
+
+    /// <summary>对方剪贴板里的文件 → 本机目录：文件写一份小文本，文件夹（名字没有扩展名）里放两份</summary>
+    public static MockClipboardTransfer Pull(MockPeer peer, string[] remotePaths, string localDir, TransferListener listener)
+    {
+        var zh = peer.Client.Zh;
+        var names = remotePaths.Select(BaseName).ToArray();
+        var error = remotePaths.Length == 0 ? (zh ? "远端剪贴板里没有文件" : "No files in the remote clipboard") : null;
+        // 每项按 1.8 MB 算进度
+        return new MockClipboardTransfer((ulong)remotePaths.Length * 1_800_000, names, zh, peer.Client.Options.LatencyScale, listener, error, () =>
+        {
+            Directory.CreateDirectory(localDir);
+            var outPaths = new List<string>();
+            for (var i = 0; i < remotePaths.Length; i++)
+            {
+                var dest = IOPath.Combine(localDir, names[i]);
+                var note = "LemonGalaxy mock\r\n" + remotePaths[i] + "\r\n";
+                if (IOPath.GetExtension(names[i]).Length == 0)
+                {
+                    Directory.CreateDirectory(dest);
+                    File.WriteAllText(IOPath.Combine(dest, "README.md"), "# " + names[i] + "\r\n\r\n" + note);
+                    File.WriteAllText(IOPath.Combine(dest, "deploy.ps1"), "Write-Host \"deploy\"\r\n# " + note);
+                }
+                else File.WriteAllText(dest, note);
+                outPaths.Add(dest);
+            }
+            return outPaths.ToArray();
+        });
+    }
+
+    /// <summary>模拟设备剪贴板里一开始的两项（协议格式路径）</summary>
+    public static string[] RemoteSampleFiles(DeviceInfo d, bool zh)
+    {
+        var home = Home(d);
+        return zh
+            ? new[] { home + "/Documents/会议纪要 2026-11-20.txt", home + "/Desktop/部署脚本" }
+            : new[] { home + "/Documents/Meeting notes 2026-11-20.txt", home + "/Desktop/Deploy scripts" };
     }
 }
 

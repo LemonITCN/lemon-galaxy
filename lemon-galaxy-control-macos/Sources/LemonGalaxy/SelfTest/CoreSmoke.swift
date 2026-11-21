@@ -216,6 +216,8 @@ private struct Runner {
             for e in entries.prefix(10) { log("    \(e.kind) \(Fmt.mode(e.mode)) \(e.size) \(e.name)") }
         } else { failures += 1 }
 
+        failures += await clipFilesSmoke(session: session)
+
         if let m = await step("ai_models", { try await client.aiModels() }) {
             log("  AI 开通 \(m.enabled) 上限 \(m.maxMode) 模型 \(m.items.count) 个")
             for it in m.items.prefix(10) { log("    \(it.providerName) / \(it.name)（\(it.id)）看图=\(it.vision) 上下文=\(it.contextLength)") }
@@ -604,6 +606,82 @@ private final class SmokePrompt: SecretPrompt, @unchecked Sendable {
         log("  [询问] confirm_host_key \(host):\(port) \(keyType) \(fingerprint) changed=\(changed)，自动信任")
         return !changed
     }
+}
+
+/// 复制粘贴文件（protocol.md 8.4.1）：推送一个文件和一个文件夹到对方暂存区（对方有剪贴板能力时再核对对方剪贴板），
+/// 再把暂存区里的这两项拉回本机临时目录比对内容；最后删掉对方暂存目录与本机临时目录
+private func clipFilesSmoke(session: PeerSession) async -> Int {
+    var failures = 0
+    let fm = FileManager.default
+    let tmp = fm.temporaryDirectory.appendingPathComponent("lemongalaxy-clip-smoke-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+    defer { try? fm.removeItem(at: tmp) }
+    let src = tmp.appendingPathComponent("src", isDirectory: true)
+    let folder = src.appendingPathComponent("资料夹", isDirectory: true)
+    try? fm.createDirectory(at: folder.appendingPathComponent("sub"), withIntermediateDirectories: true)
+    let file = src.appendingPathComponent("smoke 文件.txt")
+    let payload = Data((0..<200_000).map { UInt8($0 % 251) })
+    try? Data("clipboard smoke\n".utf8).write(to: file)
+    try? payload.write(to: folder.appendingPathComponent("sub/blob.bin"))
+    try? Data("a\n".utf8).write(to: folder.appendingPathComponent("a.txt"))
+    let hasClipboard = session.info().capabilities.contains("clipboard")
+
+    let pushL = SmokeTransferListener()
+    let push = session.clipboardPushFiles(localPaths: [file.path, folder.path], listener: pushL)
+    let pushErr = await smokeStep("clipboard_push_files") { try await pushL.wait(seconds: 60) }
+    var staged = push.paths()
+    var stageDir: String?
+    switch pushErr {
+    case .some(.none):
+        log("  推送完成 \(pushL.progress.0)/\(pushL.progress.1) 字节：\(staged.joined(separator: " , "))")
+        if staged.count != 2 || !staged.allSatisfy({ $0.contains("/.lemon-galaxy/clipboard/") }) { log("失败 推送返回的暂存路径不对"); failures += 1 }
+        if hasClipboard {
+            let got = await smokeStep("clipboard_get（应为暂存文件）") { try await session.clipboardGet() }
+            if case .files(let paths)?? = got, paths == staged { log("  对方剪贴板就是暂存文件") } else { log("失败 对方剪贴板不对：\(String(describing: got))"); failures += 1 }
+        }
+    case .some(.some(let e)):
+        // 对方没有剪贴板能力：文件已传到暂存区，设剪贴板这步被拒是预期的
+        log("  推送报错：\(e)")
+        if hasClipboard { log("失败 对方有剪贴板能力，推送不应失败"); failures += 1 }
+    case .none:
+        failures += 1
+    }
+    // 找到这次的暂存目录（推送失败时 paths 为空，按时间取暂存区里最新的一个）
+    let files = session.files()
+    if let p = staged.first {
+        stageDir = (p as NSString).deletingLastPathComponent
+    } else if let home = try? await files.home(), let list = try? await files.list(path: home + "/.lemon-galaxy/clipboard") {
+        stageDir = list.max(by: { $0.modifiedAt < $1.modifiedAt })?.path
+        if let d = stageDir { staged = [d + "/" + file.lastPathComponent, d + "/" + folder.lastPathComponent] }
+    }
+
+    if !staged.isEmpty {
+        let dest = tmp.appendingPathComponent("pulled", isDirectory: true)
+        let pullL = SmokeTransferListener()
+        let pull = session.clipboardPullFiles(remotePaths: staged, localDir: dest.path, listener: pullL)
+        if let err = await smokeStep("clipboard_pull_files", { try await pullL.wait(seconds: 60) }) {
+            if let err { log("失败 拉取报错：\(err)"); failures += 1 }
+            let local = pull.paths()
+            log("  拉取完成 \(pullL.progress.0)/\(pullL.progress.1) 字节：\(local.joined(separator: " , "))")
+            let ok = local.count == 2
+                && fm.contentsEqual(atPath: dest.appendingPathComponent(file.lastPathComponent).path, andPath: file.path)
+                && fm.contentsEqual(atPath: dest.appendingPathComponent("资料夹/sub/blob.bin").path, andPath: folder.appendingPathComponent("sub/blob.bin").path)
+                && fm.contentsEqual(atPath: dest.appendingPathComponent("资料夹/a.txt").path, andPath: folder.appendingPathComponent("a.txt").path)
+            if ok { log("  拉回的文件与原文件一致") } else if err == nil { log("失败 拉回的文件与原文件不一致"); failures += 1 }
+        } else { failures += 1 }
+        // 取消：拉取开始后立即取消，应报错结束
+        let cancelL = SmokeTransferListener()
+        let c = session.clipboardPullFiles(remotePaths: staged, localDir: tmp.appendingPathComponent("cancelled").path, listener: cancelL)
+        c.cancel()
+        if let r = await smokeStep("clipboard_pull_files 取消", { try await cancelL.wait(seconds: 30) }) {
+            log("  取消后结果：\(r ?? "成功（取消前已传完）")")
+        } else { failures += 1 }
+    } else {
+        log("失败 找不到这次的暂存目录"); failures += 1
+    }
+    if let d = stageDir {
+        if await smokeStep("删除对方暂存目录", { try await files.remove(path: d, recursive: true) }) == nil { failures += 1 }
+    }
+    return failures
 }
 
 private final class SmokeTransferListener: TransferListener, @unchecked Sendable {

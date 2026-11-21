@@ -499,12 +499,20 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
     private var closed = false
     lazy var fileClient = MockFileClient(client: client, platform: device.platform, username: MockData.username(for: device))
     var timer: DispatchSourceTimer?
+    /// 模拟的对方剪贴板：开始时是对方复制好的两项（演示「对方复制 → 本机粘贴」），推送文字或文件后跟着变
+    private let clipLock = NSLock()
+    private var _remoteClipboard: ClipboardData?
+    var remoteClipboard: ClipboardData? {
+        get { clipLock.locked { _remoteClipboard } }
+        set { clipLock.locked { _remoteClipboard = newValue } }
+    }
 
     init(client: MockGalaxyClient, device: DeviceInfo) {
         self.client = client
         self.device = device
         self.currentPath = MockData.path(for: device)
         super.init(noHandle: NoHandle())
+        _remoteClipboard = .files(paths: MockClipboardTransfer.remoteSampleFiles(device: device, zh: client.zh))
     }
 
     deinit { timer?.cancel() }
@@ -591,10 +599,21 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
 
     override func clipboardGet() async throws -> ClipboardData? {
         await client.delay(80)
-        return .text(text: client.zh ? "远端剪贴板里的文字" : "Text from the remote clipboard")
+        return remoteClipboard
     }
 
-    override func clipboardSet(data: ClipboardData) async throws { await client.delay(80) }
+    override func clipboardSet(data: ClipboardData) async throws {
+        await client.delay(80)
+        remoteClipboard = data
+    }
+
+    override func clipboardPushFiles(localPaths: [String], listener: TransferListener) -> ClipboardTransfer {
+        MockClipboardTransfer.push(session: self, localPaths: localPaths, listener: listener)
+    }
+
+    override func clipboardPullFiles(remotePaths: [String], localDir: String, listener: TransferListener) -> ClipboardTransfer {
+        MockClipboardTransfer.pull(session: self, remotePaths: remotePaths, localDir: localDir, listener: listener)
+    }
 
     override func forwardPort(localPort: UInt16, remoteHost: String, remotePort: UInt16) async throws -> PortForward {
         await client.delay(200)
@@ -617,6 +636,181 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
             throw GalaxyError.Permission(detail: client.zh ? "对方没有给你听声音的权限" : "The remote owner has not granted audio access")
         }
         return MockAudioPlayback(volume: volume)
+    }
+}
+
+/// 模拟复制粘贴文件：按大小推进进度，传完再改对方剪贴板（推送）或在本机目录写真实的小文件（拉取，界面放进剪贴板的路径是真的）。
+/// 名字里带 fail 的在 60% 处失败；带 hold 的停在 45% 等取消（selftest 截进度条用）。超过 4 GB 或 1 万个文件时与内核一样报错。
+final class MockClipboardTransfer: ClipboardTransfer, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
+    static let maxBytes: UInt64 = 4 << 30
+    static let maxFiles = 10_000
+
+    private let queue = DispatchQueue(label: "mock.clipboard.transfer")
+    private var timer: DispatchSourceTimer?
+    /// 传完之前一直持有回调（与内核一致）
+    private var listener: TransferListener?
+    private let total: UInt64
+    private var done: UInt64 = 0
+    private var finished = false
+    private let hold: Bool
+    private let fail: Bool
+    private let zh: Bool
+    private let work: () throws -> [String]
+    private let lock = NSLock()
+    private var result: [String] = []
+    /// selftest 核对用
+    private(set) var cancelled = false
+
+    private init(total: UInt64, names: [String], zh: Bool, speedScale: Double, listener: TransferListener, immediateError: String?, work: @escaping () throws -> [String]) {
+        self.total = max(total, 1)
+        self.hold = names.contains { $0.lowercased().contains("hold") }
+        self.fail = names.contains { $0.lowercased().contains("fail") }
+        self.zh = zh
+        self.listener = listener
+        self.work = work
+        super.init(noHandle: NoHandle())
+        if let immediateError {
+            queue.async { [self] in finish(immediateError) }
+            return
+        }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        // 模拟约 1.2 秒传完；selftest（倍率 0）几毫秒走完
+        let step = speedScale == 0 ? self.total / 3 + 1 : max(self.total / 12, 1)
+        t.schedule(deadline: .now() + 0.05, repeating: speedScale == 0 ? 0.002 : 0.1)
+        t.setEventHandler { [weak self] in self?.tick(step) }
+        timer = t
+        queue.async { [self] in listener.onProgress(done: 0, total: self.total) }
+        t.resume()
+    }
+
+    deinit { timer?.cancel() }
+
+    private func tick(_ step: UInt64) {
+        guard !finished else { return }
+        done = min(total, done + step)
+        if hold, done * 100 >= total * 45 {
+            done = (total * 45 + 99) / 100
+            listener?.onProgress(done: done, total: total)
+            timer?.cancel()
+            return
+        }
+        listener?.onProgress(done: done, total: total)
+        if fail, done * 10 >= total * 6 {
+            finish(zh ? "连接中断（模拟失败）" : "Connection lost (simulated failure)")
+        } else if done >= total {
+            do {
+                let paths = try work()
+                lock.locked { result = paths }
+                finish(nil)
+            } catch {
+                finish(error.localizedDescription)
+            }
+        }
+    }
+
+    private func finish(_ error: String?) {
+        guard !finished else { return }
+        finished = true
+        timer?.cancel()
+        listener?.onFinished(error: error)
+        listener = nil
+    }
+
+    override func cancel() {
+        queue.async { [self] in
+            guard !finished else { return }
+            cancelled = true
+            finish(zh ? "已取消" : "Cancelled")
+        }
+    }
+
+    override func paths() -> [String] { lock.locked { result } }
+
+    private static func tooBig(_ zh: Bool) -> String {
+        zh ? "要复制的文件太多或太大（超过 4 GB 或 1 万个），请用文件管理传输" : "Too many or too large files to copy (over 4 GB or 10,000 files). Use file transfer instead."
+    }
+
+    /// 本机文件 → 对方暂存区 ~/.lemon-galaxy/clipboard/<时间戳>-<随机数>/，传完对方剪贴板就是它们
+    static func push(session: MockPeerSession, localPaths: [String], listener: TransferListener) -> MockClipboardTransfer {
+        let zh = session.client.zh
+        let fm = FileManager.default
+        var bytes: UInt64 = 0, files = 0
+        var error: String?
+        if localPaths.isEmpty { error = zh ? "没有要复制的文件" : "Nothing to copy" }
+        for p in localPaths where error == nil {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: p, isDirectory: &isDir) else {
+                error = zh ? "读不了 \(p)：文件不存在" : "Cannot read \(p): no such file"
+                break
+            }
+            let all = isDir.boolValue ? (fm.enumerator(atPath: p)?.allObjects as? [String] ?? []).map { p + "/" + $0 } : [p]
+            for f in all {
+                let a = try? fm.attributesOfItem(atPath: f)
+                guard (a?[.type] as? FileAttributeType) != .typeDirectory else { continue }
+                files += 1
+                bytes += (a?[.size] as? NSNumber)?.uint64Value ?? 0
+            }
+            if bytes > maxBytes || files > maxFiles { error = tooBig(zh) }
+        }
+        let stage = "\(home(session.device))/.lemon-galaxy/clipboard/\(Clock.nowMs)-\(String(format: "%08x", UInt32.random(in: 0...UInt32.max)))"
+        let names = localPaths.map { ($0 as NSString).lastPathComponent }
+        return MockClipboardTransfer(total: bytes, names: names, zh: zh, speedScale: session.client.options.latencyScale,
+                                     listener: listener, immediateError: error) { [weak session] in
+            let staged = names.map { "\(stage)/\($0)" }
+            session?.remoteClipboard = .files(paths: staged)
+            return staged
+        }
+    }
+
+    /// 对方剪贴板里的文件 → 本机目录：文件写一份小文本，文件夹（名字没有扩展名）里放两份
+    static func pull(session: MockPeerSession, remotePaths: [String], localDir: String, listener: TransferListener) -> MockClipboardTransfer {
+        let zh = session.client.zh
+        let names = remotePaths.map(baseName)
+        let error: String? = remotePaths.isEmpty ? (zh ? "远端剪贴板里没有文件" : "No files in the remote clipboard") : nil
+        // 每项按 1.8 MB 算进度
+        return MockClipboardTransfer(total: UInt64(remotePaths.count) * 1_800_000, names: names, zh: zh,
+                                     speedScale: session.client.options.latencyScale, listener: listener, immediateError: error) {
+            let fm = FileManager.default
+            let dir = URL(fileURLWithPath: localDir, isDirectory: true)
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            var out: [String] = []
+            for (remote, name) in zip(remotePaths, names) {
+                let dest = dir.appendingPathComponent(name)
+                let note = "LemonGalaxy mock\n\(remote)\n"
+                if (name as NSString).pathExtension.isEmpty {
+                    try fm.createDirectory(at: dest, withIntermediateDirectories: true)
+                    try Data(("# " + name + "\n\n" + note).utf8).write(to: dest.appendingPathComponent("README.md"))
+                    try Data(("Write-Host \"deploy\"\n# " + note).utf8).write(to: dest.appendingPathComponent("deploy.ps1"))
+                } else {
+                    try Data(note.utf8).write(to: dest)
+                }
+                out.append(dest.path)
+            }
+            return out
+        }
+    }
+
+    /// 对方主目录（协议格式：Windows 是 /C:/Users/x）
+    private static func home(_ d: DeviceInfo) -> String {
+        let user = MockData.username(for: d)
+        switch d.platform {
+        case .windows: return "/C:/Users/\(user)"
+        case .macos: return "/Users/\(user)"
+        default: return "/home/\(user)"
+        }
+    }
+
+    /// 远端路径的文件名（兼容反斜杠与结尾的斜杠）
+    private static func baseName(_ path: String) -> String {
+        path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? path
+    }
+
+    /// 模拟设备剪贴板里一开始的两项（协议格式路径）
+    static func remoteSampleFiles(device: DeviceInfo, zh: Bool) -> [String] {
+        let home = home(device)
+        return zh ? ["\(home)/Documents/会议纪要 2026-11-20.txt", "\(home)/Desktop/部署脚本"]
+            : ["\(home)/Documents/Meeting notes 2026-11-20.txt", "\(home)/Desktop/Deploy scripts"]
     }
 }
 

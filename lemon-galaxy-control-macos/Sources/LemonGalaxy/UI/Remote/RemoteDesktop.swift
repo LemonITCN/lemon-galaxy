@@ -21,7 +21,14 @@ final class RemoteDesktopModel: TabModel {
     @Published var quality: String
     @Published var fps: Int
     @Published var bitrateKbps: Int
-    @Published var clipboardSync: Bool
+    @Published var clipboardSync: Bool {
+        didSet {
+            guard clipboardSync != oldValue else { return }
+            // 关掉同步：正在传的文件作废；重新打开时对方剪贴板里的文件可以再拉一次
+            cancelFileClip()
+            lastRemoteFiles = nil
+        }
+    }
     @Published var commandAsCtrl = true
     @Published var measuredFps = 0
     @Published var measuredKbps = 0
@@ -48,7 +55,15 @@ final class RemoteDesktopModel: TabModel {
     private var byteCount = 0
     private var statsTimer: Timer?
     private var clipboardTimer: Timer?
-    private var lastPasteboardChange = NSPasteboard.general.changeCount
+    private var lastPasteboardChange = ClipboardFiles.pasteboard.changeCount
+    /// 复制粘贴文件的进度条（画面上方）；nil 时不显示
+    @Published var fileClip: RemoteFileClip?
+    private(set) var clipTransfer: ClipboardTransfer?
+    private var clipListener: ClipTransferListener?
+    /// 每次开始或作废一次文件传输加一：迟到的回调按它丢弃
+    private var clipGen = 0
+    /// 上次同步过的对方剪贴板文件列表（拉取过的，或推送后对方剪贴板里的暂存路径）：同一列表不重复下载
+    private(set) var lastRemoteFiles: [String]?
     var framesDecoded = 0
 
     init(app: AppModel, deviceId: String, title: String) {
@@ -361,7 +376,7 @@ final class RemoteDesktopModel: TabModel {
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%02d:%02d", m, sec)
     }
 
-    // MARK: 剪贴板同步（文字）：本机变化推给远端；切回窗口时拉取远端
+    // MARK: 剪贴板同步：本机变化推给远端；鼠标回到画面时拉取远端。文件走内核的复制粘贴文件（protocol.md 8.4.1）
     private func setupClipboardSync() {
         clipboardTimer?.invalidate()
         clipboardTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -369,24 +384,155 @@ final class RemoteDesktopModel: TabModel {
         }
     }
 
-    private func pollClipboard() {
+    /// 对方开放了剪贴板与文件权限才能复制粘贴文件
+    var fileClipSupported: Bool {
+        guard let info = peer?.info else { return false }
+        return info.permissions.clipboard && info.permissions.files
+            && info.capabilities.contains("clipboard") && info.capabilities.contains("files")
+    }
+
+    /// 本机剪贴板变了（按 changeCount 判断，同一次复制只处理一次）：文件推给对方，文字直接设过去
+    func pollClipboard() {
         guard clipboardSync, let peer, phase == .streaming else { return }
-        let pb = NSPasteboard.general
+        let pb = ClipboardFiles.pasteboard
         guard pb.changeCount != lastPasteboardChange else { return }
         lastPasteboardChange = pb.changeCount
+        // 本机又复制了东西：还在传的文件作废（推送被新内容取代，拉取完成后也不该再盖掉本机剪贴板）
+        if fileClip != nil { cancelFileClip() }
+        // 访达里复制文件时剪贴板同时带文件名文字，先按文件处理
+        let urls = ClipboardFiles.fileURLs(on: pb)
+        if !urls.isEmpty {
+            pushFiles(urls.map(\.path))
+            return
+        }
         guard let text = pb.string(forType: .string) else { return }
+        lastRemoteFiles = nil
         Task { try? await peer.session.clipboardSet(data: .text(text: text)) }
     }
 
     func pullRemoteClipboard() {
         guard clipboardSync, let peer else { return }
         Task {
-            guard let data = try? await peer.session.clipboardGet(), case .text(let text) = data else { return }
-            let pb = NSPasteboard.general
-            if pb.string(forType: .string) != text {
-                pb.clearContents()
-                pb.setString(text, forType: .string)
-                lastPasteboardChange = pb.changeCount
+            guard let data = try? await peer.session.clipboardGet() else { return }
+            switch data {
+            case .text(let text):
+                lastRemoteFiles = nil
+                let pb = ClipboardFiles.pasteboard
+                if pb.string(forType: .string) != text {
+                    pb.clearContents()
+                    pb.setString(text, forType: .string)
+                    lastPasteboardChange = pb.changeCount
+                }
+            case .files(let paths):
+                pullFiles(paths)
+            case .image:
+                lastRemoteFiles = nil
+            }
+        }
+    }
+
+    /// 本机文件 / 文件夹 → 对方暂存区，完成后对方剪贴板就是它们
+    func pushFiles(_ paths: [String]) {
+        guard let peer, !paths.isEmpty else { return }
+        cancelFileClip()
+        let names = paths.map { ($0 as NSString).lastPathComponent }
+        guard fileClipSupported else {
+            showFileClipResult(RemoteFileClip(direction: .push, names: names, state: .failed(L("remote.files.noPermission"))))
+            return
+        }
+        let gen = clipGen
+        let listener = makeClipListener(gen)
+        fileClip = RemoteFileClip(direction: .push, names: names)
+        clipListener = listener
+        clipTransfer = peer.session.clipboardPushFiles(localPaths: paths, listener: listener)
+    }
+
+    /// 对方剪贴板里的文件 → 本机缓存目录，完成后放进本机剪贴板。同一列表只下载一次
+    func pullFiles(_ remotePaths: [String]) {
+        guard let peer, !remotePaths.isEmpty, !ClipboardFiles.sameFiles(remotePaths, lastRemoteFiles) else { return }
+        if let c = fileClip, c.state == .running {
+            // 正在把本机文件推给对方：对方剪贴板马上会被换掉，这次不拉
+            if c.direction == .push { return }
+            cancelFileClip()
+        }
+        lastRemoteFiles = remotePaths
+        let names = remotePaths.map(ClipboardFiles.baseName)
+        guard fileClipSupported else {
+            showFileClipResult(RemoteFileClip(direction: .pull, names: names, state: .failed(L("remote.files.noPermission"))))
+            return
+        }
+        cancelFileClip()
+        let gen = clipGen
+        let listener = makeClipListener(gen)
+        fileClip = RemoteFileClip(direction: .pull, names: names)
+        clipListener = listener
+        clipTransfer = peer.session.clipboardPullFiles(remotePaths: remotePaths, localDir: ClipboardFiles.newPullDir().path, listener: listener)
+    }
+
+    /// 取消正在传的文件并收起进度条（取消时内核报的「已取消」随之丢弃）
+    func cancelFileClip() {
+        clipGen += 1
+        clipTransfer?.cancel()
+        clipTransfer = nil
+        clipListener = nil
+        fileClip = nil
+    }
+
+    /// 收起完成或失败的提示
+    func dismissFileClip() {
+        if fileClip?.state != .running { fileClip = nil }
+    }
+
+    private func makeClipListener(_ gen: Int) -> ClipTransferListener {
+        ClipTransferListener(progress: { [weak self] done, total in
+            guard let self, gen == self.clipGen, var c = self.fileClip, c.state == .running else { return }
+            c.done = done
+            c.total = total
+            self.fileClip = c
+        }, finished: { [weak self] error in
+            self?.fileClipFinished(gen, error: error)
+        })
+    }
+
+    private func fileClipFinished(_ gen: Int, error: String?) {
+        guard gen == clipGen, var c = fileClip, c.state == .running else { return }
+        let transfer = clipTransfer
+        clipTransfer = nil
+        clipListener = nil
+        if let error {
+            c.state = .failed(error)
+            showFileClipResult(c)
+            return
+        }
+        let paths = transfer?.paths() ?? []
+        switch c.direction {
+        case .push:
+            // 对方剪贴板现在是暂存区里的这些文件：之后拉取看到同一列表不再下载回来
+            lastRemoteFiles = paths
+        case .pull:
+            let pb = ClipboardFiles.pasteboard
+            // 下载期间本机又复制了别的：不盖掉
+            guard pb.changeCount == lastPasteboardChange, !paths.isEmpty else {
+                fileClip = nil
+                return
+            }
+            ClipboardFiles.write(paths.map { URL(fileURLWithPath: $0) }, to: pb)
+            lastPasteboardChange = pb.changeCount
+        }
+        c.state = .done
+        if c.total > 0 { c.done = c.total }
+        showFileClipResult(c)
+    }
+
+    /// 显示完成或失败提示，几秒后自动收起（selftest 不收，便于截图）
+    private func showFileClipResult(_ c: RemoteFileClip) {
+        fileClip = c
+        guard app?.selfTest != true else { return }
+        let id = c.id
+        let seconds: Double = c.state == .done ? 4 : 8
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            MainActor.assumeIsolated {
+                if self?.fileClip?.id == id { self?.fileClip = nil }
             }
         }
     }
@@ -408,6 +554,7 @@ final class RemoteDesktopModel: TabModel {
         decoder.invalidate()
         statsTimer?.invalidate()
         clipboardTimer?.invalidate()
+        cancelFileClip()
     }
 
     func disconnect() {
@@ -680,6 +827,13 @@ struct RemoteDesktopView: View {
                 case .streaming:
                     EmptyView()
                 }
+                if let clip = tab.fileClip {
+                    VStack {
+                        // 外层限宽只约束提议宽度，进度条本身按内容取宽
+                        RemoteFileClipPill(tab: tab, clip: clip).frame(maxWidth: 560).padding(.top, 12).padding(.horizontal, 16)
+                        Spacer()
+                    }
+                }
                 if tab.focusMode {
                     VStack {
                         HStack {
@@ -756,6 +910,7 @@ struct RemoteToolbar: View {
             IconButton(icon: tab.clipboardSync ? "doc.on.clipboard.fill" : "doc.on.clipboard", help: loc("remote.clipboard"), active: tab.clipboardSync) {
                 tab.clipboardSync.toggle()
             }
+            InfoButton(text: loc("remote.clipboard.info"))
             if tab.audioSupported { RemoteAudioControl(tab: tab) }
             RemoteRecordButton(tab: tab)
             if tab.privacySupported { privacyToggle }

@@ -87,6 +87,16 @@ internal sealed class RealPeer : ICorePeer
     public Task WakeOnLan(string mac) => s.WakeOnLan(mac);
     public Task SetPrivacy(bool on) => s.SetPrivacy(on);
     public async Task<ICoreAudio> StartAudio(float volume) => new RealAudio(await s.StartAudio(volume));
+    public ICoreClipboardTransfer ClipboardPushFiles(string[] localPaths, TransferListener listener) => new RealClipboardTransfer(s.ClipboardPushFiles(localPaths, listener));
+    public ICoreClipboardTransfer ClipboardPullFiles(string[] remotePaths, string localDir, TransferListener listener) => new RealClipboardTransfer(s.ClipboardPullFiles(remotePaths, localDir, listener));
+}
+
+internal sealed class RealClipboardTransfer : ICoreClipboardTransfer
+{
+    private readonly ClipboardTransfer t;
+    public RealClipboardTransfer(ClipboardTransfer transfer) { t = transfer; }
+    public void Cancel() => t.Cancel();
+    public string[] Paths() => t.Paths();
 }
 
 internal sealed class RealSsh : ICoreSsh

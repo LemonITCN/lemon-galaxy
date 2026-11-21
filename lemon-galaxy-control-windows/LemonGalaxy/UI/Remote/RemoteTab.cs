@@ -28,7 +28,7 @@ internal sealed class RemoteTab : TabModel
     public bool FitMode = true;
     public string Quality;
     public int Fps, BitrateKbps;
-    public bool ClipboardSync;
+    public bool ClipboardSync { get; private set; }
     public int MeasuredFps, MeasuredKbps;
     public int FramesDecoded;
     /// <summary>隐私屏已开启</summary>
@@ -61,6 +61,24 @@ internal sealed class RemoteTab : TabModel
     private int frameCount, byteCount;
     private DispatcherTimer? stats, clipTimer;
     private string? lastClipboard;
+    /// <summary>上次处理过的剪贴板序号：同一次复制只处理一次</summary>
+    private uint lastClipSeq;
+    private bool skipExistingFiles;
+    private string? lastFilesKey;
+    /// <summary>复制粘贴文件的进度条（画面上方）；null 时不显示</summary>
+    public FileClip? FileClip { get; private set; }
+    /// <summary>进度条变化（单独通知，进度刷新时不重建工具栏）</summary>
+    public readonly Observable ClipChanged = new();
+    private ICoreClipboardTransfer? clipTransfer;
+    private ClipTransferListener? clipListener;
+    /// <summary>每次开始或作废一次文件传输加一：迟到的回调按它丢弃</summary>
+    private int clipGen;
+    /// <summary>上次同步过的对方剪贴板文件列表（拉取过的，或推送后对方剪贴板里的暂存路径）：同一列表不重复下载</summary>
+    public string[]? LastRemoteFiles { get; private set; }
+    /// <summary>最近一次放进本机剪贴板的文件（selftest 不写系统剪贴板，用它核对）</summary>
+    public string[]? LocalClipboardFiles { get; private set; }
+    /// <summary>selftest 核对用</summary>
+    public ICoreClipboardTransfer? ClipTransfer => clipTransfer;
     private readonly HashSet<uint> pressed = new();
     private bool imeComposing;
     private ICoreAudio? audio;
@@ -131,7 +149,12 @@ internal sealed class RemoteTab : TabModel
             if (Phase == RemotePhase.Streaming && !App.SelfTest) Notify();
         });
         clipTimer?.Stop();
-        if (!App.SelfTest) clipTimer = Ui.Every(1000, PollClipboard);
+        if (!App.SelfTest)
+        {
+            // 打开画面前就在剪贴板里的文件不自动传（文字照旧同步过去）
+            skipExistingFiles = true;
+            clipTimer = Ui.Every(1000, PollClipboard);
+        }
     }
 
     private void Fail(string reason)
@@ -491,33 +514,235 @@ internal sealed class RemoteTab : TabModel
         catch (Exception ex) { Log.Error("发送输入失败：" + ex.Message); }
     }
 
-    // ---------- 剪贴板同步（文字）：本机变化推给远端；鼠标进入画面时拉取远端 ----------
+    // ---------- 剪贴板同步：本机变化推给远端；鼠标进入画面时拉取远端。文件走内核的复制粘贴文件（protocol.md 8.4.1） ----------
 
+    /// <summary>工具栏开关。关掉时正在传的文件作废；重新打开时对方剪贴板里的文件可以再拉一次</summary>
+    public void SetClipboardSync(bool on)
+    {
+        if (ClipboardSync == on) return;
+        ClipboardSync = on;
+        CancelFileClip();
+        LastRemoteFiles = null;
+        Notify();
+    }
+
+    /// <summary>对方开放了剪贴板与文件权限才能复制粘贴文件</summary>
+    public bool FileClipSupported
+    {
+        get
+        {
+            var info = Peer?.Info;
+            return info != null && info.Permissions.Clipboard && info.Permissions.Files && info.Capabilities.Contains("clipboard") && info.Capabilities.Contains("files");
+        }
+    }
+
+    /// <summary>本机剪贴板变了（按剪贴板序号判断，同一次复制只处理一次）：文件推给对方，文字直接设过去</summary>
     private void PollClipboard()
     {
         if (!ClipboardSync || Peer == null || Phase != RemotePhase.Streaming || FullscreenWindow == null && App.ActiveTabId != Id) return;
+        var seq = ClipFiles.Sequence();
+        if (seq != 0 && seq == lastClipSeq) return;
+        lastClipSeq = seq;
+        var skip = skipExistingFiles;
+        skipExistingFiles = false;
+        var files = ClipFiles.GetFiles();
+        if (files != null)
+        {
+            // 拿不到序号时按内容去重
+            var key = string.Join("\n", files);
+            if (skip || seq == 0 && key == lastFilesKey)
+            {
+                lastFilesKey = key;
+                return;
+            }
+            lastFilesKey = key;
+            PushFiles(files);
+            return;
+        }
         var t = SysClipboard.GetText();
-        if (t == null || t == lastClipboard) return;
+        // 有序号时每次复制都同步（对方剪贴板可能已被文件换掉）；拿不到序号时按内容去重
+        if (t == null || seq == 0 && t == lastClipboard) return;
         lastClipboard = t;
+        // 本机又复制了东西：还在传的文件作废
+        if (FileClip != null) CancelFileClip();
+        LastRemoteFiles = null;
         var p = Peer;
         Ui.Run(async () => { try { await p.Session.ClipboardSet(new ClipboardData.Text(t)); } catch { } });
     }
 
-    private void PullRemoteClipboard()
+    /// <summary>拉取对方剪贴板：文字直接放进本机剪贴板，文件下载后放进去</summary>
+    public void PullRemoteClipboard()
     {
-        if (!ClipboardSync || Peer == null || App.SelfTest) return;
+        if (!ClipboardSync || Peer == null) return;
         var p = Peer;
         Ui.Run(async () =>
         {
-            try
+            ClipboardData? data;
+            try { data = await p.Session.ClipboardGet(); }
+            catch { return; }
+            switch (data)
             {
-                if (await p.Session.ClipboardGet() is ClipboardData.Text t && t.TextValue != SysClipboard.GetText())
-                {
+                case ClipboardData.Text t:
+                    LastRemoteFiles = null;
+                    if (App.SelfTest || t.TextValue == SysClipboard.GetText()) return;
                     lastClipboard = t.TextValue;
                     SysClipboard.SetText(t.TextValue);
-                }
+                    lastClipSeq = ClipFiles.Sequence();
+                    break;
+                case ClipboardData.Files f:
+                    PullFiles(f.Paths);
+                    break;
+                case ClipboardData.Image:
+                    LastRemoteFiles = null;
+                    break;
             }
-            catch { }
+        });
+    }
+
+    /// <summary>本机文件 / 文件夹 → 对方暂存区，完成后对方剪贴板就是它们</summary>
+    public void PushFiles(string[] paths)
+    {
+        if (Peer == null || paths.Length == 0) return;
+        CancelFileClip();
+        var names = paths.Select(f => IOPath.GetFileName(f.TrimEnd('\\', '/'))).ToArray();
+        if (!FileClipSupported)
+        {
+            ShowFileClipResult(new FileClip(FileClipDirection.Push, names) { State = FileClipState.Failed, Error = L.T("remote.files.noPermission") });
+            return;
+        }
+        var listener = MakeClipListener(clipGen);
+        FileClip = new FileClip(FileClipDirection.Push, names);
+        clipListener = listener;
+        try { clipTransfer = Peer.Session.ClipboardPushFiles(paths, listener); }
+        catch (Exception e)
+        {
+            clipListener = null;
+            ShowFileClipResult(new FileClip(FileClipDirection.Push, names) { State = FileClipState.Failed, Error = Fmt.Error(e) });
+            return;
+        }
+        ClipChanged.Notify();
+    }
+
+    /// <summary>对方剪贴板里的文件 → 本机缓存目录，完成后放进本机剪贴板。同一列表只下载一次</summary>
+    public void PullFiles(string[] remotePaths)
+    {
+        if (Peer == null || remotePaths.Length == 0 || ClipFiles.SameFiles(remotePaths, LastRemoteFiles)) return;
+        if (FileClip is { State: FileClipState.Running } running)
+        {
+            // 正在把本机文件推给对方：对方剪贴板马上会被换掉，这次不拉
+            if (running.Direction == FileClipDirection.Push) return;
+            CancelFileClip();
+        }
+        LastRemoteFiles = remotePaths;
+        var names = remotePaths.Select(ClipFiles.BaseName).ToArray();
+        if (!FileClipSupported)
+        {
+            ShowFileClipResult(new FileClip(FileClipDirection.Pull, names) { State = FileClipState.Failed, Error = L.T("remote.files.noPermission") });
+            return;
+        }
+        CancelFileClip();
+        var listener = MakeClipListener(clipGen);
+        FileClip = new FileClip(FileClipDirection.Pull, names);
+        clipListener = listener;
+        try { clipTransfer = Peer.Session.ClipboardPullFiles(remotePaths, ClipFiles.NewPullDir(), listener); }
+        catch (Exception e)
+        {
+            clipListener = null;
+            ShowFileClipResult(new FileClip(FileClipDirection.Pull, names) { State = FileClipState.Failed, Error = Fmt.Error(e) });
+            return;
+        }
+        ClipChanged.Notify();
+    }
+
+    /// <summary>取消正在传的文件并收起进度条（取消时内核报的「已取消」随之丢弃）</summary>
+    public void CancelFileClip()
+    {
+        clipGen++;
+        var t = clipTransfer;
+        clipTransfer = null;
+        clipListener = null;
+        try { t?.Cancel(); }
+        catch (Exception e) { Log.Error("取消复制文件失败：" + e.Message); }
+        if (FileClip == null) return;
+        FileClip = null;
+        ClipChanged.Notify();
+    }
+
+    /// <summary>收起完成或失败的提示</summary>
+    public void DismissFileClip()
+    {
+        if (FileClip == null || FileClip.State == FileClipState.Running) return;
+        FileClip = null;
+        ClipChanged.Notify();
+    }
+
+    private ClipTransferListener MakeClipListener(int gen) => new((done, total) =>
+    {
+        if (gen != clipGen || FileClip is not { State: FileClipState.Running } c) return;
+        c.Done = done;
+        c.Total = total;
+        ClipChanged.Notify();
+    }, error => FileClipFinished(gen, error));
+
+    private void FileClipFinished(int gen, string? error)
+    {
+        if (gen != clipGen || FileClip is not { State: FileClipState.Running } c) return;
+        var transfer = clipTransfer;
+        clipTransfer = null;
+        clipListener = null;
+        if (error != null)
+        {
+            c.State = FileClipState.Failed;
+            c.Error = error;
+            ShowFileClipResult(c);
+            return;
+        }
+        string[] paths;
+        try { paths = transfer?.Paths() ?? Array.Empty<string>(); }
+        catch { paths = Array.Empty<string>(); }
+        if (c.Direction == FileClipDirection.Push)
+        {
+            // 对方剪贴板现在是暂存区里的这些文件：之后拉取看到同一列表不再下载回来
+            LastRemoteFiles = paths;
+        }
+        else
+        {
+            // 下载期间本机又复制了别的：不盖掉
+            if (paths.Length == 0 || !App.SelfTest && lastClipSeq != 0 && ClipFiles.Sequence() != lastClipSeq)
+            {
+                FileClip = null;
+                ClipChanged.Notify();
+                return;
+            }
+            LocalClipboardFiles = paths;
+            if (!App.SelfTest)
+            {
+                if (!ClipFiles.SetFiles(paths))
+                {
+                    c.State = FileClipState.Failed;
+                    c.Error = L.T("remote.files.localFailed");
+                    ShowFileClipResult(c);
+                    return;
+                }
+                lastClipSeq = ClipFiles.Sequence();
+            }
+        }
+        c.State = FileClipState.Done;
+        if (c.Total > 0) c.Done = c.Total;
+        ShowFileClipResult(c);
+    }
+
+    /// <summary>显示完成或失败提示，几秒后自动收起（selftest 不收，便于截图）</summary>
+    private void ShowFileClipResult(FileClip c)
+    {
+        FileClip = c;
+        ClipChanged.Notify();
+        if (App.SelfTest) return;
+        Ui.After(c.State == FileClipState.Done ? 4000 : 8000, () =>
+        {
+            if (!ReferenceEquals(FileClip, c)) return;
+            FileClip = null;
+            ClipChanged.Notify();
         });
     }
 
@@ -548,7 +773,7 @@ internal sealed class RemoteTab : TabModel
     private void HookInput()
     {
         var h = VideoHost;
-        h.MouseEnter += (_, _) => PullRemoteClipboard();
+        h.MouseEnter += (_, _) => { if (!App.SelfTest) PullRemoteClipboard(); };
         h.MouseMove += (_, e) => { if (Remote(e.GetPosition(h)) is { } r) Send(new InputEvent.MouseMove(r.x, r.y)); };
         h.MouseDown += (_, e) =>
         {
@@ -621,6 +846,7 @@ internal sealed class RemoteTab : TabModel
         exit.Margin = new Thickness(12);
         exit.Opacity = 0.85;
         grid.Children.Add(exit);
+        grid.Children.Add(new Region(() => FileClipView.Pill(this)).On(ClipChanged));
         var w = new Window
         {
             WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize, Background = Brushes.Black, Title = Title + " - LemonGalaxy",
@@ -654,6 +880,7 @@ internal sealed class RemoteTab : TabModel
         channel = null;
         stats?.Stop();
         clipTimer?.Stop();
+        CancelFileClip();
         queue.CompleteAdding();
         FullscreenWindow?.Close();
     }
@@ -702,6 +929,7 @@ internal static class RemoteView
                 K.Center(K.PrimaryButton(L.T("common.retry"), tab.Start)))),
             _ => null,
         }).On(tab));
+        area.Children.Add(new Region(() => FileClipView.Pill(tab)).On(tab.ClipChanged));
         dock.Children.Add(area);
         return dock;
     }
@@ -746,7 +974,8 @@ internal static class RemoteView
             new(L.T("remote.combo.showDesktop"), () => tab.Special(ComboKey.ShowDesktop)),
             new(L.T("remote.lock"), () => tab.Special(ComboKey.LockScreen)),
         }, L.T("remote.keys")));
-        items.Add(K.IconButton("clipboard", L.T("remote.clipboard"), () => { tab.ClipboardSync = !tab.ClipboardSync; tab.Notify(); }, tab.ClipboardSync));
+        items.Add(K.IconButton("clipboard", L.T("remote.clipboard"), () => tab.SetClipboardSync(!tab.ClipboardSync), tab.ClipboardSync));
+        items.Add(K.Info(L.T("remote.clipboard.info")));
         if (tab.AudioSupported) items.Add(K.IconButton(tab.AudioOn ? "volume" : "volumeOff", L.T("remote.sound"), tab.ToggleAudio, tab.AudioOn));
         items.Add(RecordButton(tab));
         if (tab.PrivacySupported) items.Add(K.IconButton("eyeOff", L.T("remote.privacy"), tab.TogglePrivacy, tab.Privacy));

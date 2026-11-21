@@ -90,6 +90,18 @@ internal interface ICorePeer
     Task SetPrivacy(bool on);
     /// <summary>收听被控端的系统声音，内核用本机默认输出设备（WASAPI）播放；能力列表里有 "audio" 才支持。volume 0..1</summary>
     Task<ICoreAudio> StartAudio(float volume);
+    /// <summary>复制粘贴文件（本机 → 远端）：本机文件 / 文件夹传到被控端暂存区，再把被控端剪贴板设成它们。超过 4 GB 或 1 万个文件时报错；需要剪贴板与文件权限</summary>
+    ICoreClipboardTransfer ClipboardPushFiles(string[] localPaths, TransferListener listener);
+    /// <summary>复制粘贴文件（远端 → 本机）：把远端剪贴板里的文件下载到 localDir，完成后 Paths() 是本机上的顶层路径</summary>
+    ICoreClipboardTransfer ClipboardPullFiles(string[] remotePaths, string localDir, TransferListener listener);
+}
+
+/// <summary>一次复制粘贴文件的传输</summary>
+internal interface ICoreClipboardTransfer
+{
+    void Cancel();
+    /// <summary>完成后的路径：推送时是被控端上的路径，拉取时是本机路径</summary>
+    string[] Paths();
 }
 
 /// <summary>正在播放的远端声音</summary>

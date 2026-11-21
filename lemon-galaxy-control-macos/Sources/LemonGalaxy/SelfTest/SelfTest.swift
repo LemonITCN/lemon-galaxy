@@ -13,6 +13,8 @@ enum SelfTest {
     static var count = 0
     static var problems: [String] = []
     static var only: String?
+    /// 本机一侧的假主目录（复制粘贴文件从这里取文件）
+    static var fakeHome: URL?
 
     /// --make-icon <目录>：把应用图标（AppMark）渲染成 AppIcon.iconset，供 iconutil 生成 .icns
     static func makeIcon(_ dir: String) -> Int32 {
@@ -57,6 +59,13 @@ enum SelfTest {
         // 录像写进假主目录里的「影片」，不碰真的 ~/Movies
         RemoteDesktopModel.recordingDirOverride = fakeHome.appendingPathComponent("Movies/LemonGalaxy", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: fakeHome.deletingLastPathComponent()) }
+        Self.fakeHome = fakeHome
+        // 复制粘贴文件：用私有剪贴板与临时缓存目录，不碰用户的剪贴板和 ~/Library/Caches
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("cn.lemonit.galaxy.selftest.\(ProcessInfo.processInfo.processIdentifier)"))
+        ClipboardFiles.pasteboardOverride = pasteboard
+        ClipboardFiles.cacheRootOverride = fakeHome.deletingLastPathComponent().appendingPathComponent("clipboard-cache", isDirectory: true)
+        defer { pasteboard.releaseGlobally() }
+        checkClipboardCacheCleanup()
         RemoteVideoNSView.snapshotMode = true
         checkAudioConversion()
 
@@ -151,6 +160,116 @@ enum SelfTest {
             }
         }
     }
+
+    /// 启动时清理复制粘贴文件缓存：一天前的目录删掉，新的留着
+    static func checkClipboardCacheCleanup() {
+        let fm = FileManager.default
+        let root = ClipboardFiles.cacheRoot
+        let old = root.appendingPathComponent("1795000000000-123456", isDirectory: true)
+        let fresh = root.appendingPathComponent("1795225692000-654321", isDirectory: true)
+        for d in [old, fresh] {
+            try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+            try? Data("x".utf8).write(to: d.appendingPathComponent("a.txt"))
+        }
+        let past = Date().addingTimeInterval(-2 * 86_400)
+        try? fm.setAttributes([.creationDate: past, .modificationDate: past], ofItemAtPath: old.path)
+        let removed = ClipboardFiles.cleanStale(in: root)
+        if removed != 1 || fm.fileExists(atPath: old.path) || !fm.fileExists(atPath: fresh.path) {
+            problems.append("复制粘贴文件缓存清理不对：删了 \(removed) 个，旧目录还在 \(fm.fileExists(atPath: old.path))，新目录还在 \(fm.fileExists(atPath: fresh.path))")
+        }
+        try? fm.removeItem(at: fresh)
+    }
+
+    /// 远程桌面复制粘贴文件：本机复制 → 对方（进度条、取消、完成提示，同一次复制不重复推）；
+    /// 对方复制 → 下载到缓存目录并放进本机剪贴板（同一批不重复下载，推过去的暂存文件不再拉回来）；失败显示原因；文字照旧同步
+    static func checkFileClip(_ r: RemoteDesktopModel, prefix: String, window: NSWindow, host: NSHostingView<RootView>) {
+        guard let session = r.peer?.session as? MockPeerSession, let home = fakeHome else {
+            problems.append("复制粘贴文件：没有模拟会话")
+            return
+        }
+        if !r.fileClipSupported { problems.append("复制粘贴文件：模拟的 Windows 设备应支持") }
+        let fm = FileManager.default
+        let pb = ClipboardFiles.pasteboard
+        let report = home.appendingPathComponent("report-2026Q3.pdf")
+        let notes = home.appendingPathComponent("deploy-notes.md")
+        let held = home.appendingPathComponent("Desktop/assets-hold.zip")
+        let failing = home.appendingPathComponent("Desktop/upload-fail.bin")
+        try? Data(count: 2_000_000).write(to: held)
+        try? Data(count: 300_000).write(to: failing)
+        func failed() -> Bool { if case .failed = r.fileClip?.state { return true }; return false }
+
+        // 1. 进度条：其中一项名字带 hold，模拟传输停在 45%
+        ClipboardFiles.write([report, home.appendingPathComponent("screenshot.png"), held], to: pb)
+        r.pollClipboard()
+        wait("复制文件进度到 45%") { r.fileClip?.percent == 45 }
+        let heldTransfer = r.clipTransfer as? MockClipboardTransfer
+        if r.fileClip?.direction != .push || r.fileClip?.names.count != 3 { problems.append("复制粘贴文件：进度条内容不对 \(String(describing: r.fileClip))") }
+        let firstId = r.fileClip?.id
+        r.pollClipboard()
+        if r.fileClip?.id != firstId { problems.append("复制粘贴文件：同一次复制又推了一遍") }
+        shot("\(prefix)-46-remote-files-pushing", app(r), window: window, host: host, settle: 0.2)
+        r.cancelFileClip()
+        pump(0.05)
+        if r.fileClip != nil || heldTransfer?.cancelled != true { problems.append("复制粘贴文件：取消后进度条没收起或传输没停") }
+
+        // 2. 完成提示：对方剪贴板变成暂存区里的这两项
+        ClipboardFiles.write([report, notes], to: pb)
+        r.pollClipboard()
+        wait("复制文件到对方") { r.fileClip?.state == .done || failed() }
+        if case .files(let staged)? = session.remoteClipboard {
+            let names = staged.map { ($0 as NSString).lastPathComponent }
+            if names != ["report-2026Q3.pdf", "deploy-notes.md"] || !staged.allSatisfy({ $0.hasPrefix("/C:/Users/alice/.lemon-galaxy/clipboard/") }) {
+                problems.append("复制粘贴文件：对方剪贴板里的暂存路径不对 \(staged)")
+            }
+        } else {
+            problems.append("复制粘贴文件：推送完成后对方剪贴板不是文件")
+        }
+        shot("\(prefix)-47-remote-files-pushed", app(r), window: window, host: host, settle: 0.2)
+        // 推过去的暂存文件不再拉回来
+        let pushedId = r.fileClip?.id
+        r.pullRemoteClipboard()
+        pump(0.15)
+        if r.fileClip?.id != pushedId { problems.append("复制粘贴文件：推过去的文件又被拉回本机") }
+        r.dismissFileClip()
+
+        // 3. 对方复制了文件 → 下载到缓存目录 → 本机剪贴板
+        let remote = MockClipboardTransfer.remoteSampleFiles(device: session.device, zh: session.client.zh)
+        session.remoteClipboard = .files(paths: remote)
+        r.pullRemoteClipboard()
+        wait("从对方复制文件") { (r.fileClip?.state == .done && r.fileClip?.direction == .pull) || failed() }
+        let urls = ClipboardFiles.fileURLs(on: pb)
+        let root = ClipboardFiles.cacheRoot.resolvingSymlinksInPath().path
+        if urls.map(\.lastPathComponent) != remote.map({ ($0 as NSString).lastPathComponent })
+            || !urls.allSatisfy({ fm.fileExists(atPath: $0.path) && $0.resolvingSymlinksInPath().path.hasPrefix(root + "/") })
+            || !fm.fileExists(atPath: urls.last?.appendingPathComponent("README.md").path ?? "/nonexistent") {
+            problems.append("复制粘贴文件：本机剪贴板里的文件不对 \(urls.map(\.path))")
+        }
+        shot("\(prefix)-48-remote-files-pulled", app(r), window: window, host: host, settle: 0.2)
+        let pulledId = r.fileClip?.id
+        r.pullRemoteClipboard()
+        pump(0.15)
+        if r.fileClip?.id != pulledId { problems.append("复制粘贴文件：同一批文件又下载了一遍") }
+        // 本机剪贴板是刚放进去的：不当成本机复制再推回去
+        r.pollClipboard()
+        if r.fileClip?.id != pulledId { problems.append("复制粘贴文件：拉下来的文件又被推回对方") }
+        r.dismissFileClip()
+
+        // 4. 失败：名字带 fail 的在 60% 处失败，显示原因
+        ClipboardFiles.write([failing], to: pb)
+        r.pollClipboard()
+        wait("复制文件失败") { failed() }
+        shot("\(prefix)-49-remote-files-failed", app(r), window: window, host: host, settle: 0.2)
+        r.dismissFileClip()
+
+        // 5. 文字照旧同步
+        pb.clearContents()
+        pb.setString("selftest", forType: .string)
+        r.pollClipboard()
+        wait("文字同步到对方") { if case .text(let t)? = session.remoteClipboard { return t == "selftest" }; return false }
+        if r.fileClip != nil || r.lastRemoteFiles != nil { problems.append("复制粘贴文件：同步文字后状态没复位") }
+    }
+
+    private static func app(_ r: RemoteDesktopModel) -> AppModel { r.app! }
 
     /// 本机一侧用的假主目录（文件名、时间都固定）
     static func makeFakeHome() -> URL {
@@ -486,6 +605,11 @@ enum SelfTest {
             if app.toast?.action == nil || app.toast?.isError == true { problems.append("停止录像后应提示保存位置并能在访达中显示：\(app.toast?.text ?? "无提示")") }
             shot("\(prefix)-45-remote-recording-saved", app, window: window, host: host, settle: 0.2)
             app.toast = nil
+        }
+
+        // 复制粘贴文件
+        if let r = app.activeTab as? RemoteDesktopModel {
+            checkFileClip(r, prefix: prefix, window: window, host: host)
         }
 
         // 6. AI 智能体

@@ -1841,6 +1841,17 @@ public protocol ClientListener: AnyObject, Sendable {
     
 }
 
+public protocol ClipboardTransferProtocol: AnyObject, Sendable {
+    
+    func cancel() 
+    
+    /**
+     * 完成后的路径：推送时是被控端上的路径，拉取时是本机路径。
+     */
+    func paths()  -> [String]
+    
+}
+
 public protocol DisplayChannelProtocol: AnyObject, Sendable {
     
     func isRecording()  -> Bool
@@ -2163,6 +2174,18 @@ public protocol PeerSessionProtocol: AnyObject, Sendable {
     
     func clipboardGet() async throws  -> ClipboardData?
     
+    /**
+     * 复制粘贴文件（远端 → 本机）：把远端剪贴板里的文件（clipboard_get 得到的路径）下载到 `local_dir`。
+     * 完成后 ClipboardTransfer.paths() 是本机上的顶层路径，界面把本机剪贴板设成它们。
+     */
+    func clipboardPullFiles(remotePaths: [String], localDir: String, listener: TransferListener)  -> ClipboardTransfer
+    
+    /**
+     * 复制粘贴文件（本机 → 远端）：把本机文件 / 文件夹传到被控端暂存区，再把被控端剪贴板设成它们。
+     * 进度与结果经 listener；超过 4 GB 或 1 万个文件时报错（请改用文件管理）。需要剪贴板与文件权限。
+     */
+    func clipboardPushFiles(localPaths: [String], listener: TransferListener)  -> ClipboardTransfer
+    
     func clipboardSet(data: ClipboardData) async throws 
     
     /**
@@ -2436,6 +2459,14 @@ open class AudioPlayback: AudioPlaybackProtocol, @unchecked Sendable {
     open func stop() { bridgeUnimplemented() }
 }
 
+open class ClipboardTransfer: ClipboardTransferProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func cancel() { bridgeUnimplemented() }
+    open func paths()  -> [String] { bridgeUnimplemented() }
+}
+
 open class DisplayChannel: DisplayChannelProtocol, @unchecked Sendable {
     public struct NoHandle { public init() {} }
     public init(noHandle: NoHandle) {}
@@ -2544,6 +2575,8 @@ open class PeerSession: PeerSessionProtocol, @unchecked Sendable {
     public init(noHandle: NoHandle) {}
     required public init(unsafeFromHandle handle: UInt64) {}
     open func clipboardGet() async throws  -> ClipboardData? { bridgeUnimplemented() }
+    open func clipboardPullFiles(remotePaths: [String], localDir: String, listener: TransferListener)  -> ClipboardTransfer { bridgeUnimplemented() }
+    open func clipboardPushFiles(localPaths: [String], listener: TransferListener)  -> ClipboardTransfer { bridgeUnimplemented() }
     open func clipboardSet(data: ClipboardData) async throws { bridgeUnimplemented() }
     open func disconnect() { bridgeUnimplemented() }
     open func exec(request: ExecRequest) async throws  -> ExecResult { bridgeUnimplemented() }

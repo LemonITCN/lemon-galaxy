@@ -15,6 +15,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Localization.shared.apply(setting: settings.language)
         settings.applyAppearance()
         app = AppModel(settings: settings, selfTest: false)
+        // 远程桌面复制粘贴文件下载到缓存目录：一天前的在后台删掉
+        let clipRoot = ClipboardFiles.cacheRoot
+        DispatchQueue.global(qos: .utility).async { ClipboardFiles.cleanStale(in: clipRoot) }
         buildMainMenu()
         StatusMenu.shared.install(app: app)
         showMainWindow()

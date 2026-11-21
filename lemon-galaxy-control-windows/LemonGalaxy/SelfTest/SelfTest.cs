@@ -24,6 +24,8 @@ internal static class SelfTest
     private static string? only;
     private static int count;
     private static readonly List<string> Problems = new();
+    /// <summary>本机一侧的假主目录（复制粘贴文件从这里取文件）</summary>
+    private static string fakeHomeDir = "";
 
     public static int Run(string outputDir, string[] args)
     {
@@ -55,6 +57,10 @@ internal static class SelfTest
             Clock.FrozenMs = 1_795_225_692_000;      // 2026-11-21 09:48:12（北京时间）
             var fakeHome = MakeFakeHome();
             LocalFileSource.HomeOverride = fakeHome;
+            fakeHomeDir = fakeHome;
+            // 复制粘贴文件下载到临时目录，不碰 %LOCALAPPDATA%；系统剪贴板 selftest 不读不写
+            ClipFiles.RootOverride = IOPath.Combine(IOPath.GetDirectoryName(fakeHome)!, "clipboard-cache");
+            CheckClipboardCacheCleanup();
 
             var langs = Arg("--lang") is { } l ? new[] { l } : new[] { "zh-Hans", "en" };
             var themes = Arg("--theme") is { } t ? new[] { t } : new[] { "light", "dark" };
@@ -127,6 +133,101 @@ internal static class SelfTest
     {
         app.CurrentToast = null;
         app.Overlay.Notify();
+    }
+
+    /// <summary>启动时清理复制粘贴文件缓存：一天前的目录删掉，新的留着</summary>
+    private static void CheckClipboardCacheCleanup()
+    {
+        var root = ClipFiles.Root;
+        var old = IOPath.Combine(root, "1795000000000-123456");
+        var fresh = IOPath.Combine(root, "1795225692000-654321");
+        foreach (var d in new[] { old, fresh })
+        {
+            Directory.CreateDirectory(d);
+            File.WriteAllText(IOPath.Combine(d, "a.txt"), "x");
+        }
+        var past = DateTime.Now.AddDays(-2);
+        Directory.SetCreationTime(old, past);
+        Directory.SetLastWriteTime(old, past);
+        var removed = ClipFiles.CleanStale(root);
+        if (removed != 1 || Directory.Exists(old) || !Directory.Exists(fresh))
+            Problems.Add($"复制粘贴文件缓存清理不对：删了 {removed} 个，旧目录还在 {Directory.Exists(old)}，新目录还在 {Directory.Exists(fresh)}");
+        try { Directory.Delete(fresh, true); } catch { }
+    }
+
+    /// <summary>
+    /// 远程桌面复制粘贴文件：本机文件 → 对方（进度条、取消、完成提示）；对方复制 → 下载到缓存目录（同一批不重复下载，推过去的暂存文件不再拉回来）；
+    /// 失败显示原因。selftest 不碰系统剪贴板，直接调推送与拉取。
+    /// </summary>
+    private static void CheckFileClip(RemoteTab r, FrameworkElement root, string prefix)
+    {
+        if (r.Peer?.Session is not MockPeer session)
+        {
+            Problems.Add("复制粘贴文件：没有模拟会话");
+            return;
+        }
+        if (!r.FileClipSupported) Problems.Add("复制粘贴文件：模拟的 Windows 设备应支持");
+        var home = fakeHomeDir;
+        var report = IOPath.Combine(home, "report-2026Q3.pdf");
+        var notes = IOPath.Combine(home, "deploy-notes.md");
+        var held = IOPath.Combine(home, "Desktop", "assets-hold.zip");
+        var failing = IOPath.Combine(home, "Desktop", "upload-fail.bin");
+        File.WriteAllBytes(held, new byte[2_000_000]);
+        File.WriteAllBytes(failing, new byte[300_000]);
+        bool Failed() => r.FileClip?.State == FileClipState.Failed;
+
+        // 1. 进度条：其中一项名字带 hold，模拟传输停在 45%
+        r.PushFiles(new[] { report, IOPath.Combine(home, "screenshot.png"), held });
+        Wait("复制文件进度到 45%", () => r.FileClip?.Percent == 45);
+        var heldTransfer = r.ClipTransfer as MockClipboardTransfer;
+        if (r.FileClip is not { Direction: FileClipDirection.Push, Names.Length: 3 }) Problems.Add("复制粘贴文件：进度条内容不对");
+        Capture($"{prefix}-44-remote-files-pushing", root);
+        r.CancelFileClip();
+        Ui.Pump(30);
+        if (r.FileClip != null || heldTransfer?.Cancelled != true) Problems.Add("复制粘贴文件：取消后进度条没收起或传输没停");
+
+        // 2. 完成提示：对方剪贴板变成暂存区里的这两项
+        r.PushFiles(new[] { report, notes });
+        Wait("复制文件到对方", () => r.FileClip?.State == FileClipState.Done || Failed());
+        if (session.RemoteClipboard is ClipboardData.Files staged)
+        {
+            var names = staged.Paths.Select(ClipFiles.BaseName).ToArray();
+            if (!names.SequenceEqual(new[] { "report-2026Q3.pdf", "deploy-notes.md" }) || !staged.Paths.All(x => x.StartsWith("/C:/Users/alice/.lemon-galaxy/clipboard/", StringComparison.Ordinal)))
+                Problems.Add("复制粘贴文件：对方剪贴板里的暂存路径不对 " + string.Join(", ", staged.Paths));
+        }
+        else Problems.Add("复制粘贴文件：推送完成后对方剪贴板不是文件");
+        Capture($"{prefix}-45-remote-files-pushed", root);
+        // 推过去的暂存文件不再拉回来
+        var pushed = r.FileClip;
+        r.PullRemoteClipboard();
+        Ui.Pump(150);
+        if (!ReferenceEquals(r.FileClip, pushed)) Problems.Add("复制粘贴文件：推过去的文件又被拉回本机");
+        r.DismissFileClip();
+
+        // 3. 对方复制了文件 → 下载到缓存目录
+        var remote = MockClipboardTransfer.RemoteSampleFiles(session.Device, session.Client.Zh);
+        session.RemoteClipboard = new ClipboardData.Files(remote);
+        r.PullRemoteClipboard();
+        Wait("从对方复制文件", () => r.FileClip is { State: FileClipState.Done, Direction: FileClipDirection.Pull } || Failed());
+        var local = r.LocalClipboardFiles ?? Array.Empty<string>();
+        var cacheRoot = IOPath.GetFullPath(ClipFiles.Root) + IOPath.DirectorySeparatorChar;
+        if (!local.Select(IOPath.GetFileName).SequenceEqual(remote.Select(ClipFiles.BaseName))
+            || !local.All(x => (File.Exists(x) || Directory.Exists(x)) && IOPath.GetFullPath(x).StartsWith(cacheRoot, StringComparison.OrdinalIgnoreCase))
+            || !File.Exists(IOPath.Combine(local.LastOrDefault() ?? "", "README.md")))
+            Problems.Add("复制粘贴文件：下载到本机的文件不对 " + string.Join(", ", local));
+        Capture($"{prefix}-46-remote-files-pulled", root);
+        var pulled = r.FileClip;
+        r.PullRemoteClipboard();
+        Ui.Pump(150);
+        if (!ReferenceEquals(r.FileClip, pulled)) Problems.Add("复制粘贴文件：同一批文件又下载了一遍");
+        r.DismissFileClip();
+
+        // 4. 失败：名字带 fail 的在 60% 处失败，显示原因
+        r.PushFiles(new[] { failing });
+        Wait("复制文件失败", Failed);
+        Capture($"{prefix}-47-remote-files-failed", root);
+        r.DismissFileClip();
+        if (r.FileClip != null) Problems.Add("复制粘贴文件：失败提示收不起来");
     }
 
     /// <summary>本机一侧用的假主目录（文件名、时间都固定）</summary>
@@ -382,6 +483,9 @@ internal static class SelfTest
                 ClearToast(app);
             }
         }
+
+        // 复制粘贴文件
+        if (app.ActiveTab is RemoteTab remote4) CheckFileClip(remote4, root, prefix);
 
         // 6. AI 智能体
         app.SelectHome(NavSection.Ai);
