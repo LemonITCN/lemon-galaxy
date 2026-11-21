@@ -488,13 +488,24 @@ jobs:
             cp art/windows7-x86_64/lemon-galaxy-worker.exe "out/lemon-galaxy-worker-$V-windows7-x86_64.exe"
           fi
           # Windows 主控端兼容版：同一个界面程序，换上 Win7 目标编的内核库与被控端
+          # 主控端压缩包由 PowerShell 打包，路径里是反斜杠（unzip 会报错），用 Python 逐个条目改写
           if [ -f art/windows-control/LemonGalaxy-Windows-x64.zip ] && [ -f art/windows7-x86_64/galaxy_ffi.dll ]; then
-            W7="$RUNNER_TEMP/win7ctl" && rm -rf "$W7" && mkdir -p "$W7" && unzip -q art/windows-control/LemonGalaxy-Windows-x64.zip -d "$W7"
-            SRC="$(ls -d "$W7"/*/ | head -1)"
-            DST="$W7/LemonGalaxy-$V-windows7-x64"
-            mv "$SRC" "$DST"
-            cp art/windows7-x86_64/galaxy_ffi.dll art/windows7-x86_64/lemon-galaxy-worker.exe "$DST/"
-            (cd "$W7" && zip -qr "$GITHUB_WORKSPACE/out/LemonGalaxy-$V-windows7-x64.zip" "LemonGalaxy-$V-windows7-x64")
+            python3 - "$V" <<'PY'
+          import sys, zipfile
+          v = sys.argv[1]
+          top = f"LemonGalaxy-{v}-windows7-x64"
+          swap = {"galaxy_ffi.dll": "art/windows7-x86_64/galaxy_ffi.dll", "lemon-galaxy-worker.exe": "art/windows7-x86_64/lemon-galaxy-worker.exe"}
+          with zipfile.ZipFile("art/windows-control/LemonGalaxy-Windows-x64.zip") as src, \
+               zipfile.ZipFile(f"out/LemonGalaxy-{v}-windows7-x64.zip", "w", zipfile.ZIP_DEFLATED) as dst:
+              for info in src.infolist():
+                  parts = info.filename.replace("\\", "/").split("/")
+                  if len(parts) < 2 or info.filename.endswith(("/", "\\")):
+                      continue
+                  rel = "/".join(parts[1:])
+                  data = open(swap[rel], "rb").read() if rel in swap else src.read(info)
+                  dst.writestr(f"{top}/{rel}", data)
+          print("已生成兼容版主控端压缩包")
+          PY
           fi
           WINS=()
           for a in x86_64 aarch64; do
