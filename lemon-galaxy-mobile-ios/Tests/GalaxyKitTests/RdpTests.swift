@@ -23,7 +23,9 @@ final class RdpLinkTests: XCTestCase {
         // Foundation 的 URL(string:) 不接受这个格式；确认构造出来的 URL 不为空且文字原样保留
         XCTAssertNil(URL(string: RdpLink.string(for: target(host: "10.0.3.5"))))
         let u = RdpLink.url(for: target(host: "fe80::1", user: "a&b=c"))!.absoluteString
-        XCTAssertEqual(u, "rdp://full%20address=s:[fe80::1]:3389&username=s:a%26b%3Dc")
+        // 不同系统版本的 Foundation 对方括号处理不同（macOS 26 转成 %5B %5D，27 原样保留），Windows App 两种都会解码
+        let normalized = u.replacingOccurrences(of: "%5B", with: "[").replacingOccurrences(of: "%5D", with: "]")
+        XCTAssertEqual(normalized, "rdp://full%20address=s:[fe80::1]:3389&username=s:a%26b%3Dc")
         // 没有用户名时只带地址
         XCTAssertEqual(RdpLink.url(for: target(host: "pc.example.com", user: ""))?.absoluteString, "rdp://full%20address=s:pc.example.com:3389")
     }

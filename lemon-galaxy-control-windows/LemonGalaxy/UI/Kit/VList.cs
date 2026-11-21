@@ -48,6 +48,8 @@ internal sealed class RowHost : Border
     {
         var b = GetValue(BuilderProperty) as Func<object, UIElement>;
         var data = DataContext;
+        // 行容器被回收时 DataContext 会变成 {DisconnectedItem} 占位对象，不是列表里的数据
+        if (data == System.Windows.Data.BindingOperations.DisconnectedSource) data = null;
         Child = b != null && data != null ? b(data) : null;
     }
 }
