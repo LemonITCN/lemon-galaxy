@@ -188,6 +188,49 @@ jobs:
             dist/lemon-galaxy-server.exe
           if-no-files-found: error
 
+  windows-control:
+    name: Windows 主控端
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - name: 准备 Rust 与 .NET
+        run: |
+          rustup update stable --no-self-update && rustup default stable
+          rustup target add "$TARGET"
+          dotnet --list-sdks
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.nuget/packages
+            target
+            tools/uniffi-bindgen-cs/target
+          key: rust-windows-control-${{ hashFiles('Cargo.lock', 'tools/uniffi-bindgen-cs/Cargo.lock') }}
+          restore-keys: rust-windows-control-
+      - name: 构建、打包与界面自测
+        run: |
+          BASE="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -n "$LEMONGALAXY_BUILD_VERSION" ]; then V="${LEMONGALAXY_BUILD_VERSION#v}"; else V="$BASE.$GITHUB_RUN_NUMBER"; fi
+          LEMONGALAXY_VERSION="$V" LEMONGALAXY_BUILD="$GITHUB_RUN_NUMBER" lemon-galaxy-control-windows/scripts/build.sh --selftest
+          mkdir -p out && cp lemon-galaxy-control-windows/dist/*.zip out/LemonGalaxy-Windows-x64.zip
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-control-selftest
+          path: lemon-galaxy-control-windows/selftest
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-control
+          path: out/LemonGalaxy-Windows-x64.zip
+          if-no-files-found: error
+
   windows7:
     name: Windows 7 兼容版被控端
     needs: web
@@ -388,7 +431,7 @@ jobs:
     name: 发布
     # Windows 被控端还在打磨：它失败时照常发布，只是不带 Windows 文件
     if: always() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && needs.rust-tests.result == 'success' && needs.linux.result == 'success' && needs.macos.result == 'success' && needs.android.result == 'success'
-    needs: [rust-tests, linux, windows, windows7, macos, android]
+    needs: [rust-tests, linux, windows, windows7, windows-control, macos, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -415,6 +458,9 @@ jobs:
             chmod +x "out/lemon-galaxy-worker-$V-linux-$a"
             tar -C "art/linux-$a" -czf "out/lemon-galaxy-server-$V-linux-$a.tar.gz" lemon-galaxy-server
           done
+          if [ -f art/windows-control/LemonGalaxy-Windows-x64.zip ]; then
+            cp art/windows-control/LemonGalaxy-Windows-x64.zip "out/LemonGalaxy-$V-windows-x64.zip"
+          fi
           if [ -f art/windows7-x86_64/lemon-galaxy-worker.exe ]; then
             cp art/windows7-x86_64/lemon-galaxy-worker.exe "out/lemon-galaxy-worker-$V-windows7-x86_64.exe"
           fi
@@ -444,6 +490,7 @@ jobs:
             echo "| 用途 | 系统 | 文件 |"
             echo "|---|---|---|"
             echo "| Mac 客户端（主控 + 被控） | macOS 13 及以上（Apple 芯片、Intel 通用） | [LemonGalaxy-$V-macOS.dmg]($DL/LemonGalaxy-$V-macOS.dmg) |"
+            [ -f "out/LemonGalaxy-$V-windows-x64.zip" ] && echo "| Windows 客户端（主控） | Windows 10 / 11，x64（ARM64 电脑可用） | [LemonGalaxy-$V-windows-x64.zip]($DL/LemonGalaxy-$V-windows-x64.zip) |"
             echo "| 安卓客户端（主控） | Android 8.0 及以上 | [LemonGalaxy-$V-Android.apk]($DL/LemonGalaxy-$V-Android.apk) |"
             echo "| Linux 被控端 | x86_64，任意发行版 | [lemon-galaxy-worker-$V-linux-x86_64]($DL/lemon-galaxy-worker-$V-linux-x86_64) |"
             echo "| Linux 被控端 | ARM64，任意发行版 | [lemon-galaxy-worker-$V-linux-aarch64]($DL/lemon-galaxy-worker-$V-linux-aarch64) |"
