@@ -175,7 +175,8 @@ enum SelfTest {
         fresh.page = .status
         shot("\(prefix)-01-first-run", window: window, host: freshHost)
         fresh.page = .assist
-        shot("\(prefix)-02-assist-no-server", window: window, host: freshHost)
+        fresh.assistServer = MockWorkerHost.demoServer
+        shot("\(prefix)-02-assist-no-account", window: window, host: freshHost)
 
         // 2. 登录三步与报错（窗口内浮层）
         fresh.openLogin()
@@ -217,6 +218,24 @@ enum SelfTest {
         }
         window.contentView = nil
 
+        // 没有账号：填服务器地址 → set_server → 开临时协助
+        let guest = makeModel(settings, preset: false)
+        let guestHost = NSHostingView(rootView: WorkerRootView(model: guest, settings: settings))
+        window.contentView = guestHost
+        guest.page = .assist
+        guest.assistServer = MockWorkerHost.demoServer
+        guest.startAssist()
+        wait("没账号时开临时协助") { guest.status.assist != nil && !guest.assistBusy }
+        if guest.service == nil { problems.append("set_server 后没有接上被控服务") }
+        if guest.hasAccounts { problems.append("没账号的临时协助不应出现账号") }
+        shot("\(prefix)-07-assist-guest", window: window, host: guestHost)
+        guest.openLogin()
+        if guest.loginForm?.serverLocked != false { problems.append("没有账号时登录表单不应锁定服务器地址（可以换服务器）") }
+        if guest.loginForm?.serverInUseOnly != true { problems.append("临时协助在用服务器时登录表单应提示换服务器会结束协助") }
+        shot("\(prefix)-08-login-server-in-use", window: window, host: guestHost)
+        guest.loginForm = nil
+        window.contentView = nil
+
         // 3. 已有两个账号、有人在控制（含 AI）
         let model = makeModel(settings, preset: true)
         let host = NSHostingView(rootView: WorkerRootView(model: model, settings: settings))
@@ -248,6 +267,30 @@ enum SelfTest {
         shot("\(prefix)-16-general", window: window, host: host)
         model.page = .about
         shot("\(prefix)-17-about", window: window, host: host)
+        // 检查更新（模拟内核报告有新版本）→ 下载进度 → 已下载
+        Task { await model.updater.check(manual: true) }
+        wait("检查更新") { if case .available = model.updater.state { return true }; return false }
+        if model.updater.available == nil { problems.append("检查更新后没有记下新版本") }
+        shot("\(prefix)-17a-about-update", window: window, host: host)
+        if let info = model.updater.available {
+            model.updater.state = .downloading(info, done: info.size * 2 / 5, total: info.size)
+            shot("\(prefix)-17b-about-downloading", window: window, host: host)
+            model.updater.state = .available(info)
+            model.updater.download()
+            wait("模拟下载完成") { if case .downloaded = model.updater.state { return true }; return false }
+            shot("\(prefix)-17c-about-downloaded", window: window, host: host)
+            model.updater.reset()
+        }
+        // 断开单个会话
+        if let s = model.status.sessions.first {
+            let before = model.status.sessions.count
+            model.disconnect(s)
+            wait("断开单个会话") { model.status.sessions.count == before - 1 }
+            if let mock = (model.worker as? MockWorkerHost)?.mockService {
+                mock.simulateSession(user: zh ? "王爱丽（alice）" : "Alice Wang (alice)", device: "4f2a9c1d77e04b18a3c5d6e7f8091a2b", ai: true)
+            }
+            wait("被控会话（重连）") { model.status.sessions.count == before }
+        }
         model.setRemoteEnabled(false)
         wait("禁止远程") { !model.status.remoteEnabled }
         model.page = .status
@@ -259,6 +302,15 @@ enum SelfTest {
         wait("被控会话（恢复）") { !model.status.sessions.isEmpty }
         wait("AI 活动（恢复）") { !model.aiActivity.isEmpty }
         window.contentView = nil
+
+        if let alice = model.accounts.first(where: { $0.userId == 7 }) {
+            model.updatePolicy(alice) { $0.notify = false }
+            pump(0.2)
+            if model.noticeSessions.contains(where: { $0.accountId == 7 }) { problems.append("关掉「被控时提示」后提示条仍包含该账号的会话") }
+            if let a = model.accounts.first(where: { $0.userId == 7 }) { model.updatePolicy(a) { $0.notify = true } }
+            pump(0.2)
+            if !model.noticeSessions.contains(where: { $0.accountId == 7 }) { problems.append("打开「被控时提示」后提示条缺少该账号的会话") }
+        }
 
         // 4. 悬浮提示条、协助请求面板、菜单栏图标（独立窗口里的视图）
         shotView("\(prefix)-20-control-banner", model, dark: dark, size: CGSize(width: 380, height: 110)) {

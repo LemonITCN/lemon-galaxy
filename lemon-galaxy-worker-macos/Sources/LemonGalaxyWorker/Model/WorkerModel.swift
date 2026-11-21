@@ -44,6 +44,11 @@ final class WorkerModel: ObservableObject {
     @Published var assistBusy = false
     @Published var notice: String?
     @Published var loginItem = LoginItem.State.notRegistered
+    /// 还没有服务器时，临时协助页里填的服务器地址
+    @Published var assistServer = ""
+    @Published var assistError: String?
+    @Published var disconnecting: Set<String> = []
+    let updater: WorkerUpdater
     private(set) var service: HostService?
     private var listener: WorkerListener?
     private var platform: MacHostPlatform?
@@ -61,6 +66,9 @@ final class WorkerModel: ObservableObject {
         self.settings = settings
         self.selfTest = selfTest
         core = WorkerCore.make(locale: Localization.shared.strings.pack.coreLocale, forceMock: forceMock, mockOptions: mockOptions)
+        updater = WorkerUpdater()
+        updater.model = self
+        assistServer = settings.lastServer
         refreshPermissions()
         loginItem = selfTest ? .notRegistered : LoginItem.state
     }
@@ -71,6 +79,7 @@ final class WorkerModel: ObservableObject {
     var needsPermissions: Bool { !screenGranted || !accessibilityGranted }
     var aiActive: Bool { status.sessions.contains { $0.aiActive } }
     var needsRelogin: Bool { accounts.contains { $0.status == .needsRelogin } }
+    var hasActiveAccount: Bool { accounts.contains { $0.status == .active } }
 
     /// 总状态（菜单栏图标与状态页标题用）
     enum Overall { case starting, noAccount, offline, online, controlled, ai, disabled }
@@ -115,9 +124,9 @@ final class WorkerModel: ObservableObject {
         refresh()
     }
 
-    /// 登录后内核可能刚启动了被控服务：接上回调与平台层
+    /// 登录后内核可能刚启动了被控服务，或换了服务器重启了服务：接上回调与平台层（同一个服务重接也无妨）
     private func attachIfNeeded() {
-        if service == nil, let s = worker.service() { attach(s) }
+        if let s = worker.service() { attach(s) }
     }
 
     func refresh() {
@@ -126,7 +135,7 @@ final class WorkerModel: ObservableObject {
             return
         }
         status = s.status()
-        accounts = s.accounts()
+        accounts = status.accounts
         events = s.recentEvents(limit: 300)
         let live = Set(status.sessions.map(\.id))
         aiActivity = aiActivity.filter { live.contains($0.key) }
@@ -176,14 +185,15 @@ final class WorkerModel: ObservableObject {
 
     // MARK: 会话与账号的对应
 
-    /// 内核给的 from_user 是「显示名（用户名）」或用户名
+    /// 会话所属账号（内核给的 account_id；临时协助没有账号）
     func account(for s: HostSessionInfo) -> HostAccount? {
-        accounts.first { a in s.fromUser == a.username || s.fromUser.hasSuffix("（\(a.username)）") || s.fromUser.hasSuffix("(\(a.username))") }
+        guard let id = s.accountId else { return nil }
+        return accounts.first { $0.userId == id }
     }
 
-    /// 需要提示的会话：临时协助、认不出账号的、账号开了「被控时提示」的
+    /// 需要提示的会话：临时协助、找不到账号的、账号开了「被控时提示」的
     var noticeSessions: [HostSessionInfo] {
-        status.sessions.filter { s in s.mode == .assist || (account(for: s)?.policy.notify ?? true) }
+        status.sessions.filter { s in account(for: s)?.policy.notify ?? true }
     }
 
     // MARK: 操作
@@ -194,15 +204,40 @@ final class WorkerModel: ObservableObject {
     }
 
     func disconnectAll() { service?.disconnectAll(); aiActivity = [:]; refresh() }
+
+    /// 断开一个会话
+    func disconnect(_ s: HostSessionInfo) {
+        guard let service else { return }
+        disconnecting.insert(s.id)
+        if !service.disconnectSession(id: s.id) { show(notice: L("status.sessionGone")) }
+        aiActivity[s.id] = nil
+        disconnecting.remove(s.id)
+        refresh()
+    }
     func stopAi() { service?.stopAi(); aiActivity = [:]; refresh() }
 
+    /// 开启临时协助。还没有被控服务（全新安装、没登录过账号）时先用填的服务器地址 set_server。
     func startAssist() {
-        guard let service, !assistBusy else { return }
+        guard !assistBusy else { return }
+        assistError = nil
+        let server = assistServer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if service == nil {
+            guard LoginForm.looksLikeServer(server) else { assistError = L("login.server.invalid"); return }
+        }
         assistBusy = true
         Task {
-            do { _ = try await service.startAssist() } catch { show(notice: describeError(error)) }
-            assistBusy = false
-            refresh()
+            defer { assistBusy = false; refresh() }
+            do {
+                if service == nil {
+                    guard let s = try await worker.setServer(server: server) else { throw GalaxyError.Other(detail: L("assist.serverFailed")) }
+                    settings.lastServer = server
+                    attach(s)
+                }
+                guard let s = service else { return }
+                _ = try await s.startAssist()
+            } catch {
+                assistError = describeError(error)
+            }
         }
     }
 
@@ -241,7 +276,9 @@ final class WorkerModel: ObservableObject {
         let f = LoginForm()
         if let server = serverAddress {
             f.server = server
+            // 已有账号时所有账号必须在同一台服务器上；只有临时协助在用时可以换（会结束协助、按新服务器重启被控服务）
             f.serverLocked = hasAccounts
+            f.serverInUseOnly = !hasAccounts && service != nil
         } else {
             f.server = settings.lastServer
         }
@@ -320,16 +357,14 @@ final class WorkerModel: ObservableObject {
     // MARK: 回调（主线程）
 
     func received(status s: HostStatus) {
-        // 内核经 on_status 推来的 HostStatus 不带账号列表（accounts 为空），账号要另外向 HostService 取
-        var st = s
-        let accs = service?.accounts() ?? accounts
-        st.accounts = accs
-        status = st
-        accounts = accs
+        status = s
+        accounts = s.accounts
         events = service?.recentEvents(limit: 300) ?? events
         let live = Set(s.sessions.map(\.id))
         aiActivity = aiActivity.filter { live.contains($0.key) }
         UIHooks.update(self)
+        // 上线后每天最多自动检查一次更新
+        if s.online && hasActiveAccount { updater.autoCheckIfDue() }
     }
 
     func assistRequested(id: String, user: String, device: String) {
@@ -353,7 +388,7 @@ final class WorkerModel: ObservableObject {
     func sessionStarted(_ info: HostSessionInfo) {
         refresh()
         guard !selfTest, settings.systemNotifications else { return }
-        if info.mode == .assist || (account(for: info)?.policy.notify ?? true) {
+        if account(for: info)?.policy.notify ?? true {
             Notifier.post(title: L("notify.connected.title"), body: L("notify.connected.body", info.fromUser, Self.shortDevice(info.fromDevice)))
         }
     }
@@ -391,6 +426,8 @@ final class LoginForm: ObservableObject, Identifiable {
     @Published var step: Step = .credentials
     @Published var server = ""
     @Published var serverLocked = false
+    /// 没有账号、但临时协助等已经在用这台服务器（可以换，换了会结束协助）
+    @Published var serverInUseOnly = false
     @Published var username = ""
     @Published var password = ""
     @Published var totp = ""

@@ -223,7 +223,7 @@ struct LoginFormView: View {
     private var credentials: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
-                label(loc("login.server"), info: form.serverLocked ? loc("login.server.locked") : loc("login.server.info"))
+                label(loc("login.server"), info: loc(form.serverLocked ? "login.server.locked" : form.serverInUseOnly ? "login.server.inUse" : "login.server.info"))
                 TextField("host:7443#sha256-…", text: $form.server)
                     .font(.system(size: 12, design: .monospaced))
                     .fieldStyle(invalid: !form.server.isEmpty && !LoginForm.looksLikeServer(form.server.trimmingCharacters(in: .whitespacesAndNewlines)))

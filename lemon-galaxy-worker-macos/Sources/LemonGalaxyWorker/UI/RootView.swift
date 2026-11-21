@@ -178,6 +178,8 @@ struct Sidebar: View {
             else if model.status.assist != nil { Circle().fill(p.success).frame(width: 7, height: 7) }
         case .permissions:
             if model.needsPermissions { Image(systemName: "exclamationmark.circle.fill").font(.system(size: 12)).foregroundStyle(p.warning) }
+        case .about:
+            if model.updater.available != nil { Circle().fill(p.danger).frame(width: 7, height: 7) }
         default: EmptyView()
         }
     }

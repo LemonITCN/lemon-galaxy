@@ -63,7 +63,13 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             menu.addItem(make(L("assist.request.deny"), #selector(denyAssist)))
         }
         menu.addItem(.separator())
-        if !s.sessions.isEmpty { menu.addItem(make(L("status.disconnectAll"), #selector(disconnect))) }
+        // 每个会话单独断开；多于一个时再给「全部断开」
+        for sess in s.sessions {
+            let i = make(L("menu.disconnectOne", sess.fromUser.isEmpty ? L("status.anonymous") : sess.fromUser), #selector(disconnectOne(_:)))
+            i.representedObject = sess.id
+            menu.addItem(i)
+        }
+        if s.sessions.count > 1 { menu.addItem(make(L("status.disconnectAll"), #selector(disconnect))) }
         if m.aiActive { menu.addItem(make(L("status.stopAi"), #selector(stopAi))) }
         let toggle = make(L("status.allowRemote"), #selector(toggleRemote))
         toggle.state = s.remoteEnabled ? .on : .off
@@ -74,6 +80,10 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             menu.addItem(make(L("assist.stop"), #selector(stopAssist)))
         } else if m.service != nil {
             menu.addItem(make(L("menu.startAssist"), #selector(startAssist)))
+        }
+        if let u = m.updater.available {
+            menu.addItem(.separator())
+            menu.addItem(make(L("menu.updateAvailable", u.version), #selector(openUpdate)))
         }
         menu.addItem(.separator())
         let settings = make(L("menu.settings"), #selector(openSettings))
@@ -109,6 +119,11 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     private var delegate: AppDelegate? { NSApp.delegate as? AppDelegate }
 
     @objc private func disconnect() { model?.disconnectAll() }
+    @objc private func disconnectOne(_ sender: NSMenuItem) {
+        guard let m = model, let id = sender.representedObject as? String, let s = m.status.sessions.first(where: { $0.id == id }) else { return }
+        m.disconnect(s)
+    }
+    @objc private func openUpdate() { model?.page = .about; delegate?.showSettings() }
     @objc private func stopAi() { model?.stopAi() }
     @objc private func toggleRemote() { guard let m = model else { return }; m.setRemoteEnabled(!m.status.remoteEnabled) }
     @objc private func allowAssist() { model?.respond(true) }
@@ -198,8 +213,8 @@ struct ControlBannerView: View {
                     }
                 }
                 Spacer(minLength: 8)
-                Button { model.disconnectAll() } label: {
-                    Text(loc("banner.disconnect")).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.white)
+                Button { if sessions.count == 1 { model.disconnect(sessions[0]) } else { model.disconnectAll() } } label: {
+                    Text(loc(sessions.count == 1 ? "banner.disconnect" : "banner.disconnectAll")).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.white)
                         .padding(.horizontal, 9).frame(height: 22)
                         .background(RoundedRectangle(cornerRadius: 6).fill(p.danger))
                 }

@@ -17,6 +17,8 @@ final class WorkerSettings: ObservableObject {
     @Published var assistSound: Bool = true { didSet { save("assistSound", assistSound) } }
     @Published var lastServer: String = "" { didSet { save("lastServer", lastServer) } }
     @Published var lastUsername: String = "" { didSet { save("lastUsername", lastUsername) } }
+    /// 上次自动检查更新的时间（秒）
+    @Published var lastUpdateCheck: Double = 0 { didSet { save("lastUpdateCheck", lastUpdateCheck) } }
 
     /// 界面配色固定为 galaxy（与主控端默认一致）；被控端不提供换配色
     let palette = "galaxy"
@@ -33,6 +35,7 @@ final class WorkerSettings: ObservableObject {
         assistSound = b("assistSound") ?? assistSound
         lastServer = s("lastServer") ?? lastServer
         lastUsername = s("lastUsername") ?? lastUsername
+        lastUpdateCheck = defaults.object(forKey: "lastUpdateCheck") as? Double ?? lastUpdateCheck
     }
 
     private func save(_ key: String, _ value: Any) {

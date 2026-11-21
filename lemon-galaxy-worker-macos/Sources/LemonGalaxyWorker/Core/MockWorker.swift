@@ -84,7 +84,11 @@ final class MockWorkerHost: WorkerHost, @unchecked Sendable {
         let lower = username.lowercased()
         if lower.contains("totp") && (totp ?? "").isEmpty { return .needTotp }
         if lower.contains("new") && (newPassword ?? "").isEmpty { return .mustChangePassword }
-        lock.locked { serverAddr = addr }
+        // 与真内核一致：没有账号时换服务器，旧服务停掉、按新服务器重新启动
+        lock.locked {
+            if let cur = serverAddr, cur != addr { mock = nil }
+            serverAddr = addr
+        }
         let s = ensureService()
         let existing = s.accounts().first { $0.username.caseInsensitiveCompare(username) == .orderedSame }
         let uid = existing?.userId ?? lock.locked { () -> UInt64 in nextUserId += 1; return nextUserId }
@@ -98,6 +102,50 @@ final class MockWorkerHost: WorkerHost, @unchecked Sendable {
     override func logout(userId: UInt64) async throws {
         await delay(300)
         mockService?.removeAccount(userId: userId)
+    }
+
+    override func setServer(server: String) async throws -> HostService? {
+        await delay(300)
+        let addr = server.trimmingCharacters(in: .whitespaces)
+        guard addr.contains("#sha256-") else {
+            throw GalaxyError.Auth(code: "bad_server", detail: zh ? "服务器地址格式不对：应为 主机:端口#sha256-指纹" : "Invalid server address: expected host:port#sha256-fingerprint")
+        }
+        if let cur = lock.locked({ serverAddr }), cur != addr, !(mock?.accounts().isEmpty ?? true) {
+            throw GalaxyError.Other(detail: zh ? "已登录的账号在另一台服务器上，更换服务器前请先退出这些账号" : "Signed-in accounts are on another server. Sign them out before changing servers.")
+        }
+        lock.locked {
+            if let cur = serverAddr, cur != addr { mock = nil }
+            serverAddr = addr
+        }
+        return ensureService()
+    }
+
+    /// 演示用：当前版本低于 0.2.0 时报告有新版本
+    static let demoUpdate = UpdateInfo(version: "0.2.0.48", fileName: "LemonGalaxyWorker-0.2.0.48-macOS.dmg", size: 16_384_000,
+                                       sha256: String(repeating: "ab", count: 32), url: "/updates/files/LemonGalaxyWorker-0.2.0.48-macOS.dmg", notes: "")
+
+    override func checkUpdate(platform: String, current: String) async throws -> UpdateInfo? {
+        await delay(500)
+        guard !(mock?.accounts().filter { $0.status == .active }.isEmpty ?? true) else {
+            throw GalaxyError.Other(detail: zh ? "没有可用的账号" : "No active account")
+        }
+        var info = Self.demoUpdate
+        info.notes = zh ? "- 会话可以单独断开\n- 没登录账号也能开临时协助\n- 关于页可以检查更新并下载安装包" : "- Disconnect a single session\n- Assistance works without an account\n- Check for updates from About"
+        return current.compare("0.2.0", options: .numeric) == .orderedAscending ? info : nil
+    }
+
+    /// 演示下载：只报进度，不写文件
+    override func downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener) {
+        let total = info.size
+        let steps: UInt64 = 20
+        let interval = 0.12 * options.latencyScale
+        DispatchQueue.global().async {
+            for i in 1...steps {
+                if interval > 0 { Thread.sleep(forTimeInterval: interval) }
+                listener.onProgress(done: total * i / steps, total: total)
+            }
+            listener.onFinished(error: nil)
+        }
     }
 }
 
@@ -146,9 +194,7 @@ final class MockWorkerService: HostService, @unchecked Sendable {
     }
 
     private func notify() {
-        // 与真内核一致：on_status 推来的 HostStatus 不带账号列表
-        var s = status()
-        s.accounts = []
+        let s = status()
         let l = lock.locked { listener }
         queue.async { l?.onStatus(status: s) }
     }
@@ -169,8 +215,8 @@ final class MockWorkerService: HostService, @unchecked Sendable {
         let (name, ended) = lock.locked { () -> (String, [HostSessionInfo]) in
             let n = accountList.first { $0.userId == userId }?.username ?? ""
             accountList.removeAll { $0.userId == userId }
-            let e = sessions.filter { $0.fromUser == n }
-            sessions.removeAll { $0.fromUser == n }
+            let e = sessions.filter { $0.accountId == userId }
+            sessions.removeAll { $0.accountId == userId }
             return (n, e)
         }
         log("policy", "", zh ? "本机退出了账号 \(name)" : "Signed out \(name) on this Mac")
@@ -212,6 +258,19 @@ final class MockWorkerService: HostService, @unchecked Sendable {
         let l = lock.locked { listener }
         for s in ended { queue.async { l?.onSessionEnded(sessionId: s.id) } }
         notify()
+    }
+
+    override func disconnectSession(id: String) -> Bool {
+        let ended = lock.locked { () -> HostSessionInfo? in
+            guard let i = sessions.firstIndex(where: { $0.id == id }) else { return nil }
+            return sessions.remove(at: i)
+        }
+        guard let s = ended else { return false }
+        log("disconnect", s.fromUser, zh ? "本机断开了 \(s.fromUser) 的连接" : "Disconnected \(s.fromUser) locally")
+        let l = lock.locked { listener }
+        queue.async { l?.onSessionEnded(sessionId: id) }
+        notify()
+        return true
     }
 
     override func disconnectAll() {
@@ -273,10 +332,11 @@ final class MockWorkerService: HostService, @unchecked Sendable {
         queue.async { l?.onAssistRequest(requestId: "ar-1", fromUser: "bob (Bob Li)", fromDevice: "BOB-THINKPAD") }
     }
 
-    func simulateSession(user: String = "alice", device: String = "OFFICE-PC-07", mode: ConnMode = .control, ai: Bool) {
+    func simulateSession(user: String = "alice", device: String = "OFFICE-PC-07", mode: ConnMode = .control, ai: Bool, accountId: UInt64? = 7) {
         guard lock.locked({ remoteEnabled }) else { return }
+        let account = mode == .assist ? nil : lock.locked { accountList.first { $0.userId == accountId }?.userId ?? accountList.first?.userId }
         let info = HostSessionInfo(id: "hs-" + UUID().uuidString.prefix(6), fromUser: user, fromDevice: device, mode: mode,
-                                   path: mode == .assist ? .relayUdp : .lan, startedAt: Clock.nowMs - 4 * 60_000, aiActive: ai)
+                                   path: mode == .assist ? .relayUdp : .lan, startedAt: Clock.nowMs - 4 * 60_000, aiActive: ai, accountId: account)
         lock.locked { sessions.append(info) }
         log("connect", user, ai: ai, zh ? "\(user) 从 \(device) 连接" : "\(user) connected from \(device)")
         let l = lock.locked { listener }

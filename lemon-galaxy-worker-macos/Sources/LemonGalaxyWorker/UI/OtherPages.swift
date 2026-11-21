@@ -13,14 +13,27 @@ struct AssistPage: View {
             PageTitle(text: loc("page.assist"), info: loc("assist.info"))
             if let r = model.pendingRequest { AssistRequestView(request: r) }
             if model.service == nil {
+                // 全新安装、没登录过账号：先填服务器地址，set_server 后再开协助
                 Card {
-                    HStack(spacing: 14) {
-                        Image(systemName: "server.rack").font(.system(size: 24, weight: .light)).foregroundStyle(p.tertiaryText)
-                        Text(loc("assist.needServer")).font(.system(size: 13)).foregroundStyle(p.secondaryText)
-                        InfoButton(text: loc("assist.needServer.info"))
-                        Spacer()
-                        Button(loc("accounts.signIn")) { model.openLogin() }.buttonStyle(PrimaryButtonStyle())
-                            .disabled(model.serviceStarting)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "person.line.dotted.person").font(.system(size: 22, weight: .light)).foregroundStyle(p.accent)
+                            Text(loc("assist.noAccount")).font(.system(size: 13)).foregroundStyle(p.secondaryText)
+                            InfoButton(text: loc("assist.noAccount.info"))
+                            Spacer()
+                        }
+                        HStack(spacing: 8) {
+                            Text(loc("login.server")).font(.system(size: 12.5)).foregroundStyle(p.secondaryText)
+                            InfoButton(text: loc("login.server.info"))
+                            TextField("host:7443#sha256-…", text: $model.assistServer)
+                                .font(.system(size: 12, design: .monospaced))
+                                .fieldStyle(invalid: !model.assistServer.isEmpty && !LoginForm.looksLikeServer(model.assistServer.trimmingCharacters(in: .whitespacesAndNewlines)))
+                                .onSubmit { model.startAssist() }
+                            if model.assistBusy { ProgressView().controlSize(.small) }
+                            Button(loc("assist.start")) { model.startAssist() }.buttonStyle(PrimaryButtonStyle())
+                                .disabled(model.assistBusy || model.serviceStarting || model.assistServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                        }
+                        assistErrorLine
                     }
                 }
             } else if let a = model.status.assist {
@@ -64,9 +77,28 @@ struct AssistPage: View {
                             .disabled(model.assistBusy || !model.status.remoteEnabled)
                     }
                 }
+                if !model.hasAccounts, let server = model.serverAddress {
+                    HStack(spacing: 6) {
+                        Image(systemName: "server.rack").font(.system(size: 11)).foregroundStyle(p.tertiaryText)
+                        Text(loc("assist.viaServer", server.split(separator: "#").first.map(String.init) ?? server))
+                            .font(.system(size: 12)).foregroundStyle(p.tertiaryText)
+                        InfoButton(text: loc("assist.viaServer.info"))
+                    }
+                }
+                assistErrorLine
                 if !model.status.remoteEnabled {
                     Label(loc("assist.remoteDisabled"), systemImage: "hand.raised.fill").font(.system(size: 12)).foregroundStyle(p.danger)
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var assistErrorLine: some View {
+        if let e = model.assistError {
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(p.danger)
+                Text(e).font(.system(size: 12)).foregroundStyle(p.danger).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -275,16 +307,11 @@ struct AboutPage: View {
                     row(loc("about.dataDir"), AppInfo.dataDir.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"), last: true)
                 }
             }
-            SectionLabel(text: loc("about.update"))
-            Card {
-                HStack(spacing: 12) {
-                    Image(systemName: "arrow.down.circle").font(.system(size: 18)).foregroundStyle(p.accent)
-                    Text(loc("about.update.title")).font(.system(size: 13))
-                    InfoButton(text: loc("about.update.body"))
-                    Spacer()
-                    Button(loc("about.update.open")) { NSWorkspace.shared.open(AppInfo.releasesURL) }.buttonStyle(SecondaryButtonStyle())
-                }
+            HStack(spacing: 4) {
+                SectionLabel(text: loc("about.update"))
+                InfoButton(text: loc("update.info"))
             }
+            UpdateCard(updater: model.updater)
             HStack(spacing: 14) {
                 Button(loc("about.source")) { NSWorkspace.shared.open(AppInfo.repoURL) }.buttonStyle(.plain).foregroundStyle(p.accent)
                 Text("·").foregroundStyle(p.tertiaryText)
@@ -305,6 +332,132 @@ struct AboutPage: View {
             }
             .padding(.horizontal, 16).frame(height: 36)
             if !last { Rectangle().fill(p.separator).frame(height: 1).padding(.leading, 16) }
+        }
+    }
+}
+
+// MARK: - 软件更新卡片
+
+struct UpdateCard: View {
+    @ObservedObject var updater: WorkerUpdater
+    @EnvironmentObject var model: WorkerModel
+    @Environment(\.palette) var p
+    @Environment(\.loc) var loc
+
+    var body: some View {
+        Card {
+            switch updater.state {
+            case .available(let info): available(info)
+            case .downloading(let info, let done, let total): downloading(info, done: done, total: total)
+            case .downloaded(let info, _): downloaded(info)
+            default: summary
+            }
+        }
+    }
+
+    /// 当前版本 + 检查按钮（含检查中、已是最新、失败）
+    private var summary: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).font(.system(size: 18)).foregroundStyle(iconColor)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(isFailed ? p.danger : p.text)
+                if let d = updater.lastChecked {
+                    Text(loc("update.lastChecked", Fmt.date(Int64(d.timeIntervalSince1970 * 1000), zh: loc.isChinese)))
+                        .font(.system(size: 11.5)).foregroundStyle(p.tertiaryText)
+                }
+            }
+            Spacer()
+            if updater.state == .checking { ProgressView().controlSize(.small) }
+            Button(loc("update.releases")) { NSWorkspace.shared.open(AppInfo.releasesURL) }.buttonStyle(.plain)
+                .font(.system(size: 12)).foregroundStyle(p.accent)
+            Button(loc("update.check")) { Task { await updater.check(manual: true) } }
+                .buttonStyle(SecondaryButtonStyle())
+                .disabled(updater.busy || !model.hasActiveAccount)
+                .help(model.hasActiveAccount ? "" : loc("update.needAccount"))
+        }
+    }
+
+    private var isFailed: Bool { if case .failed = updater.state { return true }; return false }
+
+    private var title: String {
+        switch updater.state {
+        case .checking: return loc("update.checking")
+        case .upToDate: return loc("update.upToDate", AppInfo.version)
+        case .failed(let m): return m
+        default: return model.hasActiveAccount ? loc("update.idle", AppInfo.version) : loc("update.needAccount")
+        }
+    }
+
+    private var icon: String {
+        switch updater.state {
+        case .upToDate: return "checkmark.circle"
+        case .failed: return "exclamationmark.circle"
+        default: return "arrow.down.circle"
+        }
+    }
+
+    private var iconColor: Color {
+        switch updater.state {
+        case .upToDate: return p.success
+        case .failed: return p.danger
+        default: return p.accent
+        }
+    }
+
+    private func header(_ info: UpdateInfo) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill").font(.system(size: 20)).foregroundStyle(p.accent)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(loc("update.title")).font(.system(size: 13.5, weight: .semibold))
+                Text(loc("update.versions", AppInfo.version, info.version)).font(.system(size: 12).monospacedDigit()).foregroundStyle(p.secondaryText)
+            }
+            Spacer()
+            Text(Fmt.bytes(info.size)).font(.system(size: 11.5).monospacedDigit()).foregroundStyle(p.tertiaryText)
+        }
+    }
+
+    private func available(_ info: UpdateInfo) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header(info)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(loc("update.notes")).font(.system(size: 11.5, weight: .medium)).foregroundStyle(p.secondaryText)
+                Text(info.notes.isEmpty ? loc("update.noNotes") : info.notes)
+                    .font(.system(size: 12.5)).foregroundStyle(info.notes.isEmpty ? p.tertiaryText : p.text)
+                    .fixedSize(horizontal: false, vertical: true).lineLimit(12).textSelection(.enabled)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8).fill(p.elevated))
+            HStack(spacing: 8) {
+                Label(loc("update.verified"), systemImage: "checkmark.shield").font(.system(size: 11.5)).foregroundStyle(p.success)
+                Spacer()
+                Button(loc("update.recheck")) { Task { await updater.check(manual: true) } }.buttonStyle(SecondaryButtonStyle())
+                Button(loc("update.download")) { updater.download() }.buttonStyle(PrimaryButtonStyle())
+            }
+        }
+    }
+
+    private func downloading(_ info: UpdateInfo, done: UInt64, total: UInt64) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header(info)
+            ProgressView(value: Double(done), total: Double(max(total, 1))).progressViewStyle(.linear).tint(p.accent)
+            Text(loc("update.downloading", Fmt.bytes(done), Fmt.bytes(total))).font(.system(size: 11.5).monospacedDigit()).foregroundStyle(p.secondaryText)
+        }
+    }
+
+    private func downloaded(_ info: UpdateInfo) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header(info)
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(p.success)
+                Text(loc("update.downloaded", info.fileName)).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button(loc("update.reveal")) { updater.revealDownloaded() }.buttonStyle(SecondaryButtonStyle())
+                Button(loc("update.done")) { updater.reset() }.buttonStyle(PrimaryButtonStyle())
+            }
         }
     }
 }

@@ -175,7 +175,12 @@ struct StatusPage: View {
                     .foregroundStyle(s.aiActive ? p.warning : p.accent)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(s.fromUser.isEmpty ? loc("status.anonymous") : s.fromUser).font(.system(size: 13, weight: .medium))
+                HStack(spacing: 6) {
+                    Text(s.fromUser.isEmpty ? loc("status.anonymous") : s.fromUser).font(.system(size: 13, weight: .medium))
+                    if let a = model.account(for: s), !a.policy.notify {
+                        Image(systemName: "bell.slash").font(.system(size: 10.5)).foregroundStyle(p.tertiaryText).help(loc("status.quietAccount"))
+                    }
+                }
                 HStack(spacing: 6) {
                     Image(systemName: "desktopcomputer").font(.system(size: 10)).foregroundStyle(p.tertiaryText)
                     Text(WorkerModel.shortDevice(s.fromDevice)).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(p.secondaryText)
@@ -189,8 +194,11 @@ struct StatusPage: View {
                 }
             }
             Spacer()
-            VStack(alignment: .trailing, spacing: 3) {
+            VStack(alignment: .trailing, spacing: 6) {
                 Text(loc("status.since", Fmt.time(s.startedAt))).font(.system(size: 11).monospacedDigit()).foregroundStyle(p.tertiaryText)
+                Button(loc("status.disconnect")) { model.disconnect(s) }
+                    .buttonStyle(SecondaryButtonStyle(destructive: true))
+                    .disabled(model.disconnecting.contains(s.id))
             }
         }
         .padding(12)

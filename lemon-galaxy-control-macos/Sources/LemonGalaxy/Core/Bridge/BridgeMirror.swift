@@ -232,10 +232,17 @@ public struct CoreConfig: Equatable, Hashable {
     public var osVersion: String
     public var hostname: String
     public var locale: String
+    /**
+     * control 客户端是否在进程内跑本机被控（Mac 是；Windows 主控端由系统服务被控，设为 false）
+     */
+    public var hostEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(dataDir: String, cacheDir: String, logLevel: String, platform: Platform, deviceKind: DeviceKind, appVersion: String, osVersion: String, hostname: String, locale: String) {
+    public init(dataDir: String, cacheDir: String, logLevel: String, platform: Platform, deviceKind: DeviceKind, appVersion: String, osVersion: String, hostname: String, locale: String, 
+        /**
+         * control 客户端是否在进程内跑本机被控（Mac 是；Windows 主控端由系统服务被控，设为 false）
+         */hostEnabled: Bool = true) {
         self.dataDir = dataDir
         self.cacheDir = cacheDir
         self.logLevel = logLevel
@@ -245,6 +252,7 @@ public struct CoreConfig: Equatable, Hashable {
         self.osVersion = osVersion
         self.hostname = hostname
         self.locale = locale
+        self.hostEnabled = hostEnabled
     }
 
     
@@ -562,10 +570,17 @@ public struct HostSessionInfo: Equatable, Hashable {
     public var path: PathKind
     public var startedAt: Int64
     public var aiActive: Bool
+    /**
+     * 连进来的账号（临时协助时为空）
+     */
+    public var accountId: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, fromUser: String, fromDevice: String, mode: ConnMode, path: PathKind, startedAt: Int64, aiActive: Bool) {
+    public init(id: String, fromUser: String, fromDevice: String, mode: ConnMode, path: PathKind, startedAt: Int64, aiActive: Bool, 
+        /**
+         * 连进来的账号（临时协助时为空）
+         */accountId: UInt64? = nil) {
         self.id = id
         self.fromUser = fromUser
         self.fromDevice = fromDevice
@@ -573,6 +588,7 @@ public struct HostSessionInfo: Equatable, Hashable {
         self.path = path
         self.startedAt = startedAt
         self.aiActive = aiActive
+        self.accountId = accountId
     }
 
     
@@ -1991,6 +2007,11 @@ public protocol HostServiceProtocol: AnyObject, Sendable {
     
     func disconnectAll() 
     
+    /**
+     * 断开一个会话（status().sessions 里的 id）。
+     */
+    func disconnectSession(id: String)  -> Bool
+    
     func recentEvents(limit: UInt32)  -> [HostEvent]
     
     func respondAssist(requestId: String, allow: Bool) 
@@ -2228,7 +2249,17 @@ public protocol VideoSink: AnyObject, Sendable {
 
 public protocol WorkerHostProtocol: AnyObject, Sendable {
     
+    /**
+     * 检查被控端新版本（用任一有效账号的登录令牌访问服务器）。返回前已验发布签名。
+     */
+    func checkUpdate(platform: String, current: String) async throws  -> UpdateInfo?
+    
     func deviceId()  -> String
+    
+    /**
+     * 下载新版本到本地文件并核对 SHA-256，进度与结果经 listener。
+     */
+    func downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener) 
     
     /**
      * 登录一个账号。`system_user` 为空时用当前系统用户。所有账号必须在同一台服务器上。
@@ -2246,6 +2277,11 @@ public protocol WorkerHostProtocol: AnyObject, Sendable {
     func server()  -> String?
     
     func service()  -> HostService?
+    
+    /**
+     * 还没登录账号时先设服务器地址（全新安装也能开临时协助）。已有账号时只能是同一台服务器。
+     */
+    func setServer(server: String) async throws  -> HostService?
     
     /**
      * 启动被控服务（有账号时）。应用启动时调一次；之后的状态从返回的 HostService 读。
@@ -2353,6 +2389,7 @@ open class HostService: HostServiceProtocol, @unchecked Sendable {
     required public init(unsafeFromHandle handle: UInt64) {}
     open func accounts()  -> [HostAccount] { bridgeUnimplemented() }
     open func disconnectAll() { bridgeUnimplemented() }
+    open func disconnectSession(id: String)  -> Bool { bridgeUnimplemented() }
     open func recentEvents(limit: UInt32)  -> [HostEvent] { bridgeUnimplemented() }
     open func respondAssist(requestId: String, allow: Bool) { bridgeUnimplemented() }
     open func setAssistCode(code: String?) { bridgeUnimplemented() }
@@ -2447,11 +2484,14 @@ open class WorkerHost: WorkerHostProtocol, @unchecked Sendable {
     public struct NoHandle { public init() {} }
     public init(noHandle: NoHandle) {}
     required public init(unsafeFromHandle handle: UInt64) {}
+    open func checkUpdate(platform: String, current: String) async throws  -> UpdateInfo? { bridgeUnimplemented() }
     open func deviceId()  -> String { bridgeUnimplemented() }
+    open func downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener) { bridgeUnimplemented() }
     open func login(server: String, username: String, password: String, totp: String?, newPassword: String?, systemUser: String?) async throws  -> WorkerLoginResult { bridgeUnimplemented() }
     open func logout(userId: UInt64) async throws { bridgeUnimplemented() }
     open func server()  -> String? { bridgeUnimplemented() }
     open func service()  -> HostService? { bridgeUnimplemented() }
+    open func setServer(server: String) async throws  -> HostService? { bridgeUnimplemented() }
     open func start() async throws  -> HostService? { bridgeUnimplemented() }
 }
 #endif
