@@ -155,6 +155,8 @@ export interface Device {
   online: boolean
   last_seen_at: number
   last_ip: string
+  /** 网卡 MAC（远程开机用），老版本被控端没有 */
+  macs?: string[]
   assist_mode: boolean
   accounts: DeviceAccount[]
   created_at: number

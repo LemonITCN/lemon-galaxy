@@ -108,6 +108,8 @@ function goUser(id: number) {
         </dd>
         <dt>{{ t('devices.lastIp') }}</dt>
         <dd class="mono">{{ dev.last_ip || '—' }}</dd>
+        <dt>{{ t('devices.macs') }}</dt>
+        <dd class="mono">{{ dev.macs && dev.macs.length ? dev.macs.join(', ') : '—' }}</dd>
         <dt>{{ t('devices.assistMode') }}</dt>
         <dd>{{ dev.assist_mode ? t('common.yes') : t('common.no') }}</dd>
         <dt>{{ t('devices.createdAt') }}</dt>

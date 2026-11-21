@@ -316,6 +316,7 @@ const messages = {
     status: '状态',
     lastSeenAt: '最近在线',
     lastIp: '最近 IP',
+    macs: '网卡地址',
     createdAt: '首次登记',
     assistMode: '临时协助模式',
     accounts: '账号绑定',

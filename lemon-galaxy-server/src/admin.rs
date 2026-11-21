@@ -845,7 +845,7 @@ async fn put_grants(State(st): State<St>, Admin(s): Admin, Path(id): Path<i64>, 
 
 // ---------------- 设备 ----------------
 
-const DEVICE_COLS: &str = "id, kind, platform, os_version, arch, hostname, app_version, last_seen_at, last_ip, created_at";
+const DEVICE_COLS: &str = "id, kind, platform, os_version, arch, hostname, app_version, last_seen_at, last_ip, created_at, macs";
 
 fn device_from_row(r: &Row) -> r2d2_sqlite::rusqlite::Result<(Vec<u8>, Value)> {
     let id: Vec<u8> = r.get(0)?;
@@ -862,6 +862,7 @@ fn device_from_row(r: &Row) -> r2d2_sqlite::rusqlite::Result<(Vec<u8>, Value)> {
             "last_seen_at": r.get::<_, i64>(7)?,
             "last_ip": r.get::<_, String>(8)?,
             "created_at": r.get::<_, i64>(9)?,
+            "macs": r.get::<_, String>(10)?.split(',').filter(|m| !m.is_empty()).collect::<Vec<_>>(),
         }),
     ))
 }

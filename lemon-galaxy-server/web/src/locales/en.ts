@@ -316,6 +316,7 @@ const messages: Messages = {
     status: 'Status',
     lastSeenAt: 'Last seen',
     lastIp: 'Last IP',
+    macs: 'MAC addresses',
     createdAt: 'First registered',
     assistMode: 'Quick assist mode',
     accounts: 'Account bindings',
