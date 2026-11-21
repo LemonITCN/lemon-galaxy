@@ -101,12 +101,21 @@ struct Inner {
     bind_waiters: Mutex<HashMap<[u8; 12], oneshot::Sender<SocketAddr>>>,
     lan_tx: Mutex<Option<mpsc::UnboundedSender<(LanReply, SocketAddr)>>>,
     next_virt: AtomicU16,
+    /// 关闭后收包循环退出（最后一个引用放掉时 UDP 端口随之释放）
+    closed: watch::Sender<bool>,
 }
 
 /// 魔法套接字。`Arc<MagicSock>` 交给 quinn 作为 UDP 套接字。
 pub struct MagicSock {
     inner: Arc<Inner>,
     local_port: u16,
+}
+
+impl Drop for MagicSock {
+    fn drop(&mut self) {
+        // 收包循环自己也拿着 Inner，不通知它就永远不退出、端口也不释放
+        let _ = self.inner.closed.send(true);
+    }
 }
 
 impl fmt::Debug for MagicSock {
@@ -174,9 +183,15 @@ impl MagicSock {
             bind_waiters: Default::default(),
             lan_tx: Default::default(),
             next_virt: AtomicU16::new(1),
+            closed: watch::channel(false).0,
         });
         tokio::spawn(recv_loop(inner.clone()));
         Ok(Arc::new(Self { inner, local_port }))
+    }
+
+    /// 停止收包。之后这个套接字不再处理任何数据包（被控服务停止时用）。
+    pub fn close(&self) {
+        let _ = self.inner.closed.send(true);
     }
 
     pub fn port(&self) -> u16 {
@@ -622,8 +637,16 @@ fn handle_from_peer_relay(inner: &Arc<Inner>, peer: &Arc<Peer>, payload: &[u8], 
 
 async fn recv_loop(inner: Arc<Inner>) {
     let mut buf = vec![0u8; 65536];
+    let mut closed = inner.closed.subscribe();
     loop {
-        let (n, from) = match inner.sock.recv_from(&mut buf).await {
+        if *closed.borrow() {
+            return;
+        }
+        let r = tokio::select! {
+            r = inner.sock.recv_from(&mut buf) => r,
+            _ = closed.changed() => continue,
+        };
+        let (n, from) = match r {
             Ok(x) => x,
             Err(e) => {
                 // Windows 上收到 ICMP 端口不可达会报 ConnectionReset，忽略即可

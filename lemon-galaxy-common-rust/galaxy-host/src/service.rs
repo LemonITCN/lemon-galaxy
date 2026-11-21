@@ -114,6 +114,10 @@ pub struct HostService {
     pub platform: RwLock<Arc<dyn HostPlatform>>,
     /// 开着隐私屏的会话
     pub privacy_owner: parking_lot::Mutex<Option<String>>,
+    /// 已停止（换服务器等）：不再重连信令
+    stopped: std::sync::atomic::AtomicBool,
+    /// 通知局域网发现监听退出
+    lan_stop: watch::Sender<bool>,
     pub events: RwLock<Arc<dyn HostEvents>>,
     assist_active: Mutex<Option<String>>,
     public_ip: RwLock<String>,
@@ -141,6 +145,7 @@ impl HostService {
         let ep = galaxy_net::quic::endpoint(ms.clone(), true)?;
         let lan_keys = Arc::new(RwLock::new(state.active().map(|a| galaxy_crypto::lan_key(&a.account_pubkey)).collect()));
         let (ai_stop, _) = watch::channel(0u64);
+        let (lan_stop, lan_stop_rx) = watch::channel(false);
         let me = Arc::new(Self {
             cfg,
             identity,
@@ -154,6 +159,8 @@ impl HostService {
             terms: Arc::new(TermManager::default()),
             platform: RwLock::new(Arc::new(NoPlatform)),
             privacy_owner: parking_lot::Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            lan_stop,
             events: RwLock::new(Arc::new(NoEvents)),
             assist_active: Mutex::new(None),
             public_ip: RwLock::new(String::new()),
@@ -166,7 +173,7 @@ impl HostService {
                 h.offline_incoming(ctl, conn_id, addr);
             }
         });
-        galaxy_net::lan::spawn_responder_with(me.ms.clone(), me.identity.device_id, me.lan_keys.clone(), Some(on_connect));
+        galaxy_net::lan::spawn_responder_until(me.ms.clone(), me.identity.device_id, me.lan_keys.clone(), Some(on_connect), Some(lan_stop_rx));
         me.save();
         me.refresh_server_key().await;
         me.restart_signal();
@@ -176,6 +183,9 @@ impl HostService {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(20)).await;
+                if me3.stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 me3.pending.lock().retain(|_, p| {
                     let keep = p.at.elapsed() < Duration::from_secs(60);
                     if !keep {
@@ -454,7 +464,24 @@ impl HostService {
 
     // ---------------- 信令 ----------------
 
+    /// 停止服务：断开信令和所有会话、关闭端点（换服务器前用）。停止后不会再自动重连。
+    pub fn shutdown(&self) {
+        self.stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.lan_stop.send(true);
+        self.lan_keys.write().clear();
+        if let Some(s) = self.signal.write().take() {
+            s.stop();
+        }
+        self.disconnect_all();
+        self.terms.kill_all();
+        self.ep.close(0u32.into(), b"shutdown");
+        self.ms.close();
+    }
+
     fn restart_signal(self: &Arc<Self>) {
+        if self.stopped.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let assist = self.assist_active.lock().is_some();
         let has_account = self.state.read().active().count() > 0;
         if let Some(old) = self.signal.write().take() {

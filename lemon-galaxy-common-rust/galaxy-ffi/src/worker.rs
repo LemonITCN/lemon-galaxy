@@ -50,6 +50,34 @@ impl WorkerHost {
         self.dir.join("host.json")
     }
 
+    /// 要换到另一台服务器吗？本机已有账号时不允许换（报错）。
+    fn needs_switch(&self, new_full: &str) -> Result<bool> {
+        let st = HostState::load(&self.state_path());
+        if st.server.is_empty() || st.server == new_full {
+            return Ok(false);
+        }
+        if !st.accounts.is_empty() {
+            return Err(GalaxyError::Other { detail: "已登录的账号在另一台服务器上，更换服务器前请先退出这些账号".into() });
+        }
+        Ok(true)
+    }
+
+    /// 本机没有账号、要换到另一台服务器时：停掉旧服务（下次 ensure_started 按新服务器启动）。
+    fn switch_server_if_idle(&self, new_full: &str) -> Result<()> {
+        if !self.needs_switch(new_full)? {
+            return Ok(());
+        }
+        let st = HostState::load(&self.state_path());
+        if let Some(h) = self.host.lock().take() {
+            h.inner.shutdown();
+        }
+        let mut st = st;
+        st.server = new_full.to_string();
+        st.server_sign_pubkey.clear();
+        st.save(&self.state_path()).map_err(|e| GalaxyError::Other { detail: e.to_string() })?;
+        Ok(())
+    }
+
     async fn ensure_started(&self) -> Result<Option<Arc<HostService>>> {
         let _g = self.starting.lock().await;
         if let Some(h) = self.host.lock().clone() {
@@ -102,10 +130,8 @@ impl WorkerHost {
     pub async fn login(self: Arc<Self>, server: String, username: String, password: String, totp: Option<String>, new_password: Option<String>, system_user: Option<String>) -> Result<WorkerLoginResult> {
         run(async move {
             let addr = ServerAddr::parse(&server).map_err(|e| GalaxyError::Auth { code: "bad_server".into(), detail: e })?;
-            let st = HostState::load(&self.state_path());
-            if !st.server.is_empty() && st.server != addr.to_string_full() && !st.accounts.is_empty() {
-                return Err(GalaxyError::Other { detail: "已登录的账号在另一台服务器上，更换服务器前请先退出这些账号".into() });
-            }
+            // 先只检查；登录成功后才真正换服务器，登录失败时原来的服务（比如正在临时协助）不受影响
+            self.needs_switch(&addr.to_string_full())?;
             let api = Api::new(addr.clone(), &locale()).map_err(|e| GalaxyError::Network { detail: e.to_string() })?;
             let m = meta();
             let logged = match account::login(&api, &self.identity, &m, &username, &password, totp.as_deref().filter(|t| !t.is_empty())).await? {
@@ -121,6 +147,7 @@ impl WorkerHost {
                 return Err(GalaxyError::NotFound { detail: format!("系统用户不存在：{sys}") });
             }
             let policy = galaxy_host::HostPolicy::default_for(&sys);
+            self.switch_server_if_idle(&addr.to_string_full())?;
             if self.host.lock().is_none() {
                 let mut st = HostState::load(&self.state_path());
                 st.server = addr.to_string_full();
@@ -140,10 +167,8 @@ impl WorkerHost {
     pub async fn set_server(self: Arc<Self>, server: String) -> Result<Option<Arc<HostService>>> {
         run(async move {
             let addr = ServerAddr::parse(&server).map_err(|e| GalaxyError::Auth { code: "bad_server".into(), detail: e })?;
+            self.switch_server_if_idle(&addr.to_string_full())?;
             let mut st = HostState::load(&self.state_path());
-            if !st.accounts.is_empty() && st.server != addr.to_string_full() {
-                return Err(GalaxyError::Other { detail: "已登录的账号在另一台服务器上，更换服务器前请先退出这些账号".into() });
-            }
             if self.host.lock().is_none() {
                 st.server = addr.to_string_full();
                 st.save(&self.state_path()).map_err(|e| GalaxyError::Other { detail: e.to_string() })?;

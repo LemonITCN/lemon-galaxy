@@ -43,6 +43,12 @@ pub fn spawn_responder(ms: Arc<MagicSock>, device_id: DeviceId, keys: Arc<RwLock
 }
 
 pub fn spawn_responder_with(ms: Arc<MagicSock>, device_id: DeviceId, keys: Arc<RwLock<Vec<[u8; 32]>>>, on_connect: Option<OnLanConnect>) {
+    spawn_responder_until(ms, device_id, keys, on_connect, None)
+}
+
+/// 同 [`spawn_responder_with`]，`stop` 变成 true（或发送端丢弃）时两个监听任务退出、释放端口。
+pub fn spawn_responder_until(ms: Arc<MagicSock>, device_id: DeviceId, keys: Arc<RwLock<Vec<[u8; 32]>>>, on_connect: Option<OnLanConnect>, stop: Option<tokio::sync::watch::Receiver<bool>>) {
+    let stop4 = stop.clone();
     let ms4 = ms.clone();
     let keys4 = keys.clone();
     let oc4 = on_connect.clone();
@@ -56,7 +62,7 @@ pub fn spawn_responder_with(ms: Arc<MagicSock>, device_id: DeviceId, keys: Arc<R
         };
         let mut joined: Vec<Ipv4Addr> = vec![];
         let mut last_join = Instant::now() - Duration::from_secs(3600);
-        responder_loop(&sock, &ms4, device_id, &keys4, oc4.as_ref(), |s| {
+        responder_loop(&sock, &ms4, device_id, &keys4, oc4.as_ref(), stop4, |s| {
             if last_join.elapsed() > Duration::from_secs(30) {
                 last_join = Instant::now();
                 for i in crate::ifaces::list() {
@@ -80,7 +86,7 @@ pub fn spawn_responder_with(ms: Arc<MagicSock>, device_id: DeviceId, keys: Arc<R
         };
         let mut joined: Vec<u32> = vec![];
         let mut last_join = Instant::now() - Duration::from_secs(3600);
-        responder_loop(&sock, &ms, device_id, &keys, on_connect.as_ref(), |s| {
+        responder_loop(&sock, &ms, device_id, &keys, on_connect.as_ref(), stop, |s| {
             if last_join.elapsed() > Duration::from_secs(30) {
                 last_join = Instant::now();
                 for i in crate::ifaces::list() {
@@ -102,13 +108,29 @@ async fn responder_loop<F: FnMut(&tokio::net::UdpSocket)>(
     device_id: DeviceId,
     keys: &Arc<RwLock<Vec<[u8; 32]>>>,
     on_connect: Option<&OnLanConnect>,
+    mut stop: Option<tokio::sync::watch::Receiver<bool>>,
     mut rejoin: F,
 ) {
     let mut buf = vec![0u8; 2048];
     let mut recent: HashMap<IpAddr, (Instant, u32)> = HashMap::new();
     loop {
+        if stop.as_ref().is_some_and(|s| *s.borrow()) {
+            return;
+        }
         rejoin(sock);
-        let r = tokio::time::timeout(Duration::from_secs(30), sock.recv_from(&mut buf)).await;
+        let recv = tokio::time::timeout(Duration::from_secs(30), sock.recv_from(&mut buf));
+        let r = match stop.as_mut() {
+            Some(s) => tokio::select! {
+                r = recv => r,
+                c = s.changed() => {
+                    if c.is_err() || *s.borrow() {
+                        return;
+                    }
+                    continue;
+                }
+            },
+            None => recv.await,
+        };
         let Ok(Ok((n, from))) = r else { continue };
         // 离线连接请求：校验后通知被控端建立路径，并像查询一样回应地址
         let q = if let Some(c) = LanConnect::decode(&buf[..n]) {
