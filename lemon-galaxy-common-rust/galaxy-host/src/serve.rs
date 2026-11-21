@@ -389,6 +389,19 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             }
         }
         MgmtReq::HostStatus => MgmtResp::Text(serde_json::to_string(&host.status()).unwrap_or_default()),
+        MgmtReq::SetPrivacy { on } => {
+            if !p.control {
+                return MgmtResp::Error(denied("没有控制权限"));
+            }
+            let sid = sess.info.read().id.clone();
+            if platform.set_privacy(on) {
+                *host.privacy_owner.lock() = on.then_some(sid.clone());
+                host.log(&sid, &sess.from_user_name, "privacy", if on { "开启隐私屏" } else { "关闭隐私屏" }, false);
+                MgmtResp::Ok
+            } else {
+                MgmtResp::Error(PeerError::new("unsupported", "被控端不支持隐私屏"))
+            }
+        }
         MgmtReq::Inject { display, events, origin } => {
             if !p.control {
                 return MgmtResp::Error(denied("没有控制键鼠的权限"));

@@ -161,9 +161,10 @@ pub enum MgmtReq {
     ClipboardSet(ClipboardData),
     WakeOnLan { mac: String },
     HostStatus,
-    /// 不开画面直接注入输入（AI 操作图形界面用）
-    /// 注入输入；坐标是 `display` 这块屏幕的像素
+    /// 不开画面直接注入输入（AI 操作图形界面用）；坐标是 `display` 这块屏幕的像素
     Inject { display: u32, events: Vec<InputEvent>, origin: Origin },
+    /// 隐私屏：被控端本地屏幕黑掉、本地键鼠失效，远端照常看到和操作。开启它的会话结束时自动关闭
+    SetPrivacy { on: bool },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

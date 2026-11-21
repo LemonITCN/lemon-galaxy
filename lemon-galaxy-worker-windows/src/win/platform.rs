@@ -282,7 +282,21 @@ impl HostPlatform for WinPlatform {
         send(&self.inner, ToAgent::ClipboardSet { data: d });
     }
 
+    fn set_privacy(&self, on: bool) -> bool {
+        if !on && self.inner.agent.lock().is_none() {
+            return true;
+        }
+        match request(&self.inner, |id| ToAgent::Privacy { id, on }, Duration::from_secs(8)) {
+            Some(FromAgent::PrivacyResult { result: Ok(()), .. }) => true,
+            Some(FromAgent::PrivacyResult { result: Err(e), .. }) => {
+                tracing::warn!("隐私屏：{e}");
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn capabilities(&self) -> Vec<String> {
-        vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into()]
+        vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into()]
     }
 }

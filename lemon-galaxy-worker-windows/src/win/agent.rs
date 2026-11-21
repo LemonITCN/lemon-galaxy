@@ -76,6 +76,7 @@ pub fn main() -> i32 {
         });
     }
     let mut captures: HashMap<u32, Arc<CaptureCtl>> = HashMap::new();
+    let mut privacy: Option<super::privacy::Privacy> = None;
     let stdin = std::io::stdin();
     let mut r = std::io::BufReader::new(stdin.lock());
     loop {
@@ -86,6 +87,19 @@ pub fn main() -> i32 {
         match m {
             ToAgent::Ping { id } => {
                 let _ = out_tx.send(FromAgent::Pong { id });
+            }
+            ToAgent::Privacy { id, on } => {
+                let result = if on {
+                    if privacy.is_some() {
+                        Ok(())
+                    } else {
+                        super::privacy::Privacy::start().map(|p| privacy = Some(p))
+                    }
+                } else {
+                    privacy = None;
+                    Ok(())
+                };
+                let _ = out_tx.send(FromAgent::PrivacyResult { id, result });
             }
             ToAgent::ListDisplays { id } => {
                 let list = monitors().iter().map(|m| m.info()).collect();
@@ -322,6 +336,28 @@ pub fn selftest() -> i32 {
         match jpeg(&f.data, f.width, f.height, 1568, 1568) {
             Ok((d, w, h)) => println!("    截图 JPEG {w}x{h} {} 字节", d.len()),
             Err(e) => println!("    JPEG 失败：{e}"),
+        }
+    }
+    // 隐私屏：开着时截到的画面不应是全黑（黑窗被排除在截屏之外）
+    if let Some(m) = ms.iter().find(|m| m.primary).or(ms.first()) {
+        match super::privacy::Privacy::start() {
+            Ok(p) => {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let mut cap = open_capturer(m, 30);
+                let mut f = Frame { width: 0, height: 0, data: vec![] };
+                let mut got = false;
+                for _ in 0..20 {
+                    if let Ok(true) = cap.next(&mut f, 200) {
+                        got = true;
+                        break;
+                    }
+                }
+                let lit = f.data.chunks(4).filter(|px| px[0] > 16 || px[1] > 16 || px[2] > 16).count();
+                let ratio = if f.data.is_empty() { 0.0 } else { lit as f64 / (f.data.len() / 4) as f64 };
+                println!("  隐私屏开启后截屏（{}）：拿到画面 {got}，非黑像素占比 {:.1}%", cap.kind(), ratio * 100.0);
+                drop(p);
+            }
+            Err(e) => println!("  隐私屏：{e}"),
         }
     }
     if ok {

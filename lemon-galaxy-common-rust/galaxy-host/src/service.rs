@@ -112,6 +112,8 @@ pub struct HostService {
     pub(crate) sessions: Mutex<HashMap<String, Arc<ActiveSession>>>,
     pub terms: Arc<TermManager>,
     pub platform: RwLock<Arc<dyn HostPlatform>>,
+    /// 开着隐私屏的会话
+    pub privacy_owner: parking_lot::Mutex<Option<String>>,
     pub events: RwLock<Arc<dyn HostEvents>>,
     assist_active: Mutex<Option<String>>,
     public_ip: RwLock<String>,
@@ -151,6 +153,7 @@ impl HostService {
             sessions: Default::default(),
             terms: Arc::new(TermManager::default()),
             platform: RwLock::new(Arc::new(NoPlatform)),
+            privacy_owner: parking_lot::Mutex::new(None),
             events: RwLock::new(Arc::new(NoEvents)),
             assist_active: Mutex::new(None),
             public_ip: RwLock::new(String::new()),
@@ -819,6 +822,12 @@ impl HostService {
         crate::serve::run(self.clone(), conn.clone(), sess.clone()).await;
 
         self.sessions.lock().remove(&id);
+        // 开隐私屏的人走了，恢复本地屏幕
+        let owned = self.privacy_owner.lock().as_deref() == Some(id.as_str());
+        if owned {
+            *self.privacy_owner.lock() = None;
+            self.platform.read().set_privacy(false);
+        }
         if let Some(p) = pending {
             let _ = p.stop.send(true);
         }

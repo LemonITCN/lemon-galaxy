@@ -17,6 +17,7 @@ pub enum ToAgent {
     ClipboardGet { id: u64 },
     ClipboardSet { data: ClipboardData },
     Ping { id: u64 },
+    Privacy { id: u64, on: bool },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -29,13 +30,14 @@ pub enum FromAgent {
     Screenshot { id: u64, image: Option<ImageData> },
     Clipboard { id: u64, data: Option<ClipboardData> },
     Pong { id: u64 },
+    PrivacyResult { id: u64, result: Result<(), String> },
     Log { error: bool, text: String },
 }
 
 impl FromAgent {
     pub fn reply_id(&self) -> Option<u64> {
         match self {
-            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } => Some(*id),
+            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::PrivacyResult { id, .. } => Some(*id),
             _ => None,
         }
     }

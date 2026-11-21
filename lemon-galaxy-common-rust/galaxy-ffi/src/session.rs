@@ -189,6 +189,12 @@ impl PeerSession {
         .await
     }
 
+    /// 隐私屏：被控端本地屏幕黑掉、本地键鼠失效，远端照常操作；本会话结束时自动关闭。能力列表里有 "privacy" 才支持。
+    pub async fn set_privacy(&self, on: bool) -> Result<()> {
+        let s = self.inner.clone();
+        run(async move { s.set_privacy(on).await.map_err(Into::into) }).await
+    }
+
     pub async fn wake_on_lan(&self, mac: String) -> Result<()> {
         let s = self.inner.clone();
         run(async move { s.mgmt(pp::MgmtReq::WakeOnLan { mac }).await.map(|_| ()).map_err(Into::into) }).await

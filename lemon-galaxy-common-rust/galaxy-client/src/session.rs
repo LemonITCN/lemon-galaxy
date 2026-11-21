@@ -523,6 +523,15 @@ impl PeerSession {
         Ok((actual, h))
     }
 
+    /// 隐私屏开关（需要控制权限；被控端不支持时报错）。
+    pub async fn set_privacy(&self, on: bool) -> Result<()> {
+        match self.mgmt(MgmtReq::SetPrivacy { on }).await? {
+            MgmtResp::Ok => Ok(()),
+            MgmtResp::Error(e) => Err(ClientError::Permission(e.message)),
+            _ => Err(ClientError::Protocol("应答错误".into())),
+        }
+    }
+
     pub async fn clipboard_get(&self) -> Result<Option<ClipboardData>> {
         match self.mgmt(MgmtReq::ClipboardGet).await? {
             MgmtResp::Clipboard(c) => Ok(c),

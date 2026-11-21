@@ -5,6 +5,7 @@ mod encode;
 mod input;
 mod ipc;
 mod platform;
+mod privacy;
 mod service;
 
 use galaxy_host::platform::HostPlatform;

@@ -37,6 +37,10 @@ pub trait HostPlatform: Send + Sync {
         None
     }
     fn clipboard_set(&self, _d: ClipboardData) {}
+    /// 隐私屏开关。返回是否支持（不支持时什么也不做）。
+    fn set_privacy(&self, _on: bool) -> bool {
+        false
+    }
     fn capabilities(&self) -> Vec<String> {
         vec![]
     }
