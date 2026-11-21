@@ -148,6 +148,18 @@ sealed class VaultData {
     data class Preferences(
         val json: String,
     ) : VaultData()
+
+    /** 端口映射规则（经由设备或 SSH 主机恰好一个有值；localPort 为 0 时自动选）。手机端不跑端口映射，列表里忽略。 */
+    data class PortForward(
+        val label: String,
+        val viaDeviceId: String?,
+        val viaSshHostId: String?,
+        val localPort: UShort,
+        val remoteHost: String,
+        val remotePort: UShort,
+        val autoStart: Boolean,
+        val note: String,
+    ) : VaultData()
 }
 
 sealed class SshAuth {
@@ -305,6 +317,13 @@ data class DisplayInfo(
 )
 
 enum class VideoCodec { H264, H265 }
+
+/** 录完的录像。被控端分辨率中途变了会分成几个文件。 */
+data class RecordingInfo(
+    val paths: List<String>,
+    val durationMs: ULong,
+    val bytes: ULong,
+)
 
 data class DisplayOptions(
     val displayId: UInt,

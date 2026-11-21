@@ -14,9 +14,14 @@ import kotlinx.coroutines.launch
 data class HostsData(
     val devices: List<DeviceInfo> = emptyList(),
     val vault: List<VaultEntry> = emptyList(),
+    /** 能远程开机的离线设备（内核 canWake 为真） */
+    val wakeable: Set<String> = emptySet(),
 ) {
     fun entry(id: String) = vault.firstOrNull { it.id == id }
     fun device(id: String) = devices.firstOrNull { it.id == id }
+
+    /** 设备离线（局域网里也没发现）且内核说能远程开机 */
+    fun canWake(id: String): Boolean = id in wakeable && device(id)?.let { !it.online && !it.lanSeen } == true
     fun metaFor(deviceId: String) = vault.firstOrNull { (it.data as? VaultData.DeviceMeta)?.deviceId == deviceId }
     val folders get() = vault.filter { it.data is VaultData.Folder }
     val credentials get() = vault.filter { it.data is VaultData.Credential }
@@ -191,8 +196,13 @@ class HostsController(
     val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
 
     fun reload() {
-        _data.value = HostsData(runCatching { client.devices() }.getOrDefault(emptyList()), runCatching { client.vault() }.getOrDefault(emptyList()))
+        val devices = runCatching { client.devices() }.getOrDefault(emptyList())
+        val wakeable = devices.filter { !it.online && !it.lanSeen && runCatching { client.canWake(it.id) }.getOrDefault(false) }.map { it.id }.toSet()
+        _data.value = HostsData(devices, runCatching { client.vault() }.getOrDefault(emptyList()), wakeable)
     }
+
+    /** 远程开机：返回代发设备名（空字符串表示本机），失败抛出。 */
+    suspend fun wake(deviceId: String): List<String> = client.wakeDevice(deviceId)
 
     fun refresh() {
         scope.launch {

@@ -61,6 +61,12 @@ interface GalaxyClientInterface {
     suspend fun vaultSave(entry: VaultEntry): VaultEntry
     suspend fun vaultDelete(id: String)
 
+    /** 能不能远程开机：设备离线、能被控、上报过网卡地址。 */
+    fun canWake(deviceId: String): Boolean
+
+    /** 远程开机：由本机或同一网络里在线的设备代发唤醒包，返回代发设备名（空字符串表示本机）。 */
+    suspend fun wakeDevice(deviceId: String): List<String>
+
     suspend fun connect(deviceId: String): PeerSessionInterface
     suspend fun connectAssist(deviceCode: String, verificationCode: String): PeerSessionInterface
 
@@ -241,7 +247,16 @@ interface DisplayChannelInterface {
     fun sendInput(event: InputEvent)
     fun requestKeyframe()
     fun setBitrate(kbps: UInt)
+
+    /** 关画面；正在录像时内核会顺带结束录像（但不返回信息，要信息先调 [stopRecording]）。 */
     fun stop()
+
+    /** 开始录像到 [path]（分片 MP4，H.264 原样写入）；[withAudio] 为真时正在收听的声音一起录。 */
+    suspend fun startRecording(path: String, withAudio: Boolean)
+
+    /** 停止录像，返回写出的文件；没在录时抛错。 */
+    fun stopRecording(): RecordingInfo
+    fun isRecording(): Boolean
 }
 
 // ---------- 4. AI 智能体 ----------

@@ -52,6 +52,7 @@ import cn.lemonit.galaxy.ui.hosts.HostsScreen
 import cn.lemonit.galaxy.ui.hosts.MoveDialog
 import cn.lemonit.galaxy.ui.hosts.reachable
 import cn.lemonit.galaxy.ui.hosts.sshViaText
+import cn.lemonit.galaxy.ui.hosts.wakeSentMessage
 import cn.lemonit.galaxy.ui.settings.AboutInfo
 import cn.lemonit.galaxy.ui.settings.ChangePasswordDialog
 import cn.lemonit.galaxy.ui.settings.SettingsActions
@@ -100,7 +101,20 @@ fun openHostAction(container: AppContainer, nav: Navigator, item: HostItem, acti
             is HostItem.Rdp -> nav.push(Route.EditEntry(EntryKind.RDP, item.entry.id, item.folderId))
         }
         HostAction.FAVORITE -> container.hosts.toggleFavorite(item)
+        HostAction.WAKE -> (item as? HostItem.Device)?.let { d -> container.appContext?.resources?.let { wakeDevice(container, d.device.id, it) } }
         HostAction.MOVE, HostAction.DELETE -> Unit
+    }
+}
+
+/** 远程开机，结果用提示条告知（成功时说明经哪台设备代发）。[res] 用界面的（跟随应用内语言）。 */
+fun wakeDevice(container: AppContainer, deviceId: String, res: android.content.res.Resources) {
+    container.scope.launch {
+        try {
+            container.toast(wakeSentMessage(res, container.hosts.wake(deviceId)))
+        } catch (e: Exception) {
+            val msg = e.userMessage()
+            if (msg.isNotEmpty()) container.toast(res.getString(R.string.wake_failed, msg))
+        }
     }
 }
 
@@ -108,6 +122,7 @@ fun openHostAction(container: AppContainer, nav: Navigator, item: HostItem, acti
 @Composable
 fun HostsTab(container: AppContainer, nav: Navigator) {
     HoldMulticastLock(discovery = true)
+    val context = LocalContext.current
     val data by container.hosts.data.collectAsState()
     val refreshing by container.hosts.refreshing.collectAsState()
     var filter by remember { mutableStateOf(HostsFilter()) }
@@ -179,11 +194,13 @@ fun HostsTab(container: AppContainer, nav: Navigator) {
         val liveVia by container.connections.sshVia.collectAsState()
         val via = (item as? HostItem.Ssh)?.let { sshViaText(data, it.host, liveVia[it.entry.id]) }
         ModalBottomSheet(onDismissRequest = { sheetItem = null }, sheetState = sheetState) {
-            HostActionsContent(item, sshVia = via, sshConnected = item is HostItem.Ssh && item.entry.id in liveVia, onAction = { a ->
+            val canWake = item is HostItem.Device && data.canWake(item.device.id)
+            HostActionsContent(item, sshVia = via, sshConnected = item is HostItem.Ssh && item.entry.id in liveVia, canWake = canWake, onAction = { a ->
                 sheetItem = null
                 when (a) {
                     HostAction.MOVE -> moveItem = item
                     HostAction.DELETE -> deleteItem = item
+                    HostAction.WAKE -> (item as? HostItem.Device)?.let { wakeDevice(container, it.device.id, context.resources) }
                     else -> openHostAction(container, nav, item, a)
                 }
             })

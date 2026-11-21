@@ -37,7 +37,7 @@ import com.termux.terminal.TerminalSessionClient
 object Fixtures {
     fun tr(zh: Boolean): (String, String) -> String = { a, b -> if (zh) a else b }
 
-    val hosts = HostsData(MockData.devices(), MockData.vault())
+    val hosts = HostsData(MockData.devices(), MockData.vault(), MockData.WAKE_RELAYS.keys)
 
     fun login(step: LoginStep = LoginStep.CREDENTIALS, error: String? = null) = LoginUiState(
         server = "galaxy.example.com:7443#sha256-q3Vb1oX9mH2c7uY0kN4tLwR8",

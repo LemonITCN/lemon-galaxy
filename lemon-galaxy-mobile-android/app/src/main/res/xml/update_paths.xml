@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 检查更新下载的安装包（UpdateController 放在缓存目录的 updates/ 下） -->
+<!-- FileProvider 能交给其他应用的文件 -->
 <paths>
+    <!-- 检查更新下载的安装包（UpdateController 放在缓存目录的 updates/ 下） -->
     <cache-path name="updates" path="updates/" />
+    <!-- 远程桌面录像（Recordings.dir：应用专属的 Movies/LemonGalaxy，取不到外部存储时退回内部 Recordings/） -->
+    <external-files-path name="recordings" path="Movies/LemonGalaxy/" />
+    <files-path name="recordings_internal" path="Recordings/" />
 </paths>

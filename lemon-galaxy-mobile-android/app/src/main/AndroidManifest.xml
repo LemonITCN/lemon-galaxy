@@ -50,7 +50,7 @@
             </intent-filter>
         </activity>
 
-        <!-- 检查更新：把缓存目录里的安装包交给系统安装器 -->
+        <!-- 检查更新：把缓存目录里的安装包交给系统安装器；远程桌面录像也经它分享 -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.updates"

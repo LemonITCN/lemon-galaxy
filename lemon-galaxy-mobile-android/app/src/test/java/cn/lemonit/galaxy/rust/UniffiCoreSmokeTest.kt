@@ -82,4 +82,14 @@ class UniffiCoreSmokeTest {
         assertTrue(e2!!.message!!.isNotBlank())
         core!!.coreSetLocale("zh-CN")
     }
+
+    @Test
+    fun wakeBindingsWithoutServer() = runBlocking {
+        assumeTrue("主机版 galaxy_ffi 不可用，跳过", core != null)
+        val client = newClient()
+        // 没登录、设备列表为空：不能远程开机，硬开报错（走 GalaxyException 映射）
+        assertFalse(client.canWake("00112233445566778899aabbccddeeff"))
+        val e = runCatching { withTimeout(10_000) { client.wakeDevice("00112233445566778899aabbccddeeff") } }.exceptionOrNull()
+        assertTrue("应抛 GalaxyException，实际 $e", e is GalaxyException)
+    }
 }

@@ -1,5 +1,6 @@
 package cn.lemonit.galaxy.ui.hosts
 
+import android.content.res.Resources
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,12 +24,14 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Route
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
@@ -64,7 +67,14 @@ import cn.lemonit.galaxy.ui.components.InfoButton
 import cn.lemonit.galaxy.ui.components.Tag
 import cn.lemonit.galaxy.ui.theme.Galaxy
 
-enum class HostAction { REMOTE, TERMINAL, FILES, AI, EDIT, FAVORITE, MOVE, DELETE }
+enum class HostAction { REMOTE, TERMINAL, FILES, AI, EDIT, FAVORITE, MOVE, DELETE, WAKE }
+
+/** 远程开机成功的提示：代发名单里空字符串是本机。 */
+fun wakeSentMessage(res: Resources, relays: List<String>): String {
+    val names = relays.map { it.ifEmpty { res.getString(R.string.wake_this_device) } }.distinct()
+    if (relays.isEmpty() || relays.all { it.isEmpty() }) return res.getString(R.string.wake_sent_local)
+    return res.getString(R.string.wake_sent_via, names.joinToString(res.getString(R.string.list_separator)))
+}
 
 /** 设备有没有图形界面（能远程桌面）。 */
 fun HostItem.Device.hasDisplay() = device.platform == Platform.MACOS || device.platform == Platform.WINDOWS
@@ -96,6 +106,7 @@ fun sshViaText(data: HostsData, host: VaultData.SshHost, liveVia: String?): Stri
 /**
  * 点设备 / 主机弹出的操作面板内容（底部弹层与平板详情栏共用）。
  * [sshVia] 是 SSH 主机的连接路径（见 [sshViaText]），[sshConnected] 表示当前有这台主机的直连会话。
+ * [canWake] 为真时（设备离线且能远程开机）显示「远程开机」。
  */
 @Composable
 fun HostActionsContent(
@@ -104,6 +115,7 @@ fun HostActionsContent(
     modifier: Modifier = Modifier,
     sshVia: String? = null,
     sshConnected: Boolean = false,
+    canWake: Boolean = false,
 ) {
     Column(modifier.fillMaxWidth().padding(bottom = 16.dp)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -166,6 +178,7 @@ fun HostActionsContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
                     )
+                    if (canWake) WakeRow { onAction(HostAction.WAKE) }
                 }
             }
             is HostItem.Ssh -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -192,6 +205,20 @@ fun HostActionsContent(
             stringResource(if (item is HostItem.Device) R.string.action_remove_device else R.string.delete),
             color = MaterialTheme.colorScheme.error,
         ) { onAction(HostAction.DELETE) }
+    }
+}
+
+/** 离线设备的「远程开机」：按钮旁的 i 图标说明网络唤醒的前提。 */
+@Composable
+private fun WakeRow(onWake: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        FilledTonalButton(onClick = onWake, modifier = Modifier.weight(1f)) {
+            Icon(Icons.Rounded.PowerSettingsNew, null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(stringResource(R.string.action_wake))
+        }
+        Spacer(Modifier.width(4.dp))
+        InfoButton(stringResource(R.string.wake_info))
     }
 }
 

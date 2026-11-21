@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.os.Build
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.view.SurfaceHolder
@@ -52,6 +53,7 @@ import cn.lemonit.galaxy.core.bridge.FileEntry
 import cn.lemonit.galaxy.core.bridge.FileKind
 import cn.lemonit.galaxy.core.bridge.InputEvent
 import cn.lemonit.galaxy.core.bridge.Platform
+import cn.lemonit.galaxy.core.bridge.RecordingInfo
 import cn.lemonit.galaxy.core.bridge.TerminalSessionInfo
 import cn.lemonit.galaxy.core.bridge.VaultData
 import cn.lemonit.galaxy.core.platform.HoldMulticastLock
@@ -77,6 +79,8 @@ import cn.lemonit.galaxy.ui.hosts.sshViaText
 import cn.lemonit.galaxy.ui.remote.RemoteActions
 import cn.lemonit.galaxy.ui.remote.RemoteDesktopController
 import cn.lemonit.galaxy.ui.remote.RemoteDesktopScreen
+import cn.lemonit.galaxy.ui.remote.Recordings
+import cn.lemonit.galaxy.ui.remote.RecordingSavedDialog
 import cn.lemonit.galaxy.ui.settings.LicensesScreen
 import cn.lemonit.galaxy.ui.terminal.SessionsPanel
 import cn.lemonit.galaxy.ui.terminal.TerminalActions
@@ -85,6 +89,7 @@ import cn.lemonit.galaxy.ui.terminal.TerminalTabUi
 import cn.lemonit.galaxy.ui.theme.TerminalThemes
 import com.termux.view.TerminalView
 import kotlinx.coroutines.launch
+import java.io.File
 
 @Composable
 fun RouteContent(route: Route, container: AppContainer, nav: Navigator, showBack: Boolean, openUrl: (String) -> Unit) {
@@ -431,12 +436,25 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
     val data by container.hosts.data.collectAsState()
     val prefs = container.settings.prefs.value
     val device = data.device(deviceId)
+    // 刚停下的录像（手动停止或画面断开时弹保存提示）
+    var savedRecording by remember { mutableStateOf<RecordingInfo?>(null) }
     val controller = remember(deviceId) {
         RemoteDesktopController(
             deviceId, data.deviceName(deviceId), device?.platform ?: Platform.WINDOWS,
             container.connections, container.scope, prefs.defaultQuality, prefs.remoteMouseMode,
             audioWanted = prefs.remoteAudio,
             onAudioError = { msg -> container.toast(context.getString(R.string.rd_sound_failed, msg)) },
+            recordingDir = { Recordings.dir(context) },
+            onRecordingSaved = { info, auto ->
+                if (auto) {
+                    // 离开界面或切后台时自动停的：界面已不在，只提示保存位置
+                    val where = Recordings.displayPath(File(info.paths.first()).parent ?: info.paths.first())
+                    container.toast(context.getString(R.string.rd_record_auto_saved, where))
+                } else {
+                    savedRecording = info
+                }
+            },
+            onRecordingError = { msg -> container.toast(context.getString(R.string.rd_record_failed, msg)) },
         ).also { it.start() }
     }
     val ui by controller.ui.collectAsState()
@@ -489,6 +507,7 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
                 container.settings.update { it.copy(remoteAudio = on) }
                 controller.setAudio(on)
             }
+            override fun onRecord() = controller.toggleRecording()
             override fun onClipboardSend() {
                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 val text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
@@ -542,6 +561,32 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
             )
         },
     )
+    savedRecording?.let { info ->
+        val shareTitle = stringResource(R.string.rd_record_share)
+        val galleryDone = stringResource(R.string.rd_record_saved_gallery)
+        RecordingSavedDialog(
+            info = info,
+            location = info.paths.joinToString("\n") { Recordings.displayPath(it) },
+            canSaveToGallery = Recordings.canSaveToGallery,
+            onShare = {
+                runCatching { Recordings.share(context, info.paths, shareTitle) }.onFailure { e -> container.toast(e.userMessage()) }
+            },
+            onSaveToGallery = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    scope.launch {
+                        try {
+                            Recordings.saveToGallery(context, info.paths)
+                            container.toast(galleryDone)
+                            savedRecording = null
+                        } catch (e: Exception) {
+                            container.toast(context.getString(R.string.rd_record_gallery_failed, e.userMessage()))
+                        }
+                    }
+                }
+            },
+            onDismiss = { savedRecording = null },
+        )
+    }
 }
 
 // ---------------- AI ----------------

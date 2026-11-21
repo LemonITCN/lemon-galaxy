@@ -2,7 +2,9 @@ package cn.lemonit.galaxy.core.mock
 
 import cn.lemonit.galaxy.core.bridge.DisplayChannelInterface
 import cn.lemonit.galaxy.core.bridge.DisplayInfo
+import cn.lemonit.galaxy.core.bridge.GalaxyException
 import cn.lemonit.galaxy.core.bridge.InputEvent
+import cn.lemonit.galaxy.core.bridge.RecordingInfo
 import cn.lemonit.galaxy.core.bridge.VideoCodec
 import cn.lemonit.galaxy.core.bridge.VideoSink
 import kotlinx.coroutines.CoroutineScope
@@ -10,6 +12,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 
 /** H.264 Annex B 码流按访问单元（以 AUD 分隔）切成帧。 */
 internal object AnnexB {
@@ -54,7 +57,7 @@ internal object AnnexB {
 
 /**
  * 模拟远程画面：循环推送 assets 里预先编码好的 1280x720 H.264 片段（假桌面），
- * 鼠标移动时回报光标位置（被控屏幕像素）。
+ * 鼠标移动时回报光标位置（被控屏幕像素）。录像把推出去的帧原样写成 MP4（见 [MockRecorder]）。
  */
 internal class MockDisplayChannel(
     private val display: DisplayInfo,
@@ -65,6 +68,7 @@ internal class MockDisplayChannel(
 ) : DisplayChannelInterface {
     @Volatile private var next = 0
     @Volatile private var stopped = false
+    @Volatile private var recorder: MockRecorder? = null
     private val job: Job
 
     init {
@@ -75,6 +79,7 @@ internal class MockDisplayChannel(
             var pts = 0L
             while (isActive && !stopped) {
                 val au = frames[next]
+                recorder?.push(au.data, pts, au.keyframe)
                 sink.onFrame(au.data, pts.toULong(), au.keyframe)
                 next = (next + 1) % frames.size
                 pts += interval * 1000
@@ -99,8 +104,31 @@ internal class MockDisplayChannel(
     override fun setBitrate(kbps: UInt) = Unit
 
     override fun stop() {
+        // 与真内核一样：关画面时顺带结束录像
+        recorder?.let { r -> recorder = null; runCatching { r.finish() } }
         stopped = true
         job.cancel()
         sink.onClosed("stopped")
     }
+
+    override suspend fun startRecording(path: String, withAudio: Boolean) {
+        synchronized(this) {
+            if (stopped) throw GalaxyException.Other("画面已关闭")
+            if (recorder != null) throw GalaxyException.Other("已经在录像了")
+            recorder = try {
+                MockRecorder(File(path), 1280, 720)
+            } catch (e: Exception) {
+                throw GalaxyException.Other(e.message ?: "无法创建录像文件")
+            }
+        }
+        // 从关键帧开始写
+        requestKeyframe()
+    }
+
+    override fun stopRecording(): RecordingInfo {
+        val r = synchronized(this) { recorder.also { recorder = null } } ?: throw GalaxyException.Other("没有在录像")
+        return r.finish()
+    }
+
+    override fun isRecording(): Boolean = recorder != null
 }

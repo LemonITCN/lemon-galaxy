@@ -141,8 +141,21 @@ object MockData {
             e("s-nginx", null, VaultData.Snippet("Tail nginx errors", "tail -f /var/log/nginx/error.log", listOf("web"))),
             e("s-docker", null, VaultData.Snippet("Docker cleanup", "docker system prune -f", listOf("docker"))),
             e("k-bastion", null, VaultData.KnownHost("bastion.example.com", 22u, "ssh-ed25519", "SHA256:q3Vb1oX9mH2c7uY0kN4tLwR8zPaF5sDgE6jK1lQ2xYc")),
+            // 桌面端建的端口映射规则：手机端不跑映射，各列表里都应忽略
+            e(PF_PG, F_DB, VaultData.PortForward("pg via web-01", DEV_WEB_01, null, 15432u, "10.0.3.21", 5432u, false, "")),
         )
     }
+
+    const val PF_PG = "p-pg"
+
+    /**
+     * 能远程开机的离线设备 → 代发唤醒包的设备名（空字符串表示本机）。
+     * render-ws 与 Office PC 在同一网络、经它代发；db-01 与本机同一网络、本机直接发。
+     */
+    val WAKE_RELAYS: Map<String, List<String>> = mapOf(
+        DEV_RENDER to listOf("OFFICE-PC"),
+        DEV_DB_01 to listOf(""),
+    )
 
     fun models(): List<AiModel> = listOf(
         AiModel(1u, "OpenCode Go", "glm-5.2", "GLM-5.2", vision = false, tools = true, contextLength = 200_000u),

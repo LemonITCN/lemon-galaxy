@@ -37,6 +37,7 @@ import cn.lemonit.galaxy.core.bridge.RdpTarget
 import cn.lemonit.galaxy.core.bridge.RiskLevel
 import cn.lemonit.galaxy.core.bridge.ServerInfo
 import cn.lemonit.galaxy.core.bridge.SshAuth
+import cn.lemonit.galaxy.core.bridge.RecordingInfo
 import cn.lemonit.galaxy.core.bridge.SshInfo
 import cn.lemonit.galaxy.core.bridge.TerminalOptions
 import cn.lemonit.galaxy.core.bridge.TerminalSessionInfo
@@ -82,6 +83,7 @@ import uniffi.galaxy_ffi.Permissions as FPermissions
 import uniffi.galaxy_ffi.Platform as FPlatform
 import uniffi.galaxy_ffi.PointerButton as FPointerButton
 import uniffi.galaxy_ffi.RdpTarget as FRdpTarget
+import uniffi.galaxy_ffi.RecordingInfo as FRecordingInfo
 import uniffi.galaxy_ffi.UpdateInfo as FUpdateInfo
 import uniffi.galaxy_ffi.RiskLevel as FRiskLevel
 import uniffi.galaxy_ffi.ServerInfo as FServerInfo
@@ -161,6 +163,7 @@ internal fun TerminalOptions.toFfi() = FTerminalOptions(attachSession, shell, co
 internal fun FTerminalSessionInfo.toBridge() = TerminalSessionInfo(id, title, createdAt, attached)
 internal fun FFileEntry.toBridge() = FileEntry(name, path, kind.toBridge(), size, mode, modifiedAt, owner, group, linkTarget)
 internal fun FDisplayInfo.toBridge() = DisplayInfo(id, name, width, height, scale, primary, isVirtual)
+internal fun FRecordingInfo.toBridge() = RecordingInfo(paths, durationMs, bytes)
 internal fun DisplayOptions.toFfi() = FDisplayOptions(displayId, maxFps, bitrateKbps, codecs.map { it.toFfi() }, viewOnly)
 internal fun ExecRequest.toFfi() = FExecRequest(command, shell, cwd, timeoutMs, maxOutput)
 internal fun FExecResult.toBridge() = ExecResult(code, stdout, stderr, timedOut, truncated, durationMs)
@@ -215,6 +218,7 @@ internal fun FVaultData.toBridge(): VaultData = when (this) {
     is FVaultData.Snippet -> VaultData.Snippet(label, command, tags)
     is FVaultData.KnownHost -> VaultData.KnownHost(host, port, keyType, fingerprint)
     is FVaultData.Preferences -> VaultData.Preferences(json)
+    is FVaultData.PortForward -> VaultData.PortForward(label, viaDeviceId, viaSshHostId, localPort, remoteHost, remotePort, autoStart, note)
 }
 
 internal fun VaultData.toFfi(): FVaultData = when (this) {
@@ -226,6 +230,7 @@ internal fun VaultData.toFfi(): FVaultData = when (this) {
     is VaultData.Snippet -> FVaultData.Snippet(label, command, tags)
     is VaultData.KnownHost -> FVaultData.KnownHost(host, port, keyType, fingerprint)
     is VaultData.Preferences -> FVaultData.Preferences(json)
+    is VaultData.PortForward -> FVaultData.PortForward(label, viaDeviceId, viaSshHostId, localPort, remoteHost, remotePort, autoStart, note)
 }
 
 internal fun FVaultEntry.toBridge() = VaultEntry(id, folderId, sort, data.toBridge(), updatedAt)

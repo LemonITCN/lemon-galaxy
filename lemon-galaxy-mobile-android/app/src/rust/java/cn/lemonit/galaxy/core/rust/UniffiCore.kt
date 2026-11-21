@@ -33,6 +33,7 @@ import cn.lemonit.galaxy.core.bridge.PeerListener
 import cn.lemonit.galaxy.core.bridge.PeerSessionInterface
 import cn.lemonit.galaxy.core.bridge.PortForwardInterface
 import cn.lemonit.galaxy.core.bridge.RdpTarget
+import cn.lemonit.galaxy.core.bridge.RecordingInfo
 import cn.lemonit.galaxy.core.bridge.SecretPrompt
 import cn.lemonit.galaxy.core.bridge.SecureStore
 import cn.lemonit.galaxy.core.bridge.ServerInfo
@@ -135,6 +136,9 @@ internal class UniffiClient(private val c: FGalaxyClient) : GalaxyClientInterfac
     override fun vault(): List<VaultEntry> = c.vault().map { it.toBridge() }
     override suspend fun vaultSave(entry: VaultEntry): VaultEntry = ffi { c.vaultSave(entry.toFfi()).toBridge() }
     override suspend fun vaultDelete(id: String) = ffi { c.vaultDelete(id) }
+
+    override fun canWake(deviceId: String): Boolean = c.canWake(deviceId)
+    override suspend fun wakeDevice(deviceId: String): List<String> = ffi { c.wakeDevice(deviceId) }
 
     override suspend fun connect(deviceId: String): PeerSessionInterface = ffi { UniffiPeer(c.connect(deviceId)) }
     override suspend fun connectAssist(deviceCode: String, verificationCode: String): PeerSessionInterface =
@@ -331,6 +335,9 @@ internal class UniffiDisplay(private val d: FDisplayChannel) : DisplayChannelInt
     override fun requestKeyframe() = d.requestKeyframe()
     override fun setBitrate(kbps: UInt) = d.setBitrate(kbps)
     override fun stop() = d.stop()
+    override suspend fun startRecording(path: String, withAudio: Boolean) = ffi { d.startRecording(path, withAudio) }
+    override fun stopRecording(): RecordingInfo = ffi { d.stopRecording().toBridge() }
+    override fun isRecording(): Boolean = d.isRecording()
 }
 
 internal class UniffiPortForward(private val p: FPortForward) : PortForwardInterface {

@@ -242,6 +242,89 @@ class MockCoreTest {
     }
 
     @Test
+    fun wakeOnlyOfflineDevicesWithAddress() = runBlocking<Unit> {
+        client.login(server, "alice", "pw", null)
+        // render-ws：离线，经 OFFICE-PC 代发；db-01：离线，本机代发
+        assertTrue(client.canWake(MockData.DEV_RENDER))
+        assertTrue(client.canWake(MockData.DEV_DB_01))
+        // 在线设备、局域网可见但没上报网卡地址的设备、不存在的设备都不能远程开机
+        assertFalse(client.canWake(MockData.DEV_OFFICE_PC))
+        assertFalse(client.canWake(MockData.DEV_NAS))
+        assertFalse(client.canWake("nope"))
+        assertEquals(listOf("OFFICE-PC"), client.wakeDevice(MockData.DEV_RENDER))
+        assertEquals(listOf(""), client.wakeDevice(MockData.DEV_DB_01))
+        try {
+            client.wakeDevice(MockData.DEV_NAS)
+            fail("woke a device without a reported address")
+        } catch (e: GalaxyException.Other) {
+            assertTrue(e.message.orEmpty().isNotEmpty())
+        }
+    }
+
+    @Test
+    fun portForwardEntriesAreIgnoredByHostTree() {
+        val data = cn.lemonit.galaxy.app.HostsData(MockData.devices(), MockData.vault())
+        assertTrue(data.vault.any { it.data is VaultData.PortForward })
+        val items = cn.lemonit.galaxy.app.HostTree.items(data)
+        assertTrue(items.none { it.key.contains(MockData.PF_PG) })
+        // 规则所在文件夹的计数只算设备与主机
+        val rows = cn.lemonit.galaxy.app.HostTree.rows(data)
+        assertTrue(rows.none { it.item?.key?.contains(MockData.PF_PG) == true })
+    }
+
+    @Test
+    fun recordingWritesPlayableMp4() = runBlocking<Unit> {
+        client.login(server, "alice", "pw", null)
+        val pc = client.connect(MockData.DEV_OFFICE_PC)
+        val frames = java.util.concurrent.atomic.AtomicInteger()
+        val sink = object : cn.lemonit.galaxy.core.bridge.VideoSink {
+            override fun onConfig(codec: cn.lemonit.galaxy.core.bridge.VideoCodec, width: UInt, height: UInt) = Unit
+            override fun onFrame(data: ByteArray, ptsUs: ULong, keyframe: Boolean) {
+                frames.incrementAndGet()
+            }
+            override fun onCursor(x: Int, y: Int, visible: Boolean) = Unit
+            override fun onClosed(reason: String) = Unit
+        }
+        val ch = pc.openDisplay(cn.lemonit.galaxy.core.bridge.DisplayOptions(1u, 30u, 0u, listOf(cn.lemonit.galaxy.core.bridge.VideoCodec.H264), false), sink)
+        val dir = java.nio.file.Files.createTempDirectory("rec").toFile()
+        val file = File(dir, "a/LemonGalaxy-test.mp4")
+        assertFalse(ch.isRecording())
+        try {
+            ch.stopRecording()
+            fail("stopRecording without recording")
+        } catch (e: GalaxyException.Other) {
+            assertTrue(e.message.orEmpty().isNotEmpty())
+        }
+        ch.startRecording(file.path, withAudio = true)
+        assertTrue(ch.isRecording())
+        try {
+            ch.startRecording(file.path, withAudio = false)
+            fail("started twice")
+        } catch (e: GalaxyException.Other) {
+            assertTrue(e.message.orEmpty().isNotEmpty())
+        }
+        val start = frames.get()
+        waitFor { frames.get() - start >= 20 }
+        val info = ch.stopRecording()
+        assertFalse(ch.isRecording())
+        assertEquals(listOf(file.path), info.paths)
+        assertTrue(file.length() > 1000)
+        assertEquals(file.length().toULong(), info.bytes)
+        val head = file.readBytes().copyOfRange(4, 8).decodeToString()
+        assertEquals("ftyp", head)
+        // 关画面时正在录的录像也会结束
+        val file2 = File(dir, "b.mp4")
+        ch.startRecording(file2.path, withAudio = false)
+        val s2 = frames.get()
+        waitFor { frames.get() - s2 >= 5 }
+        ch.stop()
+        assertFalse(ch.isRecording())
+        assertTrue(file2.length() > 0)
+        System.getenv("GALAXY_KEEP_RECORDING")?.let { file.copyTo(File(it), overwrite = true) }
+        dir.deleteRecursively()
+    }
+
+    @Test
     fun updateCheckAndDownloadReportsResult() = runBlocking<Unit> {
         client.login(server, "alice", "pw", null)
         assertEquals(null, client.checkUpdate("mobile", "android", "", "9.9.9"))

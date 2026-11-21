@@ -34,6 +34,8 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardReturn
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.ContentPaste
+import androidx.compose.material.icons.rounded.FiberManualRecord
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.HighQuality
 import androidx.compose.material.icons.rounded.Keyboard
@@ -43,6 +45,7 @@ import androidx.compose.material.icons.rounded.Monitor
 import androidx.compose.material.icons.rounded.Mouse
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -55,6 +58,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -89,11 +93,15 @@ import cn.lemonit.galaxy.core.bridge.PointerButton
 import cn.lemonit.galaxy.core.bridge.PathKind
 import cn.lemonit.galaxy.core.bridge.Platform
 import cn.lemonit.galaxy.core.bridge.ComboKey
+import cn.lemonit.galaxy.core.bridge.RecordingInfo
 import cn.lemonit.galaxy.data.VideoQuality
+import cn.lemonit.galaxy.ui.components.Clock
 import cn.lemonit.galaxy.ui.components.InfoButton
 import cn.lemonit.galaxy.ui.components.StatusDot
+import cn.lemonit.galaxy.ui.components.formatBytes
 import cn.lemonit.galaxy.ui.icons.PlatformIcons
 import cn.lemonit.galaxy.ui.theme.Galaxy
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 interface RemoteActions {
@@ -110,6 +118,9 @@ interface RemoteActions {
 
     /** 声音开关（对端能力里有 "audio" 时才显示）。 */
     fun onSound(on: Boolean) = Unit
+
+    /** 录像按钮：没在录就开始，在录就停止。 */
+    fun onRecord() = Unit
 }
 
 private fun click(button: PointerButton, x: Int, y: Int) = listOf(
@@ -257,8 +268,14 @@ fun RemoteDesktopScreen(
         if (keyboardOpen) {
             RemoteKeyboard(ui.platform, actions, Modifier.align(Alignment.BottomCenter)) { keyboardOpen = false }
         }
+        val elapsed = recordingElapsed(ui.recordingSince)
+        // 工具栏收起时左上角一直显示录像中（红点 + 计时）
+        if (elapsed != null && !toolbarOpen) {
+            RecordingBadge(elapsed, Modifier.align(Alignment.TopStart).padding(12.dp))
+        }
         FloatingToolbar(
             ui = ui,
+            elapsed = elapsed,
             open = toolbarOpen,
             onToggle = { toolbarOpen = !toolbarOpen },
             actions = actions,
@@ -292,9 +309,80 @@ private fun Pointer(modifier: Modifier) {
     }
 }
 
+/** 录像计时（每秒刷新）；没在录返回 null。 */
+@Composable
+private fun recordingElapsed(since: Long?): String? {
+    if (since == null) return null
+    var now by remember(since) { mutableLongStateOf(Clock.now()) }
+    LaunchedEffect(since) {
+        while (true) {
+            delay(1000 - (Clock.now() - since).coerceAtLeast(0) % 1000)
+            now = Clock.now()
+        }
+    }
+    return formatElapsed(now - since)
+}
+
+private val RecordRed = Color(0xFFFF4D4F)
+
+@Composable
+private fun RecordingBadge(elapsed: String, modifier: Modifier) {
+    Row(
+        modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color(0xCC1B1E2B))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(RecordRed))
+        Spacer(Modifier.width(6.dp))
+        Text(elapsed, color = Color.White, style = MaterialTheme.typography.labelMedium, fontFamily = FontFamily.Monospace)
+    }
+}
+
+/** 录像停止后：时长、大小、保存位置，可分享或存到相册。 */
+@Composable
+fun RecordingSavedDialog(
+    info: RecordingInfo,
+    location: String,
+    canSaveToGallery: Boolean,
+    onShare: () -> Unit,
+    onSaveToGallery: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.rd_record_saved)) },
+        text = {
+            Column {
+                Text(stringResource(R.string.rd_record_summary, formatElapsed(info.durationMs.toLong()), formatBytes(info.bytes.toLong())))
+                if (info.paths.size > 1) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(stringResource(R.string.rd_record_parts, info.paths.size), style = MaterialTheme.typography.bodySmall)
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    location,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onShare) { Text(stringResource(R.string.rd_record_share)) } },
+        dismissButton = {
+            Row {
+                if (canSaveToGallery) TextButton(onClick = onSaveToGallery) { Text(stringResource(R.string.rd_record_save_gallery)) }
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.done)) }
+            }
+        },
+    )
+}
+
 @Composable
 private fun FloatingToolbar(
     ui: RemoteUi,
+    elapsed: String?,
     open: Boolean,
     onToggle: () -> Unit,
     actions: RemoteActions,
@@ -308,7 +396,7 @@ private fun FloatingToolbar(
     if (pos.x.isNaN() && maxW > 1f) pos = Offset(maxW - ballPx - with(density) { 16.dp.toPx() }, maxH * 0.35f)
     Box(Modifier.fillMaxSize()) {
         if (open) {
-            ToolbarPanel(ui, actions, onKeyboard, Modifier.align(Alignment.TopCenter).padding(top = 12.dp, start = 12.dp, end = 12.dp))
+            ToolbarPanel(ui, elapsed, actions, onKeyboard, Modifier.align(Alignment.TopCenter).padding(top = 12.dp, start = 12.dp, end = 12.dp))
         }
         Box(
             Modifier
@@ -340,7 +428,7 @@ private fun FloatingToolbar(
 }
 
 @Composable
-private fun ToolbarPanel(ui: RemoteUi, actions: RemoteActions, onKeyboard: () -> Unit, modifier: Modifier) {
+private fun ToolbarPanel(ui: RemoteUi, elapsed: String?, actions: RemoteActions, onKeyboard: () -> Unit, modifier: Modifier) {
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = Color(0xF01B1E2B),
@@ -387,6 +475,14 @@ private fun ToolbarPanel(ui: RemoteUi, actions: RemoteActions, onKeyboard: () ->
                         enabled = !ui.audioBusy,
                     ) { actions.onSound(!ui.audioOn) }
                 }
+                // 录像：录制中红色停止键 + 计时
+                ToolButton(
+                    if (ui.recording) Icons.Rounded.Stop else Icons.Rounded.FiberManualRecord,
+                    elapsed ?: stringResource(R.string.rd_record),
+                    danger = ui.recording,
+                    enabled = ui.status == RemoteStatus.STREAMING && !ui.recordingBusy,
+                    description = stringResource(if (ui.recording) R.string.rd_record_stop else R.string.rd_record),
+                ) { actions.onRecord() }
                 if (ui.privacySupported) {
                     ToolButton(
                         if (ui.privacyOn) Icons.Rounded.VisibilityOff else Icons.Outlined.VisibilityOff,
@@ -403,7 +499,15 @@ private fun ToolbarPanel(ui: RemoteUi, actions: RemoteActions, onKeyboard: () ->
 }
 
 @Composable
-private fun ToolButton(icon: ImageVector, label: String, active: Boolean = false, danger: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+private fun ToolButton(
+    icon: ImageVector,
+    label: String,
+    active: Boolean = false,
+    danger: Boolean = false,
+    enabled: Boolean = true,
+    description: String? = null,
+    onClick: () -> Unit,
+) {
     val tint = when {
         !enabled -> Color.White.copy(alpha = 0.4f)
         danger -> Color(0xFFFF7A85)
@@ -418,7 +522,7 @@ private fun ToolButton(icon: ImageVector, label: String, active: Boolean = false
             .widthIn(min = 56.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(icon, null, tint = tint, modifier = Modifier.size(22.dp))
+        Icon(icon, description, tint = tint, modifier = Modifier.size(22.dp))
         Spacer(Modifier.height(4.dp))
         Text(label, style = MaterialTheme.typography.labelSmall, color = tint.copy(alpha = 0.9f), maxLines = 1)
     }

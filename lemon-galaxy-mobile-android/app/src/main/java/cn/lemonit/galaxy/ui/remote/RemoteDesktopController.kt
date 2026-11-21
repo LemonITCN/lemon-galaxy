@@ -11,8 +11,10 @@ import cn.lemonit.galaxy.core.bridge.DisplayOptions
 import cn.lemonit.galaxy.core.bridge.InputEvent
 import cn.lemonit.galaxy.core.bridge.PathInfo
 import cn.lemonit.galaxy.core.bridge.Platform
+import cn.lemonit.galaxy.core.bridge.RecordingInfo
 import cn.lemonit.galaxy.core.bridge.VideoCodec
 import cn.lemonit.galaxy.data.VideoQuality
+import cn.lemonit.galaxy.ui.components.Clock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,6 +24,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -116,10 +122,31 @@ data class RemoteUi(
     /** 正在本机播放被控端的声音 */
     val audioOn: Boolean = false,
     val audioBusy: Boolean = false,
+    /** 录像开始的时刻（Clock.now()）；null 表示没在录 */
+    val recordingSince: Long? = null,
+    /** 正在开始录像（等内核建文件、等关键帧） */
+    val recordingBusy: Boolean = false,
 ) {
+    val recording: Boolean get() = recordingSince != null
     val display: DisplayInfo? get() = displays.firstOrNull { it.id == displayId }
     val remoteW: Int get() = display?.width?.toInt() ?: videoW
     val remoteH: Int get() = display?.height?.toInt() ?: videoH
+}
+
+/** 录像文件名：LemonGalaxy-<设备名>-<yyyyMMdd-HHmmss>.mp4（设备名里文件系统不允许的字符换成 -）。 */
+fun recordingFileName(deviceName: String, at: Long): String {
+    val safe = deviceName.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "-").trim().trim('.').ifEmpty { "device" }
+    val ts = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(at))
+    return "LemonGalaxy-$safe-$ts.mp4"
+}
+
+/** 录像计时：不到 1 小时 mm:ss，否则 h:mm:ss。 */
+fun formatElapsed(ms: Long): String {
+    val t = (ms / 1000).coerceAtLeast(0)
+    val h = t / 3600
+    val m = t % 3600 / 60
+    val sec = t % 60
+    return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, sec) else String.format(Locale.US, "%02d:%02d", m, sec)
 }
 
 class RemoteDesktopController(
@@ -134,6 +161,12 @@ class RemoteDesktopController(
     audioWanted: Boolean = false,
     /** 开始播放声音失败（参数是原因），界面用提示条显示 */
     private val onAudioError: (String) -> Unit = {},
+    /** 录像存放目录（取不到时不能录） */
+    private val recordingDir: () -> File? = { null },
+    /** 录像停止并写好：[auto] 为真表示离开界面 / 切后台时自动停的（界面已不在，只提示保存位置） */
+    private val onRecordingSaved: (info: RecordingInfo, auto: Boolean) -> Unit = { _, _ -> },
+    /** 开始或停止录像失败（参数是原因） */
+    private val onRecordingError: (String) -> Unit = {},
 ) {
     private val _ui = MutableStateFlow(RemoteUi(title, platform, quality = quality, mouseMode = mouseMode))
     val ui: StateFlow<RemoteUi> = _ui.asStateFlow()
@@ -146,12 +179,18 @@ class RemoteDesktopController(
     private var audioGen = 0
     private var foreground = true
     private var stopped = false
+    /** 每次开始或停止录像加一：开始到一半被停掉时，迟到的结果直接收掉 */
+    private var recGen = 0
 
     val decoder = VideoDecoder(
         requestKeyframe = { channel?.requestKeyframe() },
         onVideoSize = { w, h -> _ui.update { it.copy(videoW = w, videoH = h, status = RemoteStatus.STREAMING) } },
         onCursorChanged = { x, y, v -> _ui.update { it.copy(cursorX = x, cursorY = y, cursorVisible = v) } },
-        onClosedByRemote = { reason -> _ui.update { it.copy(status = RemoteStatus.FAILED, error = reason) } },
+        onClosedByRemote = { reason ->
+            _ui.update { it.copy(status = RemoteStatus.FAILED, error = reason) }
+            // 画面断了：录像到此为止（界面还在，弹保存提示）
+            scope.launch { stopRecording(auto = false) }
+        },
     )
 
     fun start() {
@@ -173,6 +212,7 @@ class RemoteDesktopController(
                         if (r != null) {
                             _ui.update { it.copy(privacyOn = false) }
                             stopAudio()
+                            stopRecording(auto = false)
                         }
                     }
                 }
@@ -188,6 +228,8 @@ class RemoteDesktopController(
     }
 
     private suspend fun open(displayId: UInt) {
+        // 换屏幕 / 重开画面前先停录像拿到结果（关画面时内核也会结束录像，但不返回信息）
+        stopRecording(auto = false)
         channel?.stop()
         channel = null
         _ui.update { it.copy(displayId = displayId, status = RemoteStatus.CONNECTING, error = null) }
@@ -243,6 +285,7 @@ class RemoteDesktopController(
         foreground = fg
         if (!fg) {
             stopAudio()
+            stopRecording(auto = true)
         } else if (audioWanted && channel != null) {
             startAudio()
         }
@@ -285,6 +328,55 @@ class RemoteDesktopController(
         a?.stop()
     }
 
+    /** 工具栏录像按钮：没在录就开始，在录就停止。 */
+    fun toggleRecording() {
+        if (_ui.value.recording) stopRecording(auto = false) else startRecording()
+    }
+
+    fun startRecording() {
+        val s = _ui.value
+        val ch = channel
+        if (ch == null || s.recording || s.recordingBusy || stopped || !foreground) return
+        val dir = recordingDir() ?: return
+        val file = File(dir, recordingFileName(s.title, Clock.now()))
+        val gen = ++recGen
+        _ui.update { it.copy(recordingBusy = true) }
+        scope.launch {
+            val error = try {
+                withContext(Dispatchers.IO) { dir.mkdirs() }
+                // 正在收听声音时一起录
+                ch.startRecording(file.path, withAudio = _ui.value.audioOn)
+                null
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                e
+            }
+            if (gen != recGen || ch !== channel) {
+                // 等待期间被停掉、离开或换了画面：这一路不要了
+                if (error == null) runCatching { ch.stopRecording() }.getOrNull()?.paths?.forEach { File(it).delete() }
+                return@launch
+            }
+            _ui.update { it.copy(recordingBusy = false, recordingSince = if (error == null) Clock.now() else null) }
+            error?.userMessage()?.takeIf { it.isNotEmpty() }?.let(onRecordingError)
+        }
+    }
+
+    /** 停止录像并交出结果；[auto] 为真表示离开界面 / 切后台时自动停的。没在录时什么也不做。 */
+    fun stopRecording(auto: Boolean) {
+        recGen++
+        val wasRecording = _ui.value.recording
+        if (wasRecording || _ui.value.recordingBusy) _ui.update { it.copy(recordingSince = null, recordingBusy = false) }
+        if (!wasRecording) return
+        val ch = channel ?: return
+        try {
+            val info = ch.stopRecording()
+            if (info.paths.isNotEmpty()) onRecordingSaved(info, auto)
+        } catch (e: Exception) {
+            e.userMessage().takeIf { it.isNotEmpty() }?.let(onRecordingError)
+        }
+    }
+
     fun setSurface(s: Surface?) = decoder.setSurface(s)
 
     fun send(e: InputEvent) {
@@ -308,6 +400,8 @@ class RemoteDesktopController(
     }
 
     fun stop() {
+        // 离开远程桌面：先停录像拿到结果
+        stopRecording(auto = true)
         stopped = true
         stopAudio()
         // 离开远程桌面时关掉隐私屏（同一会话可能还被终端、文件用着，被控端不会自动关）

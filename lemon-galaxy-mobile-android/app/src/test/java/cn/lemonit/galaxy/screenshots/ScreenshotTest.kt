@@ -77,6 +77,8 @@ import cn.lemonit.galaxy.ui.hosts.sshViaText
 import cn.lemonit.galaxy.ui.login.LoginScreen
 import cn.lemonit.galaxy.ui.remote.RemoteActions
 import cn.lemonit.galaxy.ui.remote.RemoteDesktopScreen
+import cn.lemonit.galaxy.ui.remote.RecordingSavedDialog
+import cn.lemonit.galaxy.core.bridge.RecordingInfo
 import cn.lemonit.galaxy.ui.settings.AboutInfo
 import cn.lemonit.galaxy.ui.settings.SettingsActions
 import cn.lemonit.galaxy.ui.settings.SettingsScreen
@@ -235,8 +237,16 @@ class ScreenshotTest {
 
     private fun hostSheet(dark: Boolean, deviceId: String, name: String) = shot(name, dark) {
         val item = HostTree.items(Fixtures.hosts).first { it is HostItem.Device && it.device.id == deviceId }
-        Surface(color = MaterialTheme.colorScheme.surfaceContainerLow) { HostActionsContent(item, onAction = {}) }
+        Surface(color = MaterialTheme.colorScheme.surfaceContainerLow) {
+            HostActionsContent(item, onAction = {}, canWake = Fixtures.hosts.canWake(deviceId))
+        }
     }
+
+    /** 离线、能远程开机的设备：面板里有「远程开机」与 i 说明 */
+    @Test fun hostSheetWakeZhLight() = hostSheet(false, MockData.DEV_RENDER, "host_sheet_wake")
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun hostSheetWakeEnDark() = hostSheet(true, MockData.DEV_RENDER, "host_sheet_wake")
 
     @Test fun hostSheetZhLight() = hostSheet(false, MockData.DEV_OFFICE_PC, "host_sheet")
 
@@ -407,14 +417,22 @@ class ScreenshotTest {
         override fun onDisconnect() = Unit
     }
 
-    private fun remote(dark: Boolean, toolbar: Boolean, keyboard: Boolean, name: String, privacy: Boolean = false, soundOn: Boolean = true) {
+    private fun remote(
+        dark: Boolean,
+        toolbar: Boolean,
+        keyboard: Boolean,
+        name: String,
+        privacy: Boolean = false,
+        soundOn: Boolean = true,
+        recording: Boolean = false,
+    ) {
         val bytes = context.assets.open("mock/desktop_preview.jpg").use { it.readBytes() }
         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size).asImageBitmap()
         shot(name, dark) {
             RemoteDesktopScreen(
                 ui = Fixtures.remote(zh)
                     .let { if (privacy) it.copy(privacySupported = true, privacyAllowed = true, privacyOn = true) else it }
-                    .copy(audioOn = soundOn),
+                    .copy(audioOn = soundOn, recordingSince = if (recording) MockData.NOW - 83_000 else null),
                 actions = noRemoteActions,
                 video = { m -> Image(bmp, null, contentScale = ContentScale.FillBounds, modifier = m) },
                 initialToolbarOpen = toolbar,
@@ -433,6 +451,30 @@ class ScreenshotTest {
     /** 声音已关：开关不高亮、图标为静音 */
     @Test @Config(qualifiers = PHONE_LAND_EN)
     fun remoteSoundOffEnLight() = remote(false, toolbar = true, keyboard = false, name = "remote_sound_off", soundOn = false)
+
+    /** 录像中：工具栏里红色停止键 + 计时 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remoteRecordingZhDark() = remote(true, toolbar = true, keyboard = false, name = "remote_recording", recording = true)
+
+    /** 录像中、工具栏收起：左上角红点 + 计时 */
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remoteRecordingBadgeEnLight() = remote(false, toolbar = false, keyboard = false, name = "remote_recording_badge", recording = true)
+
+    private fun recordingSaved(dark: Boolean) = shotScreen("remote_recording_saved", dark) {
+        val path = "Android/data/cn.lemonit.galaxy/files/Movies/LemonGalaxy/LemonGalaxy-Office PC-20261121-213000.mp4"
+        RecordingSavedDialog(
+            RecordingInfo(listOf("/storage/emulated/0/$path"), 83_400u, 12_874_342u),
+            location = path,
+            canSaveToGallery = true,
+            onShare = {}, onSaveToGallery = {}, onDismiss = {},
+        )
+    }
+
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remoteRecordingSavedZhLight() = recordingSaved(false)
+
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remoteRecordingSavedEnDark() = recordingSaved(true)
 
     @Test @Config(qualifiers = PHONE_LAND_EN)
     fun remoteKeyboardEnLight() = remote(false, toolbar = false, keyboard = true, name = "remote_keyboard")

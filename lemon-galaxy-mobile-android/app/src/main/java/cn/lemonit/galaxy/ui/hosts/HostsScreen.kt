@@ -320,7 +320,8 @@ private fun FolderRow(row: TreeRow, actions: HostsActions) {
     }
 }
 
-/** 条目行（设备、SSH、RDP）。 */
+/** 条目行（设备、SSH、RDP）。长按与点按一样弹出操作面板（离线设备在面板里远程开机）。 */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ItemRow(item: HostItem, depth: Int, path: String?, selected: Boolean = false, onClick: () -> Unit) {
     val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
@@ -330,7 +331,7 @@ fun ItemRow(item: HostItem, depth: Int, path: String?, selected: Boolean = false
             .padding(horizontal = 8.dp, vertical = 1.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(bg)
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onClick)
             .padding(start = 8.dp + 20.dp * depth, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

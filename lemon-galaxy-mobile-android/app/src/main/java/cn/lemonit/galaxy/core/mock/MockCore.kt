@@ -230,6 +230,26 @@ internal class MockClient(
         listener.onVaultChanged()
     }
 
+    override fun canWake(deviceId: String): Boolean {
+        val d = devices.firstOrNull { it.id == deviceId } ?: return false
+        return !d.online && deviceId in MockData.WAKE_RELAYS
+    }
+
+    /** 模拟远程开机：稍等后返回代发设备；8 秒后让设备上线，演示开机成功。 */
+    override suspend fun wakeDevice(deviceId: String): List<String> {
+        val d = devices.firstOrNull { it.id == deviceId } ?: throw GalaxyException.NotFound(tr("找不到这台设备", "Device not found"))
+        delay(700)
+        val relays = MockData.WAKE_RELAYS[deviceId]
+            ?: throw GalaxyException.Other(tr("这台设备还没有上报网卡地址（升级到新版本并上线一次后才能远程开机）", "This device has not reported its network adapter address yet (update it and bring it online once to enable Wake-on-LAN)"))
+        if (d.online) return relays
+        scope.launch {
+            delay(WAKE_ONLINE_DELAY_MS)
+            devices = devices.map { if (it.id == deviceId) it.copy(online = true, lastSeenAt = System.currentTimeMillis()) else it }
+            listener.onDevicesChanged()
+        }
+        return relays
+    }
+
     private fun hostFor(d: DeviceInfo) = hosts.getOrPut(d.id) {
         MockHost(d.id, d.hostname, d.platform, "demo", scope, ::tr)
     }
@@ -433,6 +453,8 @@ internal class MockClient(
 
     companion object {
         private const val SESSION_KEY = "mock.session"
+        /** 远程开机后多久「开机完成」上线 */
+        const val WAKE_ONLINE_DELAY_MS = 8_000L
         val SERVER_RE = Regex("^[A-Za-z0-9.\\-\\[\\]:]+:\\d{1,5}#sha256-[A-Za-z0-9+/_=\\-]{8,}$")
     }
 }
