@@ -6,6 +6,7 @@ pub mod exec;
 pub mod files;
 pub mod fio;
 pub mod platform;
+pub mod rate;
 pub mod serve;
 pub mod service;
 pub mod sysuser;

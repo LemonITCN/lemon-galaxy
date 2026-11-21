@@ -310,15 +310,45 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
                     }
                 }
             });
+            // 码率自适应：每秒看一次连接的丢包与拥塞
+            let rate = Arc::new(parking_lot::Mutex::new(crate::rate::RateCtl::new(req.bitrate_kbps.clamp(200, 200_000), std::time::Instant::now())));
+            let adapt = {
+                let (rate, conn, platform, display) = (rate.clone(), conn.clone(), platform.clone(), req.display_id);
+                tokio::spawn(async move {
+                    let mut max_free = conn.datagram_send_buffer_space().max(1);
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let st = conn.stats();
+                        let free = conn.datagram_send_buffer_space();
+                        max_free = max_free.max(free);
+                        let sample = crate::rate::Sample {
+                            sent_packets: st.path.sent_packets,
+                            lost_packets: st.path.lost_packets,
+                            congestion_events: st.path.congestion_events,
+                            buffer_free: free as f32 / max_free as f32,
+                        };
+                        let next = rate.lock().on_sample(sample, std::time::Instant::now());
+                        if let Some(k) = next {
+                            tracing::debug!("画面码率自适应 → {k} kbps（丢包 {} / 发送 {}）", st.path.lost_packets, st.path.sent_packets);
+                            let p = platform.clone();
+                            let _ = tokio::task::spawn_blocking(move || p.set_bitrate(display, k)).await;
+                        }
+                    }
+                })
+            };
             while let Ok(Some(m)) = fio::read::<_, DisplayIn>(&mut recv).await {
                 match m {
                     DisplayIn::Input(ev) if can_control => platform.inject(req.display_id, ev),
                     DisplayIn::Input(_) => {}
                     DisplayIn::RequestKeyframe => platform.request_keyframe(req.display_id),
-                    DisplayIn::SetBitrate(k) => platform.set_bitrate(req.display_id, k.clamp(200, 200_000)),
+                    DisplayIn::SetBitrate(k) => {
+                        let k = rate.lock().set_ceiling(k.clamp(200, 200_000), std::time::Instant::now());
+                        platform.set_bitrate(req.display_id, k);
+                    }
                     DisplayIn::Stop => break,
                 }
             }
+            adapt.abort();
             platform.stop_capture(req.display_id);
             *sink.ctl.lock() = None;
             writer.abort();
