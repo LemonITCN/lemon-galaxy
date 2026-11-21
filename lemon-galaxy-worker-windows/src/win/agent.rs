@@ -32,12 +32,7 @@ fn log(out: &SyncSender<FromAgent>, error: bool, text: String) {
 }
 
 fn set_dpi_aware() {
-    use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
-    unsafe {
-        if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_err() {
-            let _ = windows::Win32::UI::WindowsAndMessaging::SetProcessDPIAware();
-        }
-    }
+    super::compat::set_dpi_aware();
 }
 
 pub fn main() -> i32 {

@@ -1,6 +1,7 @@
 mod agent;
 mod capture;
 mod clipboard;
+mod compat;
 mod encode;
 mod input;
 mod ipc;

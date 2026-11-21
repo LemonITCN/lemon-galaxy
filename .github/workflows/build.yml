@@ -188,6 +188,55 @@ jobs:
             dist/lemon-galaxy-server.exe
           if-no-files-found: error
 
+  windows7:
+    name: Windows 7 兼容版被控端
+    needs: web
+    runs-on: windows-2025
+    # 用 nightly 的 win7 目标（Rust 标准目标要求 Windows 10），先不挡发布
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v7
+      - name: 准备 nightly
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustc +nightly -vV
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-win7-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-win7-
+      - name: 编译
+        run: |
+          cargo +nightly build -Z build-std=std,panic_abort --release --target x86_64-win7-windows-msvc -p lemon-galaxy-worker-windows
+          mkdir -p dist && cp target/x86_64-win7-windows-msvc/release/lemon-galaxy-worker.exe dist/
+          ls -l dist
+      - name: 检查没有导入 Windows 8 / 10 才有的函数
+        run: |
+          DUMPBIN="$(ls /c/Program\ Files/Microsoft\ Visual\ Studio/*/*/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe 2>/dev/null | tail -1)"
+          [ -n "$DUMPBIN" ] || { echo "找不到 dumpbin"; exit 1; }
+          "$DUMPBIN" -nologo -imports dist/lemon-galaxy-worker.exe > imports.txt
+          grep -E "\.dll$" imports.txt | sort -u
+          BAD="ProcessPrng|WaitOnAddress|WakeByAddress|GetSystemTimePreciseAsFileTime|SetThreadDescription|GetDpiForMonitor|SetProcessDpiAwarenessContext|CreatePseudoConsole|ResizePseudoConsole|ClosePseudoConsole|api-ms-win-core-synch-l1-2-0|bcryptprimitives"
+          if grep -E "$BAD" imports.txt; then echo "导入了 Windows 7 没有的函数"; exit 1; fi
+          echo "导入表检查通过"
+      - name: 冒烟测试（在新系统上跑一下）
+        run: |
+          dist/lemon-galaxy-worker.exe version
+          dist/lemon-galaxy-worker.exe selftest-capture || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows7-x86_64
+          path: dist/lemon-galaxy-worker.exe
+          if-no-files-found: error
+
   macos:
     name: Mac 客户端
     runs-on: macos-26
@@ -310,7 +359,7 @@ jobs:
     name: 发布
     # Windows 被控端还在打磨：它失败时照常发布，只是不带 Windows 文件
     if: always() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && needs.rust-tests.result == 'success' && needs.linux.result == 'success' && needs.macos.result == 'success' && needs.android.result == 'success'
-    needs: [rust-tests, linux, windows, macos, android]
+    needs: [rust-tests, linux, windows, windows7, macos, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -337,6 +386,9 @@ jobs:
             chmod +x "out/lemon-galaxy-worker-$V-linux-$a"
             tar -C "art/linux-$a" -czf "out/lemon-galaxy-server-$V-linux-$a.tar.gz" lemon-galaxy-server
           done
+          if [ -f art/windows7-x86_64/lemon-galaxy-worker.exe ]; then
+            cp art/windows7-x86_64/lemon-galaxy-worker.exe "out/lemon-galaxy-worker-$V-windows7-x86_64.exe"
+          fi
           WINS=()
           for a in x86_64 aarch64; do
             if [ -f "art/windows-$a/lemon-galaxy-worker.exe" ]; then
@@ -370,6 +422,7 @@ jobs:
               case $a in x86_64) W="x64" ;; *) W="ARM64" ;; esac
               echo "| Windows 被控端 | Windows 10 / Server 2016 及以上，$W | [lemon-galaxy-worker-$V-windows-$a.exe]($DL/lemon-galaxy-worker-$V-windows-$a.exe) |"
             done
+            [ -f "out/lemon-galaxy-worker-$V-windows7-x86_64.exe" ] && echo "| Windows 被控端（兼容版） | Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2，x64 | [lemon-galaxy-worker-$V-windows7-x86_64.exe]($DL/lemon-galaxy-worker-$V-windows7-x86_64.exe) |"
             for a in "${WINS[@]}"; do
               case $a in x86_64) W="x64" ;; *) W="ARM64" ;; esac
               [ -f "out/lemon-galaxy-server-$V-windows-$a.zip" ] && echo "| 服务器（试用） | Windows，$W | [lemon-galaxy-server-$V-windows-$a.zip]($DL/lemon-galaxy-server-$V-windows-$a.zip) |"

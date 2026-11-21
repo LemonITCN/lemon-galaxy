@@ -18,7 +18,6 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::StationsAndDesktops::{CloseDesktop, GetThreadDesktop, GetUserObjectInformationW, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, HDESK, UOI_NAME};
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, ICONINFO};
 
 /// 一块屏幕。坐标是虚拟桌面上的物理像素。
@@ -51,8 +50,7 @@ unsafe extern "system" fn enum_proc(hm: HMONITOR, _hdc: HDC, _rc: *mut RECT, dat
         let n = mi.szDevice.iter().position(|c| *c == 0).unwrap_or(mi.szDevice.len());
         let device = String::from_utf16_lossy(&mi.szDevice[..n]);
         let id = device.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<String>().chars().rev().collect::<String>().parse::<u32>().unwrap_or(v.len() as u32 + 1);
-        let (mut dx, mut dy) = (96u32, 96u32);
-        let scale = if GetDpiForMonitor(hm, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).is_ok() { dx as f32 / 96.0 } else { 1.0 };
+        let scale = super::compat::monitor_scale(hm);
         v.push(Monitor { id, device, rect: mi.monitorInfo.rcMonitor, primary: mi.monitorInfo.dwFlags & 1 != 0, scale });
     }
     BOOL(1)
