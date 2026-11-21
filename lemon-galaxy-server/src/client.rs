@@ -67,6 +67,7 @@ struct UserRow {
     wrapped: Option<Vec<u8>>,
     nonce: Option<Vec<u8>>,
     ai_enabled: bool,
+    #[allow(dead_code)]
     failed: i64,
     locked_until: i64,
 }

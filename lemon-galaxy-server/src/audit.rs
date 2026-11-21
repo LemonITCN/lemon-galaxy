@@ -11,12 +11,6 @@ pub struct Actor {
     pub ip: String,
 }
 
-impl Actor {
-    pub fn system() -> Self {
-        Self { kind: "system", id: String::new(), name: "system".into(), ip: String::new() }
-    }
-}
-
 pub struct Target {
     pub kind: &'static str,
     pub id: String,

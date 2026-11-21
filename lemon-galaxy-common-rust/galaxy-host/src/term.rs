@@ -116,7 +116,8 @@ impl TermManager {
             let fl = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
             libc::fcntl(master.as_raw_fd(), libc::F_SETFL, fl | libc::O_NONBLOCK);
         }
-        let master = Arc::new(tokio::io::unix::AsyncFd::new(master)?);
+        // 安全：master 是刚打开的 PTY 主端，所有权交给 AsyncFd，期间不会被别处关闭
+        let master = Arc::new(unsafe { tokio::io::unix::AsyncFd::register(master) }.map_err(|e| anyhow::anyhow!("{e}"))?);
         let id: String = format!("{:08x}", rand::random::<u32>());
         let title = format!("{}@{}", user.name, crate::hostname());
         let s = Arc::new(TermSession {

@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, watch};
 #[derive(uniffi::Object)]
 pub struct PeerSession {
     pub(crate) inner: Arc<cs::PeerSession>,
+    #[allow(dead_code)]
     pub(crate) name: String,
 }
 

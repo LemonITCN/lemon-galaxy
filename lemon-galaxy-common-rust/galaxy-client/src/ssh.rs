@@ -103,6 +103,8 @@ pub struct SshSession {
     _via: Option<SshViaHold>,
 }
 
+/// 只为保持跳转连接存活
+#[allow(dead_code)]
 enum SshViaHold {
     Device(Arc<PeerSession>),
     Ssh(Arc<SshSession>),

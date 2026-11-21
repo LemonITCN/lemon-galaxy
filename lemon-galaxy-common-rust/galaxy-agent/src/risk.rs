@@ -83,6 +83,8 @@ enum Tok {
 }
 
 /// POSIX shell 分词。返回 None 表示语法不完整（引号不配对等）。
+// 最后一次 flush 后的赋值用不到，属正常
+#[allow(unused_assignments)]
 fn tokenize(s: &str) -> Option<Vec<(Tok, bool)>> {
     let c: Vec<char> = s.chars().collect();
     let mut i = 0;
@@ -273,6 +275,7 @@ struct SimpleCmd {
     words: Vec<String>,
     dynamic_cmd: bool,
     redirects_out: Vec<(String, bool)>, // (目标, 是否追加)
+    #[allow(dead_code)]
     piped_into: bool,
     piped_from_net: bool,
 }

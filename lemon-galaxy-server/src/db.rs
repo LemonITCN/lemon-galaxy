@@ -242,7 +242,3 @@ impl Db {
     }
 }
 
-/// 读取可选 BLOB 列。
-pub fn opt_blob(row: &rusqlite::Row, idx: usize) -> rusqlite::Result<Option<Vec<u8>>> {
-    row.get::<_, Option<Vec<u8>>>(idx)
-}

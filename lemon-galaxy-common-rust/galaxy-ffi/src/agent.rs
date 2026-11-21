@@ -63,6 +63,7 @@ impl ga::AgentUi for UiBridge {
 pub struct AgentConversation {
     pub(crate) agent: Arc<ga::Agent>,
     pub(crate) meta: Arc<Mutex<SavedConversation>>,
+    #[allow(dead_code)]
     pub(crate) key: [u8; 32],
     pub(crate) foreground: Arc<Mutex<bool>>,
 }

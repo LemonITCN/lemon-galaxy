@@ -41,7 +41,6 @@ pub struct PeerSession {
     stop_probe: watch::Sender<bool>,
     signal: Option<Arc<SignalClient>>,
     video: Mutex<HashMap<u8, mpsc::Sender<Bytes>>>,
-    next_channel: Mutex<u8>,
     ms: Arc<MagicSock>,
     _peer: Arc<Peer>,
 }
@@ -69,7 +68,6 @@ impl PeerSession {
             stop_probe,
             signal,
             video: Default::default(),
-            next_channel: Mutex::new(1),
             ms,
             _peer: peer,
         });

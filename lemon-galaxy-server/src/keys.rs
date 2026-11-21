@@ -10,6 +10,7 @@ pub struct Keys {
     pub master: [u8; 32],
     pub opaque: OpaqueServer,
     pub tls: Arc<rustls::ServerConfig>,
+    #[allow(dead_code)]
     pub tls_cert_der: Vec<u8>,
     pub fingerprint: String,
 }

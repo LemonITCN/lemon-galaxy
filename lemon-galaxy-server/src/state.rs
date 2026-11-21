@@ -66,6 +66,7 @@ pub struct OnlineDevice {
     pub accounts: Vec<u64>,
     pub assist_code: Option<String>,
     pub hostname: String,
+    #[allow(dead_code)]
     pub connected_at: i64,
 }
 
@@ -95,10 +96,6 @@ impl Hub {
         }
     }
 
-    pub fn is_online(&self, id: &DeviceId) -> bool {
-        self.devices.read().contains_key(id)
-    }
-
     /// 发给某账号下所有在线设备。
     pub fn notify_user(&self, user_id: u64, msg: WsMsg) {
         for d in self.devices.read().values() {
@@ -110,9 +107,6 @@ impl Hub {
         }
     }
 
-    pub fn online_ids(&self) -> Vec<DeviceId> {
-        self.devices.read().keys().copied().collect()
-    }
 
     pub fn set_accounts(&self, id: &DeviceId, accounts: Vec<u64>) {
         if let Some(d) = self.devices.write().get_mut(id) {
@@ -129,6 +123,7 @@ pub enum RelayEnd {
 }
 
 pub struct RelayPair {
+    #[allow(dead_code)]
     pub conn_id: ConnId,
     pub tokens: [[u8; 16]; 2],
     pub ends: [Mutex<RelayEnd>; 2],
@@ -238,6 +233,7 @@ impl RateLimiter {
 pub struct AppState {
     pub db: Db,
     pub db_path: PathBuf,
+    #[allow(dead_code)]
     pub data_dir: PathBuf,
     pub keys: Keys,
     pub settings: RwLock<Settings>,
