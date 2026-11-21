@@ -21,9 +21,11 @@ final class KeychainStore: SecureStore, @unchecked Sendable {
         q[kSecMatchLimit] = kSecMatchLimitOne
         var out: CFTypeRef?
         var status = SecItemCopyMatching(q as CFDictionary, &out)
-        if status == errSecMissingEntitlement || status == errSecNotAvailable {
-            // 临时签名的开发包没有钥匙串访问组，退回传统（文件型）钥匙串
+        if status != errSecSuccess {
+            // 没有钥匙串访问组的包（开发证书、临时签名）写入时会退回传统（文件型）钥匙串，
+            // 而数据保护钥匙串在这种包里查不到时报的是「找不到」而不是「缺权限」，所以只要没查到就再查传统钥匙串
             q[kSecUseDataProtectionKeychain] = nil
+            out = nil
             status = SecItemCopyMatching(q as CFDictionary, &out)
         }
         return status == errSecSuccess ? out as? Data : nil
