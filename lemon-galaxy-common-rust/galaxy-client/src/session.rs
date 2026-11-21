@@ -484,6 +484,17 @@ impl PeerSession {
 
     // ---------------- 端口映射 ----------------
 
+    /// 经被控端打开一条到 `host:port` 的 TCP 连接（SSH 经设备跳转等用）。
+    pub async fn open_tcp(&self, host: &str, port: u16) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+        let (s, mut r) = self.open(StreamOpen::PortForward { host: host.to_string(), port }).await?;
+        match tokio::time::timeout(Duration::from_secs(20), frame::read::<ForwardReply>(&mut r)).await {
+            Ok(Ok(Some(ForwardReply::Ok))) => Ok((s, r)),
+            Ok(Ok(Some(ForwardReply::Error(e)))) => Err(ClientError::Network(format!("被控端连不上 {host}:{port}：{}", e.message))),
+            Err(_) => Err(ClientError::Network(format!("被控端连接 {host}:{port} 超时"))),
+            _ => Err(ClientError::Network(format!("被控端连不上 {host}:{port}"))),
+        }
+    }
+
     /// 在本机监听 `local_port`，每个连接经被控端转发到 `host:port`。返回实际端口。
     pub async fn forward_port(self: &Arc<Self>, local_port: u16, host: String, port: u16) -> Result<(u16, tokio::task::JoinHandle<()>)> {
         let l = tokio::net::TcpListener::bind(("127.0.0.1", local_port)).await.map_err(|e| ClientError::Other(e.to_string()))?;

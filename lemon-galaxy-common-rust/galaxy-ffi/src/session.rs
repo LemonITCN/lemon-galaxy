@@ -110,7 +110,7 @@ impl PeerSession {
     }
 
     pub fn files(&self) -> Arc<FileClient> {
-        Arc::new(FileClient { s: self.inner.clone() })
+        Arc::new(FileClient { b: FsBackend::Peer(self.inner.clone()) })
     }
 
     pub async fn exec(&self, request: ExecRequest) -> Result<ExecResult> {
@@ -237,6 +237,25 @@ impl TerminalChannel {
         });
         Arc::new(Self { id: ch.session_id.clone(), title: ch.title.clone(), tx })
     }
+
+    /// SSH 终端（没有断线继承：断开即结束）。
+    pub(crate) fn from_ssh(t: galaxy_client::ssh::SshTerminal) -> Arc<Self> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<TermCmd>();
+        let title = t.title.clone();
+        rt().spawn(async move {
+            while let Some(m) = rx.recv().await {
+                match m {
+                    TermCmd::Write(d) => t.write(d),
+                    TermCmd::Resize(w, h) => t.resize(w, h),
+                    TermCmd::Detach | TermCmd::Kill => {
+                        t.close();
+                        break;
+                    }
+                }
+            }
+        });
+        Arc::new(Self { id: format!("ssh-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]), title, tx })
+    }
 }
 
 #[uniffi::export]
@@ -264,84 +283,157 @@ impl TerminalChannel {
 
 // ---------------- 文件 ----------------
 
+/// 文件操作的两种来源：LemonGalaxy 设备（自有协议）与 SSH 主机（SFTP）。
+#[derive(Clone)]
+pub(crate) enum FsBackend {
+    Peer(Arc<cs::PeerSession>),
+    Ssh(Arc<galaxy_client::ssh::SshSession>),
+}
+
 #[derive(uniffi::Object)]
 pub struct FileClient {
-    s: Arc<cs::PeerSession>,
+    pub(crate) b: FsBackend,
 }
 
 #[uniffi::export]
 impl FileClient {
     pub async fn home(&self) -> Result<String> {
-        let s = self.s.clone();
-        run(async move { s.fs_home().await.map_err(Into::into) }).await
+        let b = self.b.clone();
+        run(async move {
+            match b {
+                FsBackend::Peer(s) => s.fs_home().await.map_err(Into::into),
+                FsBackend::Ssh(s) => s.fs_home().await.map_err(Into::into),
+            }
+        })
+        .await
     }
 
     pub async fn list(&self, path: String) -> Result<Vec<FileEntry>> {
-        let s = self.s.clone();
-        run(async move { Ok(s.fs_list(&path).await?.into_iter().map(Into::into).collect()) }).await
+        let b = self.b.clone();
+        run(async move {
+            let v = match b {
+                FsBackend::Peer(s) => s.fs_list(&path).await?,
+                FsBackend::Ssh(s) => s.fs_list(&path).await?,
+            };
+            Ok(v.into_iter().map(Into::into).collect())
+        })
+        .await
     }
 
     pub async fn stat(&self, path: String) -> Result<FileEntry> {
-        let s = self.s.clone();
-        run(async move { Ok(s.fs_stat(&path).await?.into()) }).await
+        let b = self.b.clone();
+        run(async move {
+            let e = match b {
+                FsBackend::Peer(s) => s.fs_stat(&path).await?,
+                FsBackend::Ssh(s) => s.fs_stat(&path).await?,
+            };
+            Ok(e.into())
+        })
+        .await
     }
 
     pub async fn realpath(&self, path: String) -> Result<String> {
-        let s = self.s.clone();
+        let b = self.b.clone();
         run(async move {
-            let _ = s.fs_op(pp::FileOp::Realpath { path: path.clone() }).await;
-            Ok(s.fs_stat(&path).await?.path)
+            match b {
+                FsBackend::Peer(s) => {
+                    let _ = s.fs_op(pp::FileOp::Realpath { path: path.clone() }).await;
+                    Ok(s.fs_stat(&path).await?.path)
+                }
+                FsBackend::Ssh(s) => s.fs_realpath(&path).await.map_err(Into::into),
+            }
         })
         .await
     }
 
     pub async fn mkdir(&self, path: String) -> Result<()> {
-        let s = self.s.clone();
-        run(async move { s.fs_op(pp::FileOp::Mkdir { path, parents: true }).await.map_err(Into::into) }).await
+        let b = self.b.clone();
+        run(async move {
+            match b {
+                FsBackend::Peer(s) => s.fs_op(pp::FileOp::Mkdir { path, parents: true }).await.map_err(Into::into),
+                FsBackend::Ssh(s) => s.fs_mkdir(&path).await.map_err(Into::into),
+            }
+        })
+        .await
     }
 
     pub async fn rename(&self, from: String, to: String) -> Result<()> {
-        let s = self.s.clone();
-        run(async move { s.fs_op(pp::FileOp::Rename { from, to, overwrite: false, origin: pp::Origin::User }).await.map_err(Into::into) }).await
+        let b = self.b.clone();
+        run(async move {
+            match b {
+                FsBackend::Peer(s) => s.fs_op(pp::FileOp::Rename { from, to, overwrite: false, origin: pp::Origin::User }).await.map_err(Into::into),
+                FsBackend::Ssh(s) => s.fs_rename(&from, &to).await.map_err(Into::into),
+            }
+        })
+        .await
     }
 
     pub async fn remove(&self, path: String, recursive: bool) -> Result<()> {
-        let s = self.s.clone();
-        run(async move { s.fs_op(pp::FileOp::Remove { path, recursive, origin: pp::Origin::User }).await.map_err(Into::into) }).await
+        let b = self.b.clone();
+        run(async move {
+            match b {
+                FsBackend::Peer(s) => s.fs_op(pp::FileOp::Remove { path, recursive, origin: pp::Origin::User }).await.map_err(Into::into),
+                FsBackend::Ssh(s) => s.fs_remove(&path, recursive).await.map_err(Into::into),
+            }
+        })
+        .await
     }
 
     pub async fn chmod(&self, path: String, mode: u32) -> Result<()> {
-        let s = self.s.clone();
-        run(async move { s.fs_op(pp::FileOp::Chmod { path, mode }).await.map_err(Into::into) }).await
+        let b = self.b.clone();
+        run(async move {
+            match b {
+                FsBackend::Peer(s) => s.fs_op(pp::FileOp::Chmod { path, mode }).await.map_err(Into::into),
+                FsBackend::Ssh(s) => s.fs_chmod(&path, mode).await.map_err(Into::into),
+            }
+        })
+        .await
     }
 
     pub async fn search(&self, root: String, pattern: String, content: bool) -> Result<Vec<FileEntry>> {
-        let s = self.s.clone();
-        run(async move { Ok(s.fs_search(&root, &pattern, content, 500).await?.into_iter().map(Into::into).collect()) }).await
+        let b = self.b.clone();
+        run(async move {
+            let v = match b {
+                FsBackend::Peer(s) => s.fs_search(&root, &pattern, content, 500).await?,
+                FsBackend::Ssh(s) => s.fs_search(&root, &pattern, content, 500).await?,
+            };
+            Ok(v.into_iter().map(Into::into).collect())
+        })
+        .await
     }
 
     pub async fn read_text(&self, path: String, max_bytes: u64) -> Result<String> {
-        let s = self.s.clone();
+        let b = self.b.clone();
         run(async move {
-            let b = s.fs_read_all(&path, if max_bytes == 0 { 8 << 20 } else { max_bytes }).await?;
-            String::from_utf8(b).map_err(|_| GalaxyError::Other { detail: "不是 UTF-8 文本文件".into() })
+            let max = if max_bytes == 0 { 8 << 20 } else { max_bytes };
+            let data = match b {
+                FsBackend::Peer(s) => s.fs_read_all(&path, max).await?,
+                FsBackend::Ssh(s) => s.fs_read_all(&path, max).await?,
+            };
+            String::from_utf8(data).map_err(|_| GalaxyError::Other { detail: "不是 UTF-8 文本文件".into() })
         })
         .await
     }
 
     pub async fn write_text(&self, path: String, text: String) -> Result<()> {
-        let s = self.s.clone();
-        run(async move { s.fs_write(&path, 0, true, None, None, pp::Origin::User, text.as_bytes()).await.map(|_| ()).map_err(Into::into) }).await
+        let b = self.b.clone();
+        run(async move {
+            match b {
+                FsBackend::Peer(s) => s.fs_write(&path, 0, true, None, None, pp::Origin::User, text.as_bytes()).await.map(|_| ()).map_err(Into::into),
+                FsBackend::Ssh(s) => s.fs_write_all(&path, text.as_bytes()).await.map_err(Into::into),
+            }
+        })
+        .await
     }
 
     /// 下载到本地文件（本地已有部分则续传）。
     pub fn download(&self, remote: String, local: String, listener: Arc<dyn TransferListener>) -> Arc<Transfer> {
-        Transfer::start(self.s.clone(), TransferDir::Download, remote, local, listener)
+        Transfer::start(self.b.clone(), TransferDir::Download, remote, local, listener)
     }
 
     /// 上传本地文件（远端已有部分则续传）。
     pub fn upload(&self, local: String, remote: String, listener: Arc<dyn TransferListener>) -> Arc<Transfer> {
-        Transfer::start(self.s.clone(), TransferDir::Upload, remote, local, listener)
+        Transfer::start(self.b.clone(), TransferDir::Upload, remote, local, listener)
     }
 }
 
@@ -363,7 +455,7 @@ impl cs::TransferProgress for Progress {
 
 #[derive(uniffi::Object)]
 pub struct Transfer {
-    s: Arc<cs::PeerSession>,
+    s: FsBackend,
     dir: TransferDir,
     remote: String,
     local: String,
@@ -373,7 +465,7 @@ pub struct Transfer {
 }
 
 impl Transfer {
-    fn start(s: Arc<cs::PeerSession>, dir: TransferDir, remote: String, local: String, listener: Arc<dyn TransferListener>) -> Arc<Self> {
+    fn start(s: FsBackend, dir: TransferDir, remote: String, local: String, listener: Arc<dyn TransferListener>) -> Arc<Self> {
         let t = Arc::new(Self { s, dir, remote, local, listener, cancel: Mutex::new(None), paused: Mutex::new(false) });
         t.clone().launch();
         t
@@ -385,9 +477,12 @@ impl Transfer {
         let me = self.clone();
         rt().spawn(async move {
             let p: Arc<dyn cs::TransferProgress> = Arc::new(Progress(me.listener.clone()));
-            let r = match me.dir {
-                TransferDir::Download => me.s.download(&me.remote, std::path::Path::new(&me.local), p, rx).await,
-                TransferDir::Upload => me.s.upload(std::path::Path::new(&me.local), &me.remote, p, rx).await,
+            let local = std::path::Path::new(&me.local);
+            let r = match (&me.s, me.dir) {
+                (FsBackend::Peer(s), TransferDir::Download) => s.download(&me.remote, local, p, rx).await,
+                (FsBackend::Peer(s), TransferDir::Upload) => s.upload(local, &me.remote, p, rx).await,
+                (FsBackend::Ssh(s), TransferDir::Download) => s.download(&me.remote, local, p, rx).await,
+                (FsBackend::Ssh(s), TransferDir::Upload) => s.upload(local, &me.remote, p, rx).await,
             };
             match r {
                 Ok(()) => me.listener.on_finished(None),
@@ -473,8 +568,8 @@ impl DisplayChannel {
 
 #[derive(uniffi::Object)]
 pub struct PortForward {
-    port: u16,
-    handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub(crate) port: u16,
+    pub(crate) handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[uniffi::export]

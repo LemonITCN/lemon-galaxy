@@ -13,6 +13,7 @@ mod decode;
 mod host;
 mod screen;
 mod session;
+mod ssh;
 mod types;
 
 pub use agent::*;
@@ -20,6 +21,7 @@ pub use callbacks::*;
 pub use client::*;
 pub use host::*;
 pub use session::*;
+pub use ssh::{SshInfo, SshSession};
 pub use types::*;
 
 use parking_lot::RwLock;

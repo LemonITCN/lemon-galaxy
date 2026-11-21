@@ -26,3 +26,7 @@ quinn.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 tokio-tungstenite.workspace = true
+# SSH 直连：用 ring 做加密后端（与 rustls 一致，免去 aws-lc 的交叉编译依赖）
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
+russh-sftp = "3"
+vt100 = "0.18"

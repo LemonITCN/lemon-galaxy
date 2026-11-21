@@ -86,3 +86,12 @@ pub trait HostListener: Send + Sync {
     fn on_session_ended(&self, session_id: String);
     fn on_ai_activity(&self, session_id: String, description: String);
 }
+
+/// SSH 直连时向用户要东西。内核在自己的线程上同步调用，界面可以阻塞等用户回答。
+#[uniffi::export(with_foreign)]
+pub trait SecretPrompt: Send + Sync {
+    /// 密码、私钥口令、键盘交互的回答；返回 None 表示取消。`echo` 为假时输入框应遮挡。
+    fn ask(&self, prompt: String, echo: bool) -> Option<String>;
+    /// 首次连接或主机密钥变化时确认。`changed` 为真表示与记录的不一致（可能被冒充），界面应醒目警告。
+    fn confirm_host_key(&self, host: String, port: u16, key_type: String, fingerprint: String, changed: bool) -> bool;
+}

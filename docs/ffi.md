@@ -93,6 +93,21 @@ async wake_on_lan(mac)
 - `InputEvent`：`MouseMove{x,y}`、`MouseButton{button: PointerButton, down, x, y}`、`Wheel{dx,dy}`、`Key{hid_usage, down}`、`Text{text}`、`Touch{id, phase: TouchPhase, x, y}`、`SpecialCombo{combo: ComboKey}`。
   坐标为被控屏幕像素。`PointerButton`：Left/Right/Middle/Back/Forward。`ComboKey`：CtrlAltDel/LockScreen/AltTab/WinKey/TaskManager/ShowDesktop。
 
+## 3.1 SshSession（SSH 直连）
+
+- `GalaxyClient.connect_ssh(host_id, prompt: SecretPrompt) -> SshSession`：连接加密库里的 `ssh_host` 条目。
+  - 认证：`Password`（没存密码时经 `prompt.ask` 问）、`PrivateKey`（引用 `credential` 条目里的私钥与口令，口令没存时问）、`Interactive`（键盘交互，逐个问题问）；`Agent` 暂不支持。
+  - 跳转：`jump_device_id` 经该 LemonGalaxy 设备打开到目标的 TCP（目标在对方内网时用）；`jump_host_id` 经另一台 SSH 主机（direct-tcpip），最多 3 层。
+  - 主机密钥：与加密库 `known_host` 条目比对；首次连接或不一致时调 `prompt.confirm_host_key(host, port, key_type, fingerprint, changed)`，确认后自动存回加密库。
+- `SecretPrompt`（界面实现）：`ask(prompt, echo) -> Option<String>`、`confirm_host_key(...) -> bool`。内核在自己的线程上同步调用，界面可以阻塞等用户回答。
+- `SshSession`：`info()`、`is_closed()`、`open_terminal(options, sink) -> TerminalChannel`（没有断线继承，detach 即结束）、`files() -> FileClient`（SFTP，接口与设备的完全相同，`content` 搜索只看 2 MB 以内文件）、`exec(request) -> ExecResult`、`forward_port(local_port, remote_host, remote_port) -> PortForward`、`disconnect()`。
+- AI 对话的目标可以是 `SshHost`：用加密库里保存的凭据与已确认的主机密钥连接（对话里不能弹窗问密码，需要询问时报错提示先在主机列表里连一次）；SSH 主机没有图形界面，只有命令、文件、终端工具。
+
+## 3.2 TerminalScreen 与 H264Decoder（自绘界面用）
+
+- `TerminalScreen(rows, cols, scrollback)`：`feed(bytes)`、`resize`、`state(scroll_offset)`（带颜色分段的行、光标、标题、备用屏、应用光标键、括号粘贴、鼠标上报模式、历史长度、响铃计数）、`text_between`、`text`。颜色：0 默认，`0x0100_00nn` 调色板，`0x02RRGGBB` 真彩色；flags 1 粗 2 斜 4 下划线 8 反色。
+- `H264Decoder()`：`decode(annex_b) -> Option<DecodedFrame{width, height, bgra}>`。只在桌面平台编进去（手机端用系统硬件解码）。
+
 ## 4. AI
 
 ```

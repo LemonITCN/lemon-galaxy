@@ -389,6 +389,78 @@ impl Inner {
         Ok(s)
     }
 
+    /// 连接加密库里的 ssh_host（可经设备或另一台 SSH 主机跳转），新确认的主机密钥存回加密库。
+    fn connect_ssh_inner(self: Arc<Self>, host_id: String, prompt: Arc<dyn SecretPrompt>, depth: u32) -> futures::future::BoxFuture<'static, Result<(Arc<galaxy_client::ssh::SshSession>, crate::ssh::SshInfo)>> {
+        use galaxy_client::ssh as gs;
+        use galaxy_client::vault::{SshAuth, VaultData as VD};
+        Box::pin(async move {
+            if depth > 3 {
+                return Err(other("跳转层级太多"));
+            }
+            let entries = {
+                let g = self.vault.lock().await;
+                g.as_ref().map(|v| v.entries.clone()).ok_or_else(|| other("加密库不可用"))?
+            };
+            let e = entries.get(&host_id).ok_or_else(|| GalaxyError::NotFound { detail: "主机不存在".into() })?;
+            let VD::SshHost { label, host, port, username, auth, jump_device_id, jump_host_id, .. } = &e.data else {
+                return Err(other("这个条目不是 SSH 主机"));
+            };
+            let auth = match auth {
+                SshAuth::Password { password } => gs::SshAuthMethod::Password(password.clone()),
+                SshAuth::PrivateKey { credential_id } => match entries.get(credential_id).map(|c| &c.data) {
+                    Some(VD::Credential { private_key: Some(k), passphrase, .. }) if !k.trim().is_empty() => gs::SshAuthMethod::PrivateKey { key: k.clone(), passphrase: passphrase.clone().filter(|p| !p.is_empty()) },
+                    Some(VD::Credential { password: Some(p), .. }) => gs::SshAuthMethod::Password(Some(p.clone())),
+                    _ => return Err(GalaxyError::NotFound { detail: "这台主机引用的凭据不存在或没有私钥".into() }),
+                },
+                SshAuth::Agent => return Err(GalaxyError::Permission { detail: "暂不支持 SSH Agent，请改用私钥或密码".into() }),
+                SshAuth::Interactive => gs::SshAuthMethod::Interactive,
+            };
+            let (via, via_name) = if let Some(d) = jump_device_id.clone().filter(|x| !x.is_empty()) {
+                let id = parse_dev(&d)?;
+                let name = self.device_name(&id);
+                (gs::SshVia::Device(self.session_for(id).await?), format!("device:{name}"))
+            } else if let Some(j) = jump_host_id.clone().filter(|x| !x.is_empty()) {
+                let (js, ji) = self.clone().connect_ssh_inner(j, prompt.clone(), depth + 1).await?;
+                (gs::SshVia::Ssh(js), format!("ssh:{}", if ji.label.is_empty() { ji.host } else { ji.label }))
+            } else {
+                (gs::SshVia::Direct, "direct".to_string())
+            };
+            let known = entries.values().find_map(|k| match &k.data {
+                VD::KnownHost { host: h, port: p, key_type, fingerprint } if h.eq_ignore_ascii_case(host) && p == port => Some((k.id.clone(), gs::KnownHostKey { key_type: key_type.clone(), fingerprint: fingerprint.clone() })),
+                _ => None,
+            });
+            let target = gs::SshTarget { host: host.clone(), port: *port, username: username.clone(), auth, via, known: known.as_ref().map(|k| k.1.clone()) };
+            let c = gs::SshSession::connect(target, Arc::new(crate::ssh::PromptBridge(prompt))).await?;
+            if let Some(k) = c.new_host_key {
+                let entry = galaxy_client::vault::VaultEntry {
+                    id: known.map(|x| x.0).unwrap_or_default(),
+                    folder_id: None,
+                    sort: 0,
+                    data: VD::KnownHost { host: host.clone(), port: *port, key_type: k.key_type, fingerprint: k.fingerprint },
+                    updated_at: 0,
+                    version: 0,
+                };
+                if let Err(e) = self.save_entry(entry).await {
+                    tracing::warn!("主机密钥没能存进加密库：{e}");
+                }
+            }
+            let info = crate::ssh::SshInfo { host_id, label: label.clone(), host: host.clone(), port: *port, username: username.clone(), via: via_name };
+            Ok((c.session, info))
+        })
+    }
+
+    async fn save_entry(self: &Arc<Self>, e: galaxy_client::vault::VaultEntry) -> Result<()> {
+        let api = self.api()?;
+        let mut g = self.vault.lock().await;
+        let v = g.as_mut().ok_or_else(|| other("加密库不可用"))?;
+        v.save(&api, e).await?;
+        self.store.set(VAULT_CACHE.into(), v.to_cache(&self.wrap_key()));
+        *self.vault_snapshot.lock() = v.entries.values().cloned().map(Into::into).collect();
+        drop(g);
+        self.listener.on_vault_changed();
+        Ok(())
+    }
+
     fn device_name(&self, d: &DeviceId) -> String {
         let alias = self.vault_snapshot.lock().iter().find_map(|e| match &e.data {
             VaultData::DeviceMeta { device_id, alias: Some(a), .. } if *device_id == d.to_hex() && !a.is_empty() => Some(a.clone()),
@@ -718,6 +790,18 @@ impl GalaxyClient {
 
     // ---------------- 本机被控 ----------------
 
+    // ---------------- SSH 直连 ----------------
+
+    /// 连接加密库里的 ssh_host 条目。需要密码、口令或确认主机密钥时经 `prompt` 问用户。
+    pub async fn connect_ssh(&self, host_id: String, prompt: Arc<dyn SecretPrompt>) -> Result<Arc<crate::ssh::SshSession>> {
+        let inner = self.inner.clone();
+        run(async move {
+            let (s, info) = inner.connect_ssh_inner(host_id, prompt, 0).await?;
+            Ok(Arc::new(crate::ssh::SshSession { inner: s, info }))
+        })
+        .await
+    }
+
     /// control 客户端的本机被控服务；登录完成并上线后才有。
     pub fn host(&self) -> Option<Arc<HostService>> {
         self.inner.host.lock().clone()
@@ -737,10 +821,18 @@ async fn build_conversation(inner: Arc<Inner>, c: ConversationConfig, listener: 
     let m = models.items.iter().find(|m| m.provider_id == c.provider_id && m.id == c.model_id).cloned().ok_or_else(|| GalaxyError::Permission { detail: "未开通该模型".into() })?;
     let exec = galaxy_client::ai::SessionExecutor::new();
     let mut names = vec![];
-    if c.targets.iter().any(|t| t.kind != AgentTargetKind::Device) {
-        return Err(other("AI 暂不支持 SSH 直连主机，请选择装了 LemonGalaxy 的设备"));
-    }
     for t in &c.targets {
+        if t.kind == AgentTargetKind::SshHost {
+            // AI 对话里没法弹窗问密码：用加密库里保存的凭据与已确认的主机密钥
+            let (s, info) = inner.clone().connect_ssh_inner(t.id.clone(), Arc::new(NoPrompt), 0).await.map_err(|e| match e {
+                GalaxyError::Cancelled | GalaxyError::Permission { .. } => other("这台 SSH 主机需要输入密码或确认主机密钥，请先在主机列表里连接一次并保存密码"),
+                other => other,
+            })?;
+            let name = if info.label.is_empty() { format!("{}@{}", info.username, info.host) } else { info.label.clone() };
+            names.push(name.clone());
+            exec.add_ssh(t.id.clone(), s, name).await;
+            continue;
+        }
         let d = parse_dev(&t.id)?;
         let s = inner.session_for(d).await?;
         let name = inner.device_name(&d);
@@ -770,4 +862,15 @@ async fn build_conversation(inner: Arc<Inner>, c: ConversationConfig, listener: 
         conv.agent.restore(r.messages);
     }
     Ok(conv)
+}
+
+/// 不能询问用户时用：一律取消。
+struct NoPrompt;
+impl SecretPrompt for NoPrompt {
+    fn ask(&self, _prompt: String, _echo: bool) -> Option<String> {
+        None
+    }
+    fn confirm_host_key(&self, _host: String, _port: u16, _key_type: String, _fingerprint: String, _changed: bool) -> bool {
+        false
+    }
 }

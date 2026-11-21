@@ -10,6 +10,7 @@
 //! galaxy-dev --data <目录> term-test <设备>     打开终端、执行命令、断开、接续，验证断线继承
 //! galaxy-dev --data <目录> assist <设备码> <验证码> <命令>
 //! galaxy-dev --data <目录> vault-test
+//! galaxy-dev ssh-test <主机> <端口> <用户名> <私钥文件>   SSH 直连：终端、命令、SFTP、端口转发
 //! ```
 
 use galaxy_client::account::{self, DeviceMeta, LoginOutcome};
@@ -69,6 +70,10 @@ async fn main() -> anyhow::Result<()> {
     let cmd = args.first().cloned().unwrap_or_default();
     let id = Identity::load_or_create(&store(&dir));
     match cmd.as_str() {
+        "ssh-test" => {
+            ssh_test(&args[1], args[2].parse()?, &args[3], &std::fs::read_to_string(&args[4])?).await?;
+            return Ok(());
+        }
         "login" => {
             let server = ServerAddr::parse(&args[1]).map_err(anyhow::Error::msg)?;
             let api = Api::new(server.clone(), "zh-CN")?;
@@ -361,5 +366,84 @@ async fn ai_run(dir: &Path, id: &Identity, session: Arc<PeerSession>, rest: &[St
     let agent = galaxy_agent::agent::Agent::new(cfg, Arc::new(galaxy_client::ai::GatewayLlm { api }), exec, ui.clone());
     *ui.agent.lock().unwrap() = Some(Arc::downgrade(&agent));
     agent.send(prompt).await;
+    Ok(())
+}
+
+struct AutoYes;
+impl galaxy_client::ssh::SshPrompt for AutoYes {
+    fn ask(&self, prompt: &str, _echo: bool) -> Option<String> {
+        eprintln!("[SSH 询问] {prompt}");
+        None
+    }
+    fn confirm_host_key(&self, host: &str, port: u16, key_type: &str, fingerprint: &str, changed: bool) -> bool {
+        println!("主机密钥 {host}:{port} {key_type} {fingerprint}{}", if changed { "（变了）" } else { "" });
+        true
+    }
+}
+
+struct Prog;
+impl TransferProgress for Prog {
+    fn on_progress(&self, _d: u64, _t: u64) {}
+    fn on_finished(&self, _e: Option<String>) {}
+}
+
+/// SSH 直连自测：主机密钥、终端、命令、SFTP 上传下载、端口转发。
+async fn ssh_test(host: &str, port: u16, user: &str, key: &str) -> anyhow::Result<()> {
+    use galaxy_client::ssh::*;
+    let t = SshTarget { host: host.into(), port, username: user.into(), auth: SshAuthMethod::PrivateKey { key: key.into(), passphrase: None }, via: SshVia::Direct, known: None };
+    let c = SshSession::connect(t, Arc::new(AutoYes)).await?;
+    println!("已连接，需要存回加密库的主机密钥：{:?}", c.new_host_key.as_ref().map(|k| &k.fingerprint));
+    let s = c.session;
+    // 再连一次，带上记录的主机密钥，不应再询问
+    let t2 = SshTarget { host: host.into(), port, username: user.into(), auth: SshAuthMethod::PrivateKey { key: key.into(), passphrase: None }, via: SshVia::Direct, known: c.new_host_key.clone() };
+    let c2 = SshSession::connect(t2, Arc::new(AutoYes)).await?;
+    println!("第二次连接主机密钥无变化：{}", c2.new_host_key.is_none());
+    c2.session.disconnect().await;
+
+    let mut out = Vec::new();
+    let (code, timed_out, ms) = s.exec("echo ssh-exec-ok; echo err-line 1>&2; exit 3", Duration::from_secs(20), |_, d| out.extend_from_slice(d), None).await?;
+    println!("命令输出：{:?} 退出码 {code:?} 超时 {timed_out} {ms} ms", String::from_utf8_lossy(&out).trim());
+
+    let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let term = s.open_terminal(100, 30, &[("TERM".into(), "xterm-256color".into())], Arc::new(Collect(buf.clone()))).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    term.write(b"echo term-$((40+2))\r".to_vec());
+    let o = wait_for(&buf, "term-42", 10).await;
+    println!("终端输出包含 term-42：{}", o.contains("term-42"));
+    term.resize(120, 40);
+    term.close();
+
+    println!("SFTP 家目录：{}", s.fs_home().await?);
+    let dir = format!("lg-ssh-test-{}", std::process::id());
+    s.fs_mkdir(&format!("~/{dir}/a/b")).await?;
+    let local = std::env::temp_dir().join(format!("lg-ssh-{}.bin", std::process::id()));
+    let data: Vec<u8> = (0..3_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    std::fs::write(&local, &data)?;
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    s.upload(&local, &format!("~/{dir}/a/up.bin"), Arc::new(Prog), rx.clone()).await?;
+    let back = local.with_extension("back");
+    s.download(&format!("~/{dir}/a/up.bin"), &back, Arc::new(Prog), rx).await?;
+    println!("SFTP 上传下载一致：{}", std::fs::read(&back)? == data);
+    s.fs_write_all(&format!("~/{dir}/t.txt"), b"hello sftp").await?;
+    println!("SFTP 读文本：{}", String::from_utf8_lossy(&s.fs_read_all(&format!("~/{dir}/t.txt"), 1024).await?));
+    let list = s.fs_list(&format!("~/{dir}")).await?;
+    println!("SFTP 列目录：{}", list.iter().map(|e| format!("{}({:?})", e.name, e.kind)).collect::<Vec<_>>().join(" "));
+    s.fs_rename(&format!("~/{dir}/t.txt"), &format!("~/{dir}/t2.txt")).await?;
+    s.fs_chmod(&format!("~/{dir}/t2.txt"), 0o600).await?;
+    println!("SFTP 改名改权限后：{:o}", s.fs_stat(&format!("~/{dir}/t2.txt")).await?.mode);
+    s.fs_remove(&format!("~/{dir}"), true).await?;
+    println!("SFTP 递归删除后存在：{}", s.fs_exists(&format!("~/{dir}")).await?);
+    let _ = std::fs::remove_file(&local);
+    let _ = std::fs::remove_file(&back);
+
+    // 端口转发：经 SSH 连回 sshd 自己，读到 SSH 版本行即通
+    let (lp, h) = s.forward_local(0, "127.0.0.1".into(), port).await?;
+    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", lp)).await?;
+    let mut line = vec![0u8; 64];
+    let n = tokio::time::timeout(Duration::from_secs(5), tokio::io::AsyncReadExt::read(&mut sock, &mut line)).await??;
+    println!("端口转发读到：{}", String::from_utf8_lossy(&line[..n]).trim());
+    h.abort();
+    s.disconnect().await;
+    println!("SSH 自测完成");
     Ok(())
 }
