@@ -44,7 +44,13 @@ internal static class Shell
             if (!ListVisible()) return null;
             var col = new Grid { Width = 284, Background = Th.List };
             col.Children.Add(MiddleFor(app));
-            return K.Row(0, K.VLine(), col);
+            // 用 DockPanel 让中间列撑满整个高度（Flex 横排会把内容短的列垂直居中）
+            var dock = new DockPanel();
+            var line = K.VLine();
+            DockPanel.SetDock(line, Dock.Left);
+            dock.Children.Add(line);
+            dock.Children.Add(col);
+            return dock;
         }).Keyed(() => (app.Section, ListVisible(), app.HostsTab)).On(app.Nav, s);
         Grid.SetColumn(middle, 1);
         grid.Children.Add(middle);
