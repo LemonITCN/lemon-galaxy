@@ -43,6 +43,7 @@ vault() -> [VaultEntry]
 async vault_save(entry) -> VaultEntry    id 为空则新建
 async vault_delete(id)
 
+async start_port_forward(entry_id, SecretPrompt) -> PortForward   按加密库里的端口映射规则开启（经由设备或 SSH 主机）
 can_wake(device_id) -> Bool             离线、能被控、上报过网卡地址时为真
 async wake_device(device_id) -> [String] 远程开机：本机或同一网络（同公网 IP）里在线的设备代发唤醒包，返回代发设备名（空串为本机）
 async connect(device_id) -> PeerSession
@@ -61,7 +62,8 @@ host() -> HostService?                   control 客户端登录上线后才有
 回调 `SecureStore`：`get(key) -> bytes?`、`set(key, bytes)`、`remove(key)`。
 
 加密库 `VaultEntry { id, folder_id?, sort, data: VaultData, updated_at }`，`VaultData`：
-`Folder`、`DeviceMeta`、`SshHost`（`auth: SshAuth`）、`RdpHost`、`Credential`、`Snippet`、`KnownHost`、`Preferences{json}`。
+`Folder`、`DeviceMeta`、`SshHost`（`auth: SshAuth`）、`RdpHost`、`Credential`、`Snippet`、`KnownHost`、`Preferences{json}`、
+`PortForward{label, via_device_id?, via_ssh_host_id?, local_port, remote_host, remote_port, auto_start, note}`（端口映射规则，经由设备与经由 SSH 主机恰好一个有值）。
 
 ## 3. PeerSession
 
