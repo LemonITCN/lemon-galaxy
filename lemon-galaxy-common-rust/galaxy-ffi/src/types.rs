@@ -210,6 +210,8 @@ pub enum VaultData {
     Snippet { label: String, command: String, tags: Vec<String> },
     KnownHost { host: String, port: u16, key_type: String, fingerprint: String },
     Preferences { json: String },
+    /// 端口映射规则（经由设备或 SSH 主机，恰好一个有值；local_port 为 0 时自动选）
+    PortForward { label: String, via_device_id: Option<String>, via_ssh_host_id: Option<String>, local_port: u16, remote_host: String, remote_port: u16, auto_start: bool, note: String },
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
@@ -258,6 +260,9 @@ impl From<v::VaultData> for VaultData {
             V::Snippet { label, command, tags } => Self::Snippet { label, command, tags },
             V::KnownHost { host, port, key_type, fingerprint } => Self::KnownHost { host, port, key_type, fingerprint },
             V::Preferences { json } => Self::Preferences { json },
+            V::PortForward { label, via_device_id, via_ssh_host_id, local_port, remote_host, remote_port, auto_start, note } => {
+                Self::PortForward { label, via_device_id, via_ssh_host_id, local_port, remote_host, remote_port, auto_start, note }
+            }
         }
     }
 }
@@ -275,6 +280,9 @@ impl From<VaultData> for v::VaultData {
             V::Snippet { label, command, tags } => Self::Snippet { label, command, tags },
             V::KnownHost { host, port, key_type, fingerprint } => Self::KnownHost { host, port, key_type, fingerprint },
             V::Preferences { json } => Self::Preferences { json },
+            V::PortForward { label, via_device_id, via_ssh_host_id, local_port, remote_host, remote_port, auto_start, note } => {
+                Self::PortForward { label, via_device_id, via_ssh_host_id, local_port, remote_host, remote_port, auto_start, note }
+            }
         }
     }
 }

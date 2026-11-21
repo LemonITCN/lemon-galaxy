@@ -39,6 +39,19 @@ pub enum VaultData {
     Snippet { label: String, command: String, tags: Vec<String> },
     KnownHost { host: String, port: u16, key_type: String, fingerprint: String },
     Preferences { json: String },
+    /// 端口映射规则：本机 127.0.0.1:local_port 经某台设备或某台 SSH 主机连到 remote_host:remote_port。
+    /// 两个「经由」恰好一个有值；local_port 为 0 时每次自动选。
+    PortForward {
+        label: String,
+        via_device_id: Option<String>,
+        via_ssh_host_id: Option<String>,
+        local_port: u16,
+        remote_host: String,
+        remote_port: u16,
+        /// 主控端登录后自动开启
+        auto_start: bool,
+        note: String,
+    },
 }
 
 impl VaultData {
@@ -52,6 +65,7 @@ impl VaultData {
             VaultData::Snippet { .. } => "snippet",
             VaultData::KnownHost { .. } => "known_host",
             VaultData::Preferences { .. } => "preferences",
+            VaultData::PortForward { .. } => "port_forward",
         }
     }
 }

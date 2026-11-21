@@ -849,6 +849,39 @@ impl GalaxyClient {
         .await
     }
 
+    /// 按加密库里的端口映射规则开启映射：经由设备时连上该设备转发，经由 SSH 主机时连上该主机做本地转发。
+    /// 返回的 PortForward 一直有效直到 stop()（期间保持与设备 / 主机的连接）。
+    pub async fn start_port_forward(&self, entry_id: String, prompt: Arc<dyn SecretPrompt>) -> Result<Arc<crate::session::PortForward>> {
+        let inner = self.inner.clone();
+        run(async move {
+            use galaxy_client::vault::VaultData as VD;
+            let entries = {
+                let g = inner.vault.lock().await;
+                g.as_ref().map(|v| v.entries.clone()).ok_or_else(|| other("加密库不可用"))?
+            };
+            let e = entries.get(&entry_id).ok_or_else(|| GalaxyError::NotFound { detail: "端口映射规则不存在".into() })?;
+            let VD::PortForward { via_device_id, via_ssh_host_id, local_port, remote_host, remote_port, .. } = &e.data else {
+                return Err(other("这个条目不是端口映射规则"));
+            };
+            if remote_host.trim().is_empty() || *remote_port == 0 {
+                return Err(other("目标地址或端口没填"));
+            }
+            let (host, port) = (remote_host.trim().to_string(), *remote_port);
+            if let Some(d) = via_device_id.clone().filter(|d| !d.is_empty()) {
+                let s = inner.session_for(parse_dev(&d)?).await?;
+                let (p, h) = s.forward_port(*local_port, host, port).await?;
+                return Ok(Arc::new(crate::session::PortForward { port: p, handle: parking_lot::Mutex::new(Some(h)) }));
+            }
+            if let Some(hid) = via_ssh_host_id.clone().filter(|d| !d.is_empty()) {
+                let (s, _) = inner.connect_ssh_inner(hid, prompt, 0).await?;
+                let (p, h) = s.forward_local(*local_port, host, port).await?;
+                return Ok(Arc::new(crate::session::PortForward { port: p, handle: parking_lot::Mutex::new(Some(h)) }));
+            }
+            Err(other("没有指定经由哪台设备或 SSH 主机"))
+        })
+        .await
+    }
+
     /// 关掉 open_rdp 开的端口转发。
     pub fn close_rdp(&self, forward_id: String) {
         if let Some(h) = self.inner.rdp_forwards.lock().remove(&forward_id) {
