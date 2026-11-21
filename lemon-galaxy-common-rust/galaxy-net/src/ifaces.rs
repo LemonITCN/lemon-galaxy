@@ -59,7 +59,14 @@ pub fn list() -> Vec<Iface> {
     out
 }
 
+/// 用于远程开机的网卡 MAC（有私网 IPv4、不像虚拟网卡的），格式 `AA:BB:CC:DD:EE:FF`。手机端返回空。
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub fn wake_macs() -> Vec<String> {
+    vec![]
+}
+
 /// 用于远程开机的网卡 MAC（有私网 IPv4、不像虚拟网卡的），格式 `AA:BB:CC:DD:EE:FF`。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub fn wake_macs() -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for i in list() {

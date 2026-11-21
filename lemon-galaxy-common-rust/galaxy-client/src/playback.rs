@@ -40,10 +40,16 @@ impl DevicePlayer {
         std::thread::Builder::new()
             .name("galaxy-audio-out".into())
             .spawn(move || {
-                let stream = match open_stream(r2, g2, m2) {
-                    Ok(s) => s,
-                    Err(e) => {
+                // 声音库在个别平台上可能 panic（如安卓没登记 Context），转成错误返回，不要等到超时
+                let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| open_stream(r2, g2, m2)));
+                let stream = match opened {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
                         let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = ready_tx.send(Err("打开声音输出设备时出错".into()));
                         return;
                     }
                 };

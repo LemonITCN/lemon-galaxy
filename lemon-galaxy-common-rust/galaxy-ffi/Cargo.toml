@@ -47,3 +47,6 @@ openh264 = { version = "0.9", optional = true }
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
 log = "0.4"
+# 安卓上播放声音（cpal 的 AAudio）要先登记 JavaVM 与 Application Context
+jni-sys = "0.3"
+ndk-context = "0.1"

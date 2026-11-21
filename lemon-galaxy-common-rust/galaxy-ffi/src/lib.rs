@@ -5,6 +5,8 @@
 
 uniffi::setup_scaffolding!();
 
+#[cfg(target_os = "android")]
+mod android;
 mod agent;
 mod callbacks;
 mod client;

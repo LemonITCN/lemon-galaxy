@@ -199,6 +199,10 @@ impl PeerSession {
     pub async fn start_audio(&self, volume: f32) -> Result<Arc<AudioPlayback>> {
         let s = self.inner.clone();
         run(async move {
+            #[cfg(target_os = "android")]
+            if !crate::android::ready() {
+                return Err(GalaxyError::Other { detail: "声音输出没有初始化（应用要先调 NativeInit.init）".into() });
+            }
             let player = galaxy_client::playback::DevicePlayer::start(volume).map_err(|e| GalaxyError::Other { detail: e })?;
             let ch = s.open_audio(96, player.clone()).await?;
             Ok(Arc::new(AudioPlayback { ch: Mutex::new(Some(ch)), player }))

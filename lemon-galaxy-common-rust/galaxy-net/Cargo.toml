@@ -23,5 +23,8 @@ rcgen.workspace = true
 quinn.workspace = true
 socket2.workspace = true
 if-addrs.workspace = true
-mac_address.workspace = true
 tokio-tungstenite.workspace = true
+
+# 远程开机要上报网卡 MAC：只有能被控的桌面系统需要（手机端不被控，iOS 上这个库也编不过）
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+mac_address.workspace = true
