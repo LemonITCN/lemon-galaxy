@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 无人值守的会话代理模板（docs/spec.md 3.0.1）。不经 SMAppService 登记：SMAppService.agent 只登记到当前用户、
+     也不能加载到登录界面。后台服务（root）按这份内容生成 /Library/LaunchAgents/cn.lemonit.galaxy.worker.agent.plist，
+     把 BundleProgram 换成本包主程序的绝对路径（UnattendedSupport.swift 的 AgentPlist.make，两处保持一致）。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>cn.lemonit.galaxy.worker.agent</string>
+  <key>BundleProgram</key><string>Contents/MacOS/LemonGalaxyWorker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>LemonGalaxyWorker</string>
+    <string>--session-agent</string>
+  </array>
+  <key>LimitLoadToSessionType</key>
+  <array>
+    <string>LoginWindow</string>
+    <string>Aqua</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>cn.lemonit.galaxy.worker</string>
+  </array>
+</dict>
+</plist>

@@ -3,7 +3,7 @@
 // 开发：swift build；打包成通用二进制 .app：scripts/build.sh [--debug] [--dmg]。
 //
 // 源码布局（target 根目录是 Sources/）：
-//   Sources/LemonGalaxyWorker/   被控端自己的代码
+//   Sources/LemonGalaxyWorker/   被控端自己的代码（Unattended/ 是无人值守：后台服务、会话代理、本机通信，见 docs/spec.md 3.0.1）
 //   Sources/Shared/              指向 Mac 主控端（lemon-galaxy-control-macos）源码的符号链接：
 //                                截屏编码与键鼠注入（MacHostPlatform / VideoEncoder / HIDKeyMap）、钥匙串（KeychainStore）、
 //                                NSLock 小工具（Util）、配色（Palette）、语言包底座（L10n）、通用小组件（Components）、

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 无人值守的后台服务（docs/spec.md 3.0.1）：由应用用 SMAppService.daemon 登记，用户在「系统设置 → 通用 → 登录项」批准后
+     launchd 以 root 开机启动、退出即重启。程序就是包内主程序，靠启动参数切换成后台服务角色。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>cn.lemonit.galaxy.worker.daemon</string>
+  <key>BundleProgram</key><string>Contents/MacOS/LemonGalaxyWorker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>LemonGalaxyWorker</string>
+    <string>--daemon</string>
+  </array>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>cn.lemonit.galaxy.worker</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardErrorPath</key><string>/Library/Logs/LemonGalaxyWorker-daemon.log</string>
+</dict>
+</plist>

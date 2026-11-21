@@ -20,7 +20,18 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
     private var audio: AudioCapture?
     private let privacy = PrivacyScreen()
 
-    init() {
+    private var appKitAttached = false
+
+    /// appKit 为 false 时先不碰 NSScreen（纯被控端无人值守的会话代理用）：NSScreen 会隐式创建 NSApplication，
+    /// 让进程以本应用的 Bundle ID 登记到 LaunchServices，之后双击应用、登录项打开的就成了这个代理而不是界面。
+    /// 这时屏幕名称用 CoreGraphics 的通用名称；要开隐私屏时由调用方先起 NSApplication 再调 attachAppKit()。
+    init(appKit: Bool = true) {
+        if appKit { attachAppKit() }
+    }
+
+    /// 读屏幕名称、监听屏幕变化（只做一次）
+    func attachAppKit() {
+        guard lock.locked({ () -> Bool in defer { appKitAttached = true }; return !appKitAttached }) else { return }
         DisplayNames.refresh()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             DisplayNames.refresh()

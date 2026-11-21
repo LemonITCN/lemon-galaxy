@@ -14,8 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         // 同一用户只跑一份：已有实例时叫它打开设置窗口，自己退出（两份会抢同一个设备身份）
         let me = ProcessInfo.processInfo.processIdentifier
+        // 无人值守的会话代理也是本应用的进程（同一个可执行文件），不算另一份
         if let id = Bundle.main.bundleIdentifier,
-           NSRunningApplication.runningApplications(withBundleIdentifier: id).contains(where: { $0.processIdentifier != me }) {
+           NSRunningApplication.runningApplications(withBundleIdentifier: id)
+            .contains(where: { $0.processIdentifier != me && !Unattended.isHelperProcess($0.processIdentifier) }) {
             DistributedNotificationCenter.default().postNotificationName(Self.showNotification, object: nil, userInfo: nil, deliverImmediately: true)
             exit(0)
         }
@@ -41,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Localization.shared.$strings.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] strings in
             guard let self else { return }
             WorkerCore.setLocale(strings.pack.coreLocale, isMock: self.model.core.isMock)
+            (self.model.worker as? RemoteWorkerHost)?.setLocale(strings.pack.coreLocale)
             self.buildMainMenu()
             StatusMenu.shared.update(self.model)
             self.window?.title = "LemonGalaxyWorker"

@@ -107,8 +107,15 @@ struct StatusPage: View {
                     Image(systemName: heroIcon).font(.system(size: 16, weight: .medium)).foregroundStyle(StatusPage.stateColor(model.overall, p))
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(loc(StatusPage.stateKey(model.overall))).font(.system(size: 15, weight: .semibold))
-                    Text(AppInfo.computerName + " · " + AppInfo.userName).font(.system(size: 11.5)).foregroundStyle(p.secondaryText)
+                    HStack(spacing: 8) {
+                        Text(loc(StatusPage.stateKey(model.overall))).font(.system(size: 15, weight: .semibold))
+                        if model.unattended.clientMode {
+                            Text(loc("unattended.badge")).font(.system(size: 10.5, weight: .medium)).foregroundStyle(p.accent)
+                                .padding(.horizontal, 7).padding(.vertical, 2).background(Capsule().fill(p.accent.opacity(0.12)))
+                        }
+                    }
+                    Text(AppInfo.computerName + " · " + (model.unattended.clientMode ? model.unattended.screenDescription : AppInfo.userName))
+                        .font(.system(size: 11.5)).foregroundStyle(p.secondaryText)
                 }
                 Spacer()
                 if model.serviceStarting { ProgressView().controlSize(.small) }

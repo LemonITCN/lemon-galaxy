@@ -75,6 +75,8 @@ struct WorkerMain: View {
             ModalLayer { LoginFormView(form: f) }
         } else if let a = model.confirmLogout {
             ModalLayer { LogoutConfirmView(account: a) }
+        } else if model.unattended.confirmDisable {
+            ModalLayer { UnattendedDisableView(ctl: model.unattended) }
         }
     }
 }

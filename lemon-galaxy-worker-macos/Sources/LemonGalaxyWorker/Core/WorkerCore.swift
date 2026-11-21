@@ -10,6 +10,8 @@ enum WorkerCore {
         let worker: WorkerHost
         let isMock: Bool
         let coreVersion: String
+        /// 无人值守：内核在后台服务里，这里只是它的界面
+        var isRemote = false
     }
 
     static var realCoreAvailable: Bool {
@@ -44,7 +46,11 @@ enum WorkerCore {
                    appVersion: AppInfo.version, osVersion: AppInfo.osVersion, hostname: hostname, locale: locale)
     }
 
-    static func make(locale: String, forceMock: Bool = false, mockOptions: MockWorkerOptions = MockWorkerOptions()) -> Context {
+    static func make(locale: String, forceMock: Bool = false, mockOptions: MockWorkerOptions = MockWorkerOptions(), remote: Bool = false) -> Context {
+        if remote && !forceMock {
+            let r = RemoteWorkerHost()
+            return Context(worker: r, isMock: false, coreVersion: "", isRemote: true)
+        }
         if forceMock || wantsMock() {
             return Context(worker: MockWorkerHost(options: mockOptions), isMock: true, coreVersion: MockWorkerHost.version)
         }

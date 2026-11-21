@@ -208,6 +208,8 @@ struct GeneralPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             PageTitle(text: loc("page.general"))
+            SectionLabel(text: loc("general.unattended"))
+            UnattendedCard(ctl: model.unattended)
             SectionLabel(text: loc("general.startup"))
             Card {
                 VStack(alignment: .leading, spacing: 10) {
@@ -307,10 +309,10 @@ struct AboutPage: View {
             }
             Card(padding: 0) {
                 VStack(spacing: 0) {
-                    row(loc("about.core"), model.core.coreVersion)
+                    row(loc("about.core"), model.coreVersionText)
                     row(loc("status.deviceId"), groupedId(model.deviceId), mono: true)
                     row(loc("about.system"), AppInfo.osVersion)
-                    row(loc("about.dataDir"), AppInfo.dataDir.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"), last: true)
+                    row(loc("about.dataDir"), model.dataDirText, last: true)
                 }
             }
             HStack(spacing: 4) {

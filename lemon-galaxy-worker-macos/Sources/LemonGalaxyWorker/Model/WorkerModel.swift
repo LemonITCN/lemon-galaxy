@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 enum WorkerPage: String, CaseIterable {
     case status, accounts, assist, events, permissions, general, about
@@ -51,6 +52,8 @@ final class WorkerModel: ObservableObject {
     /// 远程看过桌面的会话都结束 10 秒后自动锁屏（被控服务里的本机设置，默认关）
     @Published var lockOnEnd = false
     let updater: WorkerUpdater
+    let unattended: UnattendedController
+    private var cancellables: Set<AnyCancellable> = []
     private(set) var service: HostService?
     private var listener: WorkerListener?
     private var platform: MacHostPlatform?
@@ -67,12 +70,48 @@ final class WorkerModel: ObservableObject {
     init(settings: WorkerSettings, selfTest: Bool, forceMock: Bool = false, mockOptions: MockWorkerOptions = MockWorkerOptions()) {
         self.settings = settings
         self.selfTest = selfTest
-        core = WorkerCore.make(locale: Localization.shared.strings.pack.coreLocale, forceMock: forceMock, mockOptions: mockOptions)
+        // 无人值守已开启：内核在后台服务里，这里只当界面（模拟内核与自检不走这条路）
+        let remote = !selfTest && !forceMock && !CommandLine.arguments.contains("--mock")
+            && ProcessInfo.processInfo.environment["LEMONGALAXY_MOCK"] != "1" && UnattendedController.clientModeAtLaunch()
+        core = WorkerCore.make(locale: Localization.shared.strings.pack.coreLocale, forceMock: forceMock, mockOptions: mockOptions, remote: remote)
+        unattended = UnattendedController(clientMode: remote, selfTest: selfTest)
         updater = WorkerUpdater()
         updater.model = self
+        unattended.model = self
+        unattended.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        if let r = core.worker as? RemoteWorkerHost {
+            r.onInfo = { [weak self] info in
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.daemonInfo(info) } }
+            }
+            r.prepare = { [weak self] info, c in
+                UnattendedController.prepare(info, c, migrating: {
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.unattended.phase = .migrating } }
+                })
+            }
+        }
         assistServer = settings.lastServer
         refreshPermissions()
         loginItem = selfTest ? .notRegistered : LoginItem.state
+        unattended.refresh()
+    }
+
+    /// 后台服务连上、重连或概况变化（无人值守下）
+    private func daemonInfo(_ info: DaemonInfo?) {
+        unattended.received(info)
+        guard info != nil else { refresh(); return }
+        if let s = worker.service() {
+            attach(s)
+            startError = nil
+        }
+        serviceStarting = false
+        refresh()
+    }
+
+    /// 关于页显示的内核版本与数据目录（无人值守下是后台服务的）
+    var coreVersionText: String { core.isRemote ? (unattended.daemon?.coreVersion ?? "—") : core.coreVersion }
+    var dataDirText: String {
+        core.isRemote ? Unattended.daemonDataRoot.appendingPathComponent("worker").path
+            : AppInfo.dataDir.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
     }
 
     var deviceId: String { status.deviceId.isEmpty ? worker.deviceId() : status.deviceId }
@@ -118,7 +157,8 @@ final class WorkerModel: ObservableObject {
         l.owner = self
         listener = l
         s.setListener(listener: l)
-        if !selfTest {
+        // 无人值守下画面由后台服务的会话代理负责，界面进程不提供平台层
+        if !selfTest && !core.isRemote {
             let p = platform ?? MacHostPlatform()
             platform = p
             s.setPlatform(platform: p)
@@ -158,6 +198,7 @@ final class WorkerModel: ObservableObject {
         refresh()
         refreshPermissions()
         loginItem = LoginItem.state
+        unattended.refresh()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.refresh()

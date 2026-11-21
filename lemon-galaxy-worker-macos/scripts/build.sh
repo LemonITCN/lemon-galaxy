@@ -71,6 +71,11 @@ cp -R Packaging/zh-Hans.lproj Packaging/en.lproj "$APP/Contents/Resources/"
 cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
 # 语言包：运行时按 Contents/Resources 查找（App/AppSupport.swift 的 AppResources）
 cp -R Resources/Locales "$APP/Contents/Resources/"
+# 无人值守（docs/spec.md 3.0.1）：后台服务的 launchd 配置放在 SMAppService 要求的位置；会话代理模板放在旁边（后台服务据此生成全局配置）
+mkdir -p "$APP/Contents/Library/LaunchDaemons" "$APP/Contents/Library/LaunchAgents"
+cp Packaging/LaunchDaemons/*.plist "$APP/Contents/Library/LaunchDaemons/"
+cp Packaging/LaunchAgents/*.plist "$APP/Contents/Library/LaunchAgents/"
+plutil -lint -s "$APP"/Contents/Library/LaunchDaemons/*.plist "$APP"/Contents/Library/LaunchAgents/*.plist
 cp ../LICENSE "$APP/Contents/Resources/LICENSE.txt" 2>/dev/null || true
 
 # 签名身份
@@ -105,6 +110,7 @@ echo "签名：$( [ "$IDENTITY" = "-" ] && echo 临时签名 || security find-id
 #   - 不声明 keychain-access-groups：Developer ID 分发没有描述文件，声明了无法启动；没有它时钥匙串自动退回传统钥匙串。
 codesign --force --options runtime $TS --entitlements Packaging/LemonGalaxyWorker.entitlements --sign "$IDENTITY" "$APP"
 codesign --verify --strict "$APP"
+"$ROOT/scripts/check-bundle.sh" "$APP"
 echo "$APP"
 lipo -archs "$APP/Contents/MacOS/$NAME"
 du -sh "$APP" | cat

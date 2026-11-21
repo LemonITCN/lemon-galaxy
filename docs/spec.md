@@ -57,6 +57,18 @@
 - 数据目录：管理员为 `%ProgramData%\LemonGalaxy\worker`（只给 SYSTEM 与管理员组），普通用户为 `%LOCALAPPDATA%\LemonGalaxy\worker`。
 - 正式包要求 Windows 10 / Server 2016 起（Rust 标准库的要求）；另用 win7 编译目标出一份 Windows 7 SP1 / 8 兼容版（`windows7` 发布文件，截屏退回 GDI）。
 
+### 3.0.1 macOS 被控端的无人值守
+
+默认（无人值守关闭）菜单栏应用在登录用户的会话里自己跑内核，注销、重启后不在线。开启「无人值守」后（通用页，macOS 13 起；调研与测试计划见 [research/macos-unattended.md](research/macos-unattended.md)）：
+
+- 后台服务（LaunchDaemon，root，开机启动、退出即重启）：`LemonGalaxyWorker --daemon`，应用用 `SMAppService.daemon` 登记包内 `Contents/Library/LaunchDaemons/cn.lemonit.galaxy.worker.daemon.plist`，管理员在「系统设置 → 通用 → 登录项」批准。负责联网、账号、终端、文件、命令（内核按账号对应的系统用户切换身份）。数据在 `/Library/Application Support/LemonGalaxy/worker`（0700，只有 root 能读），设备身份存在其下 `keys/`（文件，0600）。
+- 会话代理（LaunchAgent）：`LemonGalaxyWorker --session-agent`，`LimitLoadToSessionType` 为 LoginWindow + Aqua，登录界面里以 root、每个已登录用户的图形会话里以该用户各跑一份；负责截屏编码、键鼠、剪贴板、声音、隐私屏。`SMAppService.agent` 只能登记到当前用户、也不能加载到登录界面，所以由后台服务写 `/Library/LaunchAgents/cn.lemonit.galaxy.worker.agent.plist`（程序指向包内主程序的绝对路径）。代理平时不建 NSApplication（否则以应用的 Bundle ID 登记到 LaunchServices，双击应用、登录项会打开代理而不是界面），只在开隐私屏时建，空闲后退出由 launchd 重启。
+- 后台服务的平台层把请求转给「当前在屏幕上」的会话代理（代理报告自己是否在控制台；都不报时按控制台用户找，没人登录用登录界面的代理）；登录、注销、快速切换用户时换到新会话的代理，进行中的画面、声音、隐私屏续上。登录界面截屏：macOS 14.4 起先用 ScreenCaptureKit，不行用 CGDisplayStream；不提供隐私屏与声音。
+- 菜单栏应用改当后台服务的界面（同样的页面，状态由后台服务推送）。三种角色是同一个签名的可执行文件，系统授权（屏幕录制、辅助功能）对它们同样生效。
+- 本机通信：Unix 域套接字 `/var/run/cn.lemonit.galaxy.worker.sock`（0666），每条消息 `[u32 头长][u32 正文长][u32 附件长]` + JSON 头 + JSON 正文 + 原始附件（画面帧、声音）。对端身份取内核给的 uid 与审计令牌，代码签名必须满足后台服务自己的指定要求；会话代理报的 uid 必须与对端一致。界面的权限：管理员（root 或 admin 组）全部可做；坐在屏幕前的普通用户可查看、开关远程、断开会话、管理对应到自己的账号；其他用户拒绝。账号登录时对应到发起登录的用户（不会对应到 root）。临时协助的会话目前以后台服务身份执行，所以后台服务以 root 运行时只有管理员能开启或允许协助。
+- 开启时把菜单栏应用原有的数据（`~/Library/Application Support/LemonGalaxyWorker/worker` 与钥匙串里的设备身份）移交给后台服务，设备号不变，原目录改名 `worker.migrated` 留作备份（只有管理员能移交）；关闭时管理员把数据导回当前用户并让后台服务删除自己的数据，非管理员退回移交前的备份。两种运行方式切换时应用自动重新打开一次。应用更新后版本与后台服务不同时，后台服务与会话代理自动重启换成新程序。
+- 开了文件保险箱的 Mac 重启后要先在开机界面解锁磁盘（或用 `fdesetup authrestart` 计划重启），之后才能远程控制登录界面。
+
 ### 3.1 远程桌面（Windows / macOS 被控）
 
 - 画面：最高 4K、帧率按硬件最高 144；H.264 / H.265 硬件编解码（AV1 视硬件）；真彩 4:4:4（视硬件）；码率 / 画质 / 帧率可调；按网络自适应。

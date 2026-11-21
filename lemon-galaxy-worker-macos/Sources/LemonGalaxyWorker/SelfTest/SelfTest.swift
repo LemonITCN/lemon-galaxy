@@ -269,6 +269,7 @@ enum SelfTest {
             problems.append("远程结束后自动锁屏没有设进被控服务")
         }
         shot("\(prefix)-16-general", window: window, host: host)
+        unattendedShots(prefix: prefix, model: model, window: window, host: host)
         model.page = .about
         shot("\(prefix)-17-about", window: window, host: host)
         // 检查更新（模拟内核报告有新版本）→ 下载进度 → 已下载
@@ -334,6 +335,55 @@ enum SelfTest {
         shotView("\(prefix)-22-menubar-icons", model, dark: dark, size: CGSize(width: 420, height: 150)) {
             MenuIconStrip()
         }
+    }
+}
+
+extension SelfTest {
+    /// 无人值守的各个状态（通用页顶部的卡片、关闭确认、状态页的标记）。不调用 SMAppService，状态是假的
+    static func unattendedShots(prefix: String, model: WorkerModel, window: NSWindow, host: NSView) {
+        let u = model.unattended
+        let agents = [
+            AgentSummary(sessionType: .loginWindow, userName: "loginwindow", uid: 0, onConsole: false, active: false, version: AppInfo.version),
+            AgentSummary(sessionType: .aqua, userName: "alice", uid: 501, onConsole: true, active: true, version: AppInfo.version),
+        ]
+        func info(admin: Bool, agents: [AgentSummary]) -> DaemonInfo {
+            DaemonInfo(version: "0.2.0", build: "202611220930", coreVersion: "0.2.0", deviceId: model.deviceId, server: MockWorkerHost.demoServer,
+                       hasService: true, claimed: true, peerAdmin: admin, peerConsole: true, peerUser: "alice", agents: agents, isMock: false)
+        }
+        model.page = .general
+        let cases: [(String, UnattendedController.Phase, DaemonInfo?, Bool, Bool)] = [
+            ("a-off", .off, nil, false, false),
+            ("b-unavailable", .unavailable(L("unattended.unavailable.notBundled")), nil, false, false),
+            ("c-approval", .needsApproval, nil, false, true),
+            ("d-starting", .starting, nil, false, true),
+            ("e-migrating", .migrating, nil, true, true),
+            ("f-running", .running, info(admin: true, agents: agents), true, true),
+            ("g-running-loginwindow", .running, info(admin: true, agents: [AgentSummary(sessionType: .loginWindow, userName: "loginwindow", uid: 0,
+                                                                                         onConsole: true, active: true, version: AppInfo.version)]), true, true),
+            ("h-running-nonadmin", .running, info(admin: false, agents: agents), true, true),
+            ("i-error", .error(L("unattended.failed", "Operation not permitted")), nil, false, false),
+        ]
+        for (name, phase, daemon, client, on) in cases {
+            u.fake(phase, daemon: daemon, clientMode: client)
+            if u.isOn != on { problems.append("无人值守 \(name)：开关状态应为 \(on)") }
+            if name == "g-running-loginwindow" && u.screenDescription != L("unattended.screen.loginWindow") {
+                problems.append("无人值守：登录界面负责画面时文字不对")
+            }
+            shot("\(prefix)-16\(name.prefix(1))-unattended-\(name.dropFirst(2))", window: window, host: host)
+        }
+        // 关闭前确认（管理员 / 非管理员）
+        u.fake(.running, daemon: info(admin: true, agents: agents), clientMode: true)
+        u.confirmDisable = true
+        shot("\(prefix)-16j-unattended-disable-confirm", window: window, host: host)
+        u.fake(.running, daemon: info(admin: false, agents: agents), clientMode: true)
+        shot("\(prefix)-16k-unattended-disable-confirm-nonadmin", window: window, host: host)
+        u.confirmDisable = false
+        // 状态页：无人值守标记与当前负责画面的会话
+        u.fake(.running, daemon: info(admin: true, agents: agents), clientMode: true)
+        model.page = .status
+        shot("\(prefix)-16l-status-unattended", window: window, host: host)
+        u.fake(.off)
+        model.page = .general
     }
 }
 
