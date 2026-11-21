@@ -1,0 +1,5 @@
+"CFBundleDisplayName" = "LemonGalaxy";
+"NSCameraUsageDescription" = "Scan the server QR code shown in the LemonGalaxy admin console.";
+"NSFaceIDUsageDescription" = "Unlock LemonGalaxy with Face ID.";
+"NSLocalNetworkUsageDescription" = "Find and connect to your devices on the local network, even when the server is unreachable.";
+"NSPhotoLibraryUsageDescription" = "Choose photos and videos to upload to a remote device.";

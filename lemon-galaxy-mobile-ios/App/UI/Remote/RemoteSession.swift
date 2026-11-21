@@ -1,0 +1,205 @@
+import Foundation
+import UIKit
+import CoreVideo
+import Combine
+import GalaxyKit
+
+/// 远程桌面会话：list_displays → open_display(VideoSink) → VideoToolbox 硬件解码 → 显示；手势与键盘 → InputEvent。
+@MainActor
+final class RemoteSession: ObservableObject, Identifiable {
+    enum Status: Equatable {
+        case connecting, streaming
+        case failed(String)
+    }
+
+    let id = UUID().uuidString
+    let deviceId: String
+    let title: String
+    let platform: Platform
+    @Published private(set) var status: Status = .connecting
+    @Published private(set) var displays: [DisplayInfo] = []
+    @Published private(set) var displayId: UInt32?
+    @Published private(set) var quality: VideoQuality
+    @Published var mouseMode: Bool { didSet { canvas.mouseMode = mouseMode } }
+    @Published private(set) var videoSize = CGSize.zero
+    @Published private(set) var codec: VideoCodec = .h264
+    @Published private(set) var peer: PeerConnection?
+    @Published private(set) var fps = 0
+    @Published var keyboardShown = false
+    let canvas = RemoteCanvasView()
+    weak var app: AppModel?
+
+    private var channel: DisplayChannel?
+    private var sinkAdapter: VideoSinkAdapter?
+    private let decoder = VideoDecoder()
+    private var frames = 0
+    private var statsTimer: Timer?
+    private var foreground = true
+    private var closeWatch: AnyCancellable?
+
+    init(app: AppModel, deviceId: String, title: String, platform: Platform) {
+        self.app = app
+        self.deviceId = deviceId
+        self.title = title
+        self.platform = platform
+        quality = app.settings.defaultQuality
+        mouseMode = app.settings.remoteMouseMode
+        canvas.mouseMode = mouseMode
+        canvas.platform = platform
+        canvas.send = { [weak self] events in self?.send(events) }
+        let display = canvas.displayLayer
+        decoder.onFrame = { [weak self] pb, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                RemoteCanvasView.enqueue(pb, on: display)
+                self.frames += 1
+                if self.status != .streaming { self.status = .streaming }
+            }
+        }
+        decoder.onNeedKeyframe = { [weak self] in
+            DispatchQueue.main.async { self?.channel?.requestKeyframe() }
+        }
+    }
+
+    var display: DisplayInfo? { displays.first { $0.id == displayId } }
+    var viewOnly: Bool { !(peer?.info.permissions.control ?? true) }
+
+    func start() {
+        statsTimer?.invalidate()
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.fps = self.frames
+                self.frames = 0
+            }
+        }
+        Task { [weak self] in
+            guard let self, let app = self.app else { return }
+            do {
+                let p = try await app.account.peer(deviceId)
+                peer = p
+                closeWatch = p.$closedReason.compactMap { $0 }.receive(on: DispatchQueue.main).sink { [weak self] reason in
+                    self?.status = .failed(reason.isEmpty ? L("remote.closed") : reason)
+                }
+                displays = try await p.session.listDisplays()
+                guard let first = displays.first(where: \.primary) ?? displays.first else {
+                    status = .failed(L("remote.noDisplay"))
+                    return
+                }
+                await open(first.id)
+            } catch {
+                status = .failed(describeError(error))
+            }
+        }
+    }
+
+    private func open(_ id: UInt32) async {
+        guard let peer else { return }
+        channel?.stop()
+        channel = nil
+        displayId = id
+        status = .connecting
+        if let d = display { canvas.setRemoteSize(Int(d.width), Int(d.height)) }
+        let adapter = VideoSinkAdapter()
+        let decoder = self.decoder
+        adapter.onConfigure = { [weak self] codec, w, h in
+            decoder.configure(codec: codec)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.codec = codec
+                self.videoSize = CGSize(width: Int(w), height: Int(h))
+                // 没拿到屏幕信息时按码流尺寸摆放
+                if self.display == nil { self.canvas.setRemoteSize(Int(w), Int(h)) }
+            }
+        }
+        adapter.onData = { data, pts, key in decoder.decode(data, ptsUs: pts, keyframe: key) }
+        adapter.onCursorMove = { [weak self] x, y, visible in
+            DispatchQueue.main.async { self?.canvas.remoteCursor(x, y, visible: visible) }
+        }
+        adapter.onClose = { [weak self] reason in
+            DispatchQueue.main.async { self?.status = .failed(reason.isEmpty ? L("remote.closed") : reason) }
+        }
+        sinkAdapter = adapter
+        do {
+            channel = try await peer.session.openDisplay(options: DisplayOptions(displayId: id, maxFps: quality.maxFps, bitrateKbps: quality.bitrateKbps,
+                                                                                 codecs: VideoDecoder.supportedCodecs, viewOnly: viewOnly),
+                                                         sink: adapter)
+            canvas.viewOnly = viewOnly
+        } catch {
+            status = .failed(describeError(error))
+        }
+    }
+
+    func switchDisplay(_ id: UInt32) {
+        guard id != displayId else { return }
+        Task { await open(id) }
+    }
+
+    func setQuality(_ q: VideoQuality) {
+        let old = quality
+        quality = q
+        // 自动档与帧率变化要重开画面；只改码率直接调
+        if q == .auto || old == .auto || q.maxFps != old.maxFps, let id = displayId {
+            Task { await open(id) }
+        } else {
+            channel?.setBitrate(kbps: q.bitrateKbps)
+        }
+    }
+
+    func retry() {
+        if let id = displayId, peer?.isAlive == true { Task { await open(id) } } else { start() }
+    }
+
+    func send(_ events: [InputEvent]) {
+        guard let channel, !viewOnly else { return }
+        for e in events { channel.sendInput(event: e) }
+    }
+
+    func sendClipboard() {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+            app?.showToast(L("remote.clipboardEmpty"), error: true)
+            return
+        }
+        Task {
+            do {
+                try await peer?.session.clipboardSet(data: .text(text: text))
+                app?.showToast(L("remote.clipboardSent"))
+            } catch { app?.showError(error) }
+        }
+    }
+
+    func fetchClipboard() {
+        Task {
+            do {
+                switch try await peer?.session.clipboardGet() {
+                case .text(let t)?:
+                    UIPasteboard.general.string = t
+                    app?.showToast(L("remote.clipboardReceived"))
+                case .image(let img)?:
+                    if let ui = UIImage(data: img.data) { UIPasteboard.general.image = ui }
+                    app?.showToast(L("remote.clipboardReceived"))
+                default:
+                    app?.showToast(L("remote.clipboardEmpty"), error: true)
+                }
+            } catch { app?.showError(error) }
+        }
+    }
+
+    /// 切后台：系统会让解码会话失效，回来后重建并请求关键帧
+    func setForeground(_ fg: Bool) {
+        guard fg != foreground else { return }
+        foreground = fg
+        if fg {
+            canvas.displayLayer.flush()
+            channel?.requestKeyframe()
+        }
+    }
+
+    func stop() {
+        statsTimer?.invalidate()
+        channel?.stop()
+        channel = nil
+        decoder.invalidate()
+        canvas.displayLayer.flushAndRemoveImage()
+    }
+}

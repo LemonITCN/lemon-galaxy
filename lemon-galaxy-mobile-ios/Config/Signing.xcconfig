@@ -1,0 +1,8 @@
+// 装到真机或上传 TestFlight 需要开发团队：写进 Config/Signing.local.xcconfig（不进 git），例如
+//   DEVELOPMENT_TEAM = ABCDE12345
+// CI 不签名构建用 scripts/build.sh（CODE_SIGNING_ALLOWED=NO）。
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_IDENTITY = Apple Development
+DEVELOPMENT_TEAM =
+
+#include? "Signing.local.xcconfig"

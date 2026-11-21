@@ -1,0 +1,284 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		4C47A10000000000000000B1 /* GalaxyKit in Frameworks */ = {isa = PBXBuildFile; productRef = 4C47A10000000000000000D1 /* GalaxyKit */; };
+		4C47A10000000000000000B2 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 4C47A10000000000000000D2 /* SwiftTerm */; };
+		4C47A10000000000000000B3 /* Locales in Resources */ = {isa = PBXBuildFile; fileRef = 4C47A10000000000000000A3 /* Locales */; };
+		4C47A10000000000000000B4 /* TerminalThemes in Resources */ = {isa = PBXBuildFile; fileRef = 4C47A10000000000000000A4 /* TerminalThemes */; };
+		4C47A10000000000000000B5 /* Licenses in Resources */ = {isa = PBXBuildFile; fileRef = 4C47A10000000000000000A5 /* Licenses */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		4C47A10000000000000000A1 /* LemonGalaxy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LemonGalaxy.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		4C47A10000000000000000A3 /* Locales */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Locales; sourceTree = "<group>"; };
+		4C47A10000000000000000A4 /* TerminalThemes */ = {isa = PBXFileReference; lastKnownFileType = folder; path = TerminalThemes; sourceTree = "<group>"; };
+		4C47A10000000000000000A5 /* Licenses */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Licenses; sourceTree = "<group>"; };
+		4C47A10000000000000000C1 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
+		4C47A10000000000000000C2 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
+		4C47A10000000000000000C3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		4C47A10000000000000000F1 /* App */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = App;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		4C47A1000000000000000022 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4C47A10000000000000000B1 /* GalaxyKit in Frameworks */,
+				4C47A10000000000000000B2 /* SwiftTerm in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		4C47A1000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				4C47A10000000000000000F1 /* App */,
+				4C47A10000000000000000E0 /* Resources */,
+				4C47A10000000000000000C0 /* Config */,
+				4C47A1000000000000000002 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		4C47A1000000000000000002 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				4C47A10000000000000000A1 /* LemonGalaxy.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		4C47A10000000000000000C0 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				4C47A10000000000000000C1 /* Base.xcconfig */,
+				4C47A10000000000000000C2 /* Signing.xcconfig */,
+				4C47A10000000000000000C3 /* Info.plist */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		4C47A10000000000000000E0 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				4C47A10000000000000000A3 /* Locales */,
+				4C47A10000000000000000A4 /* TerminalThemes */,
+				4C47A10000000000000000A5 /* Licenses */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		4C47A1000000000000000010 /* LemonGalaxy */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4C47A1000000000000000032 /* Build configuration list for PBXNativeTarget "LemonGalaxy" */;
+			buildPhases = (
+				4C47A1000000000000000021 /* Sources */,
+				4C47A1000000000000000022 /* Frameworks */,
+				4C47A1000000000000000023 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				4C47A10000000000000000F1 /* App */,
+			);
+			name = LemonGalaxy;
+			packageProductDependencies = (
+				4C47A10000000000000000D1 /* GalaxyKit */,
+				4C47A10000000000000000D2 /* SwiftTerm */,
+			);
+			productName = LemonGalaxy;
+			productReference = 4C47A10000000000000000A1 /* LemonGalaxy.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		4C47A1000000000000000000 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2720;
+				LastUpgradeCheck = 2720;
+				TargetAttributes = {
+					4C47A1000000000000000010 = {
+						CreatedOnToolsVersion = 27.2;
+					};
+				};
+			};
+			buildConfigurationList = 4C47A1000000000000000031 /* Build configuration list for PBXProject "LemonGalaxy" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-Hans",
+			);
+			mainGroup = 4C47A1000000000000000001;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				4C47A10000000000000000E1 /* XCLocalSwiftPackageReference "." */,
+				4C47A10000000000000000E2 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4C47A1000000000000000002 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				4C47A1000000000000000010 /* LemonGalaxy */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		4C47A1000000000000000023 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4C47A10000000000000000B3 /* Locales in Resources */,
+				4C47A10000000000000000B4 /* TerminalThemes in Resources */,
+				4C47A10000000000000000B5 /* Licenses in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		4C47A1000000000000000021 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		4C47A1000000000000000041 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		4C47A1000000000000000042 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_OPTIMIZATION_LEVEL = s;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		4C47A1000000000000000043 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 4C47A10000000000000000C1 /* Base.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		4C47A1000000000000000044 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 4C47A10000000000000000C1 /* Base.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		4C47A1000000000000000031 /* Build configuration list for PBXProject "LemonGalaxy" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4C47A1000000000000000041 /* Debug */,
+				4C47A1000000000000000042 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		4C47A1000000000000000032 /* Build configuration list for PBXNativeTarget "LemonGalaxy" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4C47A1000000000000000043 /* Debug */,
+				4C47A1000000000000000044 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		4C47A10000000000000000E1 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		4C47A10000000000000000E2 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 1.2.5;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		4C47A10000000000000000D1 /* GalaxyKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4C47A10000000000000000E1 /* XCLocalSwiftPackageReference "." */;
+			productName = GalaxyKit;
+		};
+		4C47A10000000000000000D2 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4C47A10000000000000000E2 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 4C47A1000000000000000000 /* Project object */;
+}

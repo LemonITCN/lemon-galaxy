@@ -1,0 +1,5 @@
+"CFBundleDisplayName" = "LemonGalaxy";
+"NSCameraUsageDescription" = "扫描 LemonGalaxy 管理后台上的服务器二维码。";
+"NSFaceIDUsageDescription" = "用面容 ID 解锁 LemonGalaxy。";
+"NSLocalNetworkUsageDescription" = "在局域网里发现并连接你的设备，服务器连不上时也能用。";
+"NSPhotoLibraryUsageDescription" = "选择要上传到远程设备的照片和视频。";

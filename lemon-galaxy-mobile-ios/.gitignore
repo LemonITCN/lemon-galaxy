@@ -1,0 +1,9 @@
+# 构建产物
+/build/
+/.build/
+/.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+# 本机签名配置
+/Config/Signing.local.xcconfig
