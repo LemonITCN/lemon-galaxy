@@ -8,6 +8,7 @@ import cn.lemonit.galaxy.core.bridge.DisplayInfo
 import cn.lemonit.galaxy.core.bridge.PathKind
 import cn.lemonit.galaxy.core.bridge.Platform
 import cn.lemonit.galaxy.core.bridge.SshAuth
+import cn.lemonit.galaxy.core.bridge.UpdateInfo
 import cn.lemonit.galaxy.core.bridge.VaultData
 import cn.lemonit.galaxy.core.bridge.VaultEntry
 
@@ -71,6 +72,32 @@ object MockData {
     const val SSH_PG = "h-pg-replica"
     const val SSH_PI = "h-pi"
     const val RDP_FINANCE = "r-finance"
+
+    /** 模拟服务器上的最新安卓版本。 */
+    fun update(zh: Boolean) = UpdateInfo(
+        version = "0.2.0",
+        fileName = "LemonGalaxy-0.2.0.apk",
+        size = 46_137_344u,
+        sha256 = "ab".repeat(32),
+        url = "/updates/files/mobile/android/LemonGalaxy-0.2.0.apk",
+        notes = if (zh) {
+            "- SSH 直连：主机密钥确认、连接路径显示\n- RDP 主机经设备转发，用 Windows App 打开\n- 远程桌面加隐私屏开关\n- 修复若干问题"
+        } else {
+            "- SSH direct: host key confirmation and route display\n- RDP hosts forwarded through a device, opened in Windows App\n- Privacy screen toggle in remote desktop\n- Bug fixes"
+        },
+    )
+
+    /** 按数字段比较版本号（"0.10.0" 比 "0.9.1" 新）。 */
+    fun isNewer(candidate: String, current: String): Boolean {
+        val a = candidate.split('.', '-').map { it.toIntOrNull() ?: 0 }
+        val b = current.split('.', '-').map { it.toIntOrNull() ?: 0 }
+        for (i in 0 until maxOf(a.size, b.size)) {
+            val x = a.getOrElse(i) { 0 }
+            val y = b.getOrElse(i) { 0 }
+            if (x != y) return x > y
+        }
+        return false
+    }
     const val CRED_DEPLOY = "c-deploy"
     const val CRED_ROOT = "c-root-lab"
 

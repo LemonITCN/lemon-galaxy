@@ -28,6 +28,7 @@ enum ModalKind: Identifiable {
     case connectChooser(deviceId: String)
     case secretPrompt(SecretPromptRequest)
     case hostKey(HostKeyRequest)
+    case update
     case assistConnect
     case terminalSessions(deviceId: String, sessions: [TerminalSessionInfo])
     case confirm(ConfirmRequest)
@@ -36,6 +37,7 @@ enum ModalKind: Identifiable {
         case .connectChooser(let d): return "chooser-" + d
         case .secretPrompt(let r): return "secret-" + r.id
         case .hostKey(let r): return "hostkey-" + r.id
+        case .update: return "update"
         case .assistConnect: return "assist"
         case .terminalSessions(let d, _): return "sessions-" + d
         case .confirm(let c): return "confirm-" + c.id
@@ -116,6 +118,9 @@ final class AppModel: ObservableObject {
     let host: LocalHostModel
     let ai: AIHubModel
     let transfers = TransferQueue()
+    let update = UpdateModel()
+    /// 经设备转发中的 RDP（本机端口），底部提示条可以手动停止；退出登录、应用退出时全部关掉
+    @Published private(set) var rdpForwards: [RdpForwardItem] = []
 
     private var peers: [String: PeerConnection] = [:]
     private var assistNames: [String: String] = [:]
@@ -142,6 +147,7 @@ final class AppModel: ObservableObject {
         adapter.model = self
         host.app = self
         ai.app = self
+        update.app = self
         if client.restore() { didLogin() }
     }
 
@@ -166,6 +172,7 @@ final class AppModel: ObservableObject {
         attachHostIfReady()
         ai.reloadSummaries()
         Task { try? await client.refreshDevices() }
+        if clientState == .online { update.autoCheckIfDue() }
     }
 
     /// 本机被控服务要等登录上线后内核才给（control 客户端）；上线、重连时都尝试接上
@@ -181,6 +188,7 @@ final class AppModel: ObservableObject {
     }
 
     func logout() async {
+        closeAllRdp()
         closeAllTabs()
         try? await client.logout()
         phase = .login
@@ -197,10 +205,12 @@ final class AppModel: ObservableObject {
             user = client.currentUser()
             server = client.server()
             attachHostIfReady()
+            update.autoCheckIfDue()
         }
     }
 
     func handleSessionRevoked() {
+        closeAllRdp()
         closeAllTabs()
         phase = .login
         showToast(L("login.revoked"), error: true)
@@ -453,19 +463,41 @@ final class AppModel: ObservableObject {
         activeTabId = nil
     }
 
+    /// RDP 主机：内核准备好地址（设了经由设备时在本机开端口转发），再交给系统里的远程桌面应用（微软 Windows App）。
+    /// 密码不放进链接，由用户在 Windows App 里输入。
     func openRdp(_ hostId: String) {
-        guard let e = entry(hostId), case .rdpHost(let label, let host, let port, let username, _, let domain, let jump, _, _, _) = e.data else { return }
         Task {
-            var addr = "\(host):\(port)"
-            if let jump {
-                do {
-                    let p = try await peer(jump)
-                    let fwd = try await p.session.forwardPort(localPort: 0, remoteHost: host, remotePort: port)
-                    addr = "127.0.0.1:\(fwd.localPort())"
-                } catch { showError(error); return }
-            }
-            RdpLauncher.open(label: label, address: addr, username: username, domain: domain)
+            do {
+                let t = try await client.openRdp(hostId: hostId)
+                if t.forwarded {
+                    rdpForwards.removeAll { $0.id == t.forwardId }
+                    rdpForwards.append(RdpForwardItem(id: t.forwardId, hostId: hostId, label: t.label, port: t.port, startedAt: Date()))
+                }
+                guard !selfTest else { return }
+                switch RdpLauncher.open(t) {
+                case .opened:
+                    if t.forwarded { showToast(L("rdp.forwarding", t.label, Int(t.port))) }
+                case .noClient:
+                    if t.forwarded { closeRdp(t.forwardId) }
+                    confirm(L("rdp.noclient.title"), L("rdp.noclient.body"), button: L("rdp.noclient.store"), destructive: false) {
+                        NSWorkspace.shared.open(RdpLauncher.appStoreURL)
+                    }
+                case .badAddress:
+                    if t.forwarded { closeRdp(t.forwardId) }
+                    showToast(L("rdp.badAddress"), error: true)
+                }
+            } catch { showError(error) }
         }
+    }
+
+    func closeRdp(_ forwardId: String) {
+        client.closeRdp(forwardId: forwardId)
+        rdpForwards.removeAll { $0.id == forwardId }
+    }
+
+    func closeAllRdp() {
+        for f in rdpForwards { client.closeRdp(forwardId: f.id) }
+        rdpForwards.removeAll()
     }
 
     /// 双击设备：弹连接方式选择
@@ -626,25 +658,42 @@ enum AppInfo {
     }
 }
 
-/// RDP 直连：macOS 自带客户端要到后续期才有（ffi.md 未导出），先生成 .rdp 文件交给系统里装的远程桌面应用打开。
+/// 一条经设备转发的 RDP（本机 127.0.0.1:port → 那台设备 → 目标的 RDP 端口）
+struct RdpForwardItem: Identifiable, Equatable {
+    let id: String
+    let hostId: String
+    let label: String
+    let port: UInt16
+    let startedAt: Date
+}
+
+/// 把 RDP 地址交给系统里的远程桌面应用（微软 Windows App，处理 rdp:// 链接）。密码不放进链接。
 enum RdpLauncher {
+    enum Result { case opened, noClient, badAddress }
+    /// Mac App Store 里的 Windows App（原 Microsoft Remote Desktop）
+    static let appStoreURL = URL(string: "https://apps.apple.com/app/windows-app/id1295203466")!
+
+    /// rdp://full%20address=s:<host>:<port>&username=s:<user>，键和值各自 URL 编码（域账号写成 域\用户），
+    /// 冒号与方括号按微软文档的写法原样保留（与 iOS、安卓一致）。这种写法 URL(string:) 不接受，用宽松的 CFURL 构造。
+    static func url(for t: RdpTarget) -> URL? {
+        let host = t.host.contains(":") && !t.host.hasPrefix("[") ? "[\(t.host)]" : t.host
+        var params = [("full address", "s:\(host):\(t.port)")]
+        var user = t.username
+        if let d = t.domain, !d.isEmpty, !user.isEmpty, !user.contains("\\"), !user.contains("@") { user = d + "\\" + user }
+        if !user.isEmpty { params.append(("username", "s:" + user)) }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let keep = CharacterSet(charactersIn: ":[]")
+        let query = params.map { k, v in
+            (k.addingPercentEncoding(withAllowedCharacters: allowed) ?? k) + "=" + (v.addingPercentEncoding(withAllowedCharacters: allowed.union(keep)) ?? v)
+        }.joined(separator: "&")
+        return CFURLCreateWithString(nil, ("rdp://" + query) as CFString, nil) as URL?
+    }
+
     @MainActor
-    static func open(label: String, address: String, username: String, domain: String?) {
-        var lines = ["full address:s:\(address)", "username:s:\(domain.map { "\($0)\\" } ?? "")\(username)",
-                     "prompt for credentials:i:1", "screen mode id:i:1", "use multimon:i:0"]
-        lines.append("")
-        let safe = label.replacingOccurrences(of: "/", with: "-")
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(safe).rdp")
-        do {
-            try lines.joined(separator: "\r\n").write(to: url, atomically: true, encoding: .utf8)
-        } catch { return }
-        if NSWorkspace.shared.urlForApplication(toOpen: url) != nil {
-            NSWorkspace.shared.open(url)
-        } else {
-            let alert = NSAlert()
-            alert.messageText = L("rdp.noclient.title")
-            alert.informativeText = L("rdp.noclient.body")
-            alert.runModal()
-        }
+    static func open(_ t: RdpTarget) -> Result {
+        guard let url = url(for: t) else { return .badAddress }
+        guard NSWorkspace.shared.urlForApplication(toOpen: url) != nil else { return .noClient }
+        NSWorkspace.shared.open(url)
+        return .opened
     }
 }

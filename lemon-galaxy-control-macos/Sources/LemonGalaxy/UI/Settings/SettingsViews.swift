@@ -31,6 +31,7 @@ struct SettingsNav: View {
                             Image(systemName: page.icon).font(.system(size: 13)).frame(width: 20).foregroundStyle(sel ? p.accent : p.secondaryText)
                             Text(loc("settings.page." + page.rawValue)).font(.system(size: 13, weight: sel ? .semibold : .regular))
                             Spacer()
+                            if page == .about, app.update.available != nil { UpdateDot() }
                         }
                         .padding(.horizontal, 10).frame(height: 32)
                         .background(RoundedRectangle(cornerRadius: 7).fill(sel ? p.selection : .clear))
@@ -511,6 +512,7 @@ struct AboutSettings: View {
                     }
                 }
             }
+            UpdateSection(model: app.update)
             SettingsSection(title: loc("about.licenses")) {
                 ForEach(Self.licenses, id: \.0) { item in
                     HStack {
@@ -539,4 +541,64 @@ struct AboutSettings: View {
         ("LemonGalaxy", "MIT · github.com/LemonITCN/lemon-galaxy", "LemonGalaxy-LICENSE.txt"),
         ("SwiftTerm", "MIT · github.com/migueldeicaza/SwiftTerm", "SwiftTerm-LICENSE.txt"),
     ]
+}
+
+/// 关于页的「软件更新」：检查、有新版本时打开更新卡片、下载进度
+struct UpdateSection: View {
+    @ObservedObject var model: UpdateModel
+    @EnvironmentObject var app: AppModel
+    @Environment(\.palette) var p
+    @Environment(\.loc) var loc
+
+    var body: some View {
+        SettingsSection(title: loc("update.section"), info: loc("update.section.info")) {
+            HStack(spacing: 10) {
+                statusIcon
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(statusText).font(.system(size: 13, weight: .medium))
+                    if let t = model.lastChecked {
+                        Text(loc("update.lastChecked", Fmt.time(Int64(t.timeIntervalSince1970 * 1000))))
+                            .font(.system(size: 11.5)).foregroundStyle(p.tertiaryText)
+                    }
+                }
+                Spacer()
+                if let a = model.available, !model.busy {
+                    Button(loc("update.view", a.version)) { app.modal = .update }.buttonStyle(PrimaryButtonStyle())
+                }
+                Button(loc("update.check")) { Task { await model.check(manual: true) } }
+                    .buttonStyle(SecondaryButtonStyle())
+                    .disabled(model.busy)
+            }
+            if case .downloading(_, let done, let total) = model.state {
+                ProgressView(value: total == 0 ? 0 : min(1, Double(done) / Double(total)))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch model.state {
+        case .checking: ProgressView().controlSize(.small).frame(width: 18)
+        case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(p.danger).frame(width: 18)
+        case .upToDate: Image(systemName: "checkmark.circle.fill").foregroundStyle(p.success).frame(width: 18)
+        default:
+            if model.available != nil {
+                Image(systemName: "arrow.down.circle.fill").foregroundStyle(p.accent).frame(width: 18)
+            } else {
+                Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(p.secondaryText).frame(width: 18)
+            }
+        }
+    }
+
+    private var statusText: String {
+        switch model.state {
+        case .checking: return loc("update.checking")
+        case .upToDate: return loc("update.upToDate", AppInfo.version)
+        case .failed(let m): return m
+        case .downloading(let i, let d, let t): return loc("update.downloadingShort", i.version, t == 0 ? 0 : Int(Double(d) * 100 / Double(t)))
+        case .downloaded(let i, _): return loc("update.downloadedShort", i.version)
+        case .available(let i): return loc("update.availableShort", i.version)
+        case .idle: return model.available.map { loc("update.availableShort", $0.version) } ?? loc("update.idle", AppInfo.version)
+        }
+    }
 }

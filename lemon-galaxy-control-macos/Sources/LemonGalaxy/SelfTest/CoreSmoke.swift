@@ -215,13 +215,99 @@ private struct Runner {
             for it in m.items.prefix(10) { log("    \(it.providerName) / \(it.name)（\(it.id)）看图=\(it.vision) 上下文=\(it.contextLength)") }
         } else { failures += 1 }
 
+        log("  对端隐私屏能力：\(info.capabilities.contains("privacy") ? "有" : "没有")（冒烟测试不切换，免得把真机屏幕黑掉）")
         session.disconnect()
-        if let ssh { failures += await SshSmoke(client: client, spec: ssh).run() }
+        failures += await updateCheck(client: client)
+        if let ssh {
+            failures += await SshSmoke(client: client, spec: ssh).run()
+            failures += await rdpForward(client: client, viaDevice: target.id, port: ssh.port)
+        }
         if await step("logout", { try await client.logout() }) == nil { failures += 1 }
         log("  最终状态 \(client.state())")
         log(failures == 0 ? "全部通过" : "有 \(failures) 步失败")
         return failures == 0 ? 0 : 1
     }
+}
+
+// MARK: - 检查更新
+
+/// check_update：有新版本时下载到临时目录（内核核对 SHA-256）
+private func updateCheck(client: GalaxyClient) async -> Int {
+    guard let r = await smokeStep("check_update(control, macos, 0.0.1)", {
+        try await client.checkUpdate(component: "control", platform: "macos", arch: "", current: "0.0.1")
+    }) else { return 1 }
+    guard let info = r else {
+        log("  服务器上没有比 0.0.1 新的 control/macos 发布（或未配置更新源）")
+        return 0
+    }
+    log("  新版本 \(info.version) \(info.fileName) \(info.size) 字节 sha256=\(info.sha256.prefix(16))… 地址 \(info.url)")
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lemongalaxy-update-smoke-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let dest = dir.appendingPathComponent((info.fileName as NSString).lastPathComponent)
+    let l = SmokeTransferListener()
+    let ok = await smokeStep("download_update") { () async throws -> Bool in
+        client.downloadUpdate(info: info, dest: dest.path, listener: l)
+        if let e = try await l.wait(seconds: 300) { throw GalaxyError.Other(detail: e) }
+        let size = (try? FileManager.default.attributesOfItem(atPath: dest.path)[.size] as? NSNumber)?.uint64Value ?? 0
+        guard size == info.size else { throw GalaxyError.Other(detail: "下载大小 \(size) 与清单 \(info.size) 不一致") }
+        return true
+    }
+    return ok == nil ? 1 : 0
+}
+
+// MARK: - RDP 经设备转发
+
+/// 建临时 rdp_host（经第一台在线 worker、目标是本机的 SSH 端口代替 RDP 服务），open_rdp 后从转发端口读到 SSH 标识，
+/// close_rdp 后端口应连不上；再测不经设备的直连地址；最后删掉临时条目。
+private func rdpForward(client: GalaxyClient, viaDevice: String, port: UInt16) async -> Int {
+    var failures = 0
+    let tag = "smoke-\(ProcessInfo.processInfo.processIdentifier)"
+    var created: [String] = []
+    guard let viaEntry = await smokeStep("vault_save(rdp_host 经设备)", {
+        try await client.vaultSave(entry: VaultEntry(id: "", folderId: nil, sort: 0,
+                                                     data: .rdpHost(label: tag + "-rdp", host: "127.0.0.1", port: port, username: "smoke", password: "不该出现在链接里",
+                                                                    domain: "CORP", jumpDeviceId: viaDevice, tags: [], note: "", favorite: false),
+                                                     updatedAt: 0))
+    }) else { return 1 }
+    created.append(viaEntry.id)
+    if let t = await smokeStep("open_rdp（经设备）", { try await client.openRdp(hostId: viaEntry.id) }) {
+        log("  \(t.label) → \(t.host):\(t.port) 用户 \(t.username) 域 \(t.domain ?? "无") 转发 \(t.forwarded) id=\(t.forwardId)")
+        if let url = RdpLauncher.url(for: t) { log("  交给远程桌面应用的链接 \(url.absoluteString)") }
+        if !t.forwarded || t.host != "127.0.0.1" || t.forwardId.isEmpty { log("失败 经设备时应在本机开转发端口"); failures += 1 }
+        if RdpLauncher.url(for: t)?.absoluteString.contains("该出现") == true { log("失败 链接里出现了密码"); failures += 1 }
+        if let banner = await smokeStep("经 RDP 转发读标识", { try await Task.detached { try readBanner(port: t.port) }.value }) {
+            log("  读到 \(banner.trimmingCharacters(in: .whitespacesAndNewlines))")
+            if !banner.hasPrefix("SSH-") { log("失败 转发过去读到的不对"); failures += 1 }
+        } else { failures += 1 }
+        client.closeRdp(forwardId: t.forwardId)
+        let closed = await smokeStep("close_rdp 后端口关闭") { () async throws -> Bool in
+            for _ in 0..<20 {
+                if (try? await Task.detached { try readBanner(port: t.port) }.value) == nil { return true }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            throw GalaxyError.Other(detail: "关掉转发 2 秒后端口仍能连上")
+        }
+        if closed == nil { failures += 1 }
+    } else { failures += 1 }
+
+    if let direct = await smokeStep("vault_save(rdp_host 直连)", {
+        try await client.vaultSave(entry: VaultEntry(id: "", folderId: nil, sort: 0,
+                                                     data: .rdpHost(label: tag + "-rdp-direct", host: "10.0.3.5", port: 0, username: "Administrator", password: nil,
+                                                                    domain: nil, jumpDeviceId: nil, tags: [], note: "", favorite: false),
+                                                     updatedAt: 0))
+    }) {
+        created.append(direct.id)
+        if let t = await smokeStep("open_rdp（直连）", { try await client.openRdp(hostId: direct.id) }) {
+            log("  \(t.host):\(t.port) 转发 \(t.forwarded) 链接 \(RdpLauncher.url(for: t)?.absoluteString ?? "无")")
+            if t.forwarded || t.host != "10.0.3.5" || t.port != 3389 { log("失败 直连应原样给出地址，端口 0 按 3389"); failures += 1 }
+        } else { failures += 1 }
+    } else { failures += 1 }
+
+    for id in created {
+        if await smokeStep("vault_delete(\(id))", { try await client.vaultDelete(id: id) }) == nil { failures += 1 }
+    }
+    return failures
 }
 
 // MARK: - SSH 直连

@@ -271,6 +271,57 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
         return out
     }
 
+    // MARK: RDP
+
+    private var rdpForwards: Set<String> = []
+
+    override func openRdp(hostId: String) async throws -> RdpTarget {
+        await delay(300)
+        guard let e = vault().first(where: { $0.id == hostId }),
+              case let .rdpHost(label, host, port, username, password, domain, jump, _, _, _) = e.data else {
+            throw GalaxyError.NotFound(detail: zh ? "主机不存在" : "Host not found")
+        }
+        let p = port == 0 ? 3389 : port
+        guard let jump, !jump.isEmpty else {
+            return RdpTarget(label: label, host: host, port: p, username: username, domain: domain, password: password, forwarded: false, forwardId: "")
+        }
+        guard let d = device(jump), d.online || d.lanSeen else {
+            throw GalaxyError.Network(detail: zh ? "经由的设备离线" : "The via device is offline")
+        }
+        let id = UUID().uuidString.lowercased()
+        lock.locked { _ = rdpForwards.insert(id) }
+        return RdpTarget(label: label, host: "127.0.0.1", port: 53_389, username: username, domain: domain, password: password, forwarded: true, forwardId: id)
+    }
+
+    override func closeRdp(forwardId: String) { lock.locked { _ = rdpForwards.remove(forwardId) } }
+
+    // MARK: 更新
+
+    /// 模拟服务器上的最新版本
+    static let mockUpdate = UpdateInfo(version: "0.2.0", fileName: "LemonGalaxy-0.2.0.dmg", size: 19_284_112,
+                                       sha256: String(repeating: "ab", count: 32), url: "/updates/files/control/macos/LemonGalaxy-0.2.0.dmg",
+                                       notes: "")
+
+    override func checkUpdate(component: String, platform: String, arch: String, current: String) async throws -> UpdateInfo? {
+        await delay(400)
+        guard current.compare(Self.mockUpdate.version, options: .numeric) == .orderedAscending else { return nil }
+        var u = Self.mockUpdate
+        u.notes = zh
+            ? "- SSH 直连：主机密钥确认、连接路径显示\n- RDP 主机经设备转发，用 Windows App 打开\n- 远程桌面加隐私屏开关\n- 修复若干问题"
+            : "- SSH direct: host key confirmation and route display\n- RDP hosts forwarded through a device, opened in Windows App\n- Privacy screen toggle in remote desktop\n- Bug fixes"
+        return u
+    }
+
+    /// 模拟内核不提供真的安装包：走一段进度后报错
+    override func downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener) {
+        let total = info.size
+        let zh = zh
+        queue.async {
+            for i in 1...10 { listener.onProgress(done: total / 10 * UInt64(i), total: total); Thread.sleep(forTimeInterval: 0.05) }
+            listener.onFinished(error: zh ? "模拟内核不提供真实安装包" : "The mock core has no real update package")
+        }
+    }
+
     // MARK: AI
 
     override func aiModels() async throws -> AiModels {
@@ -482,6 +533,16 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
     override func forwardPort(localPort: UInt16, remoteHost: String, remotePort: UInt16) async throws -> PortForward {
         await client.delay(200)
         return MockPortForward(port: localPort == 0 ? 50_000 + remotePort % 1000 : localPort)
+    }
+
+    override func setPrivacy(on: Bool) async throws {
+        await client.delay(200)
+        guard MockData.capabilities(for: device).contains("privacy") else {
+            throw GalaxyError.Permission(detail: client.zh ? "被控端不支持隐私屏" : "The remote device does not support the privacy screen")
+        }
+        guard MockData.permissions(for: device).control else {
+            throw GalaxyError.Permission(detail: client.zh ? "没有控制权限" : "No control permission")
+        }
     }
 }
 

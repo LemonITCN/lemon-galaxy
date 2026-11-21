@@ -3,6 +3,7 @@ import AppKit
 import CoreVideo
 import VideoToolbox
 import Carbon.HIToolbox
+import Combine
 
 /// 远程桌面标签：list_displays → open_display(VideoSink) → 解码显示；鼠标键盘 → InputEvent。
 @MainActor
@@ -26,6 +27,10 @@ final class RemoteDesktopModel: TabModel {
     @Published var measuredKbps = 0
     @Published var remoteCursor: CGPoint?
     @Published var focusMode = false
+    /// 隐私屏：被控端本地屏幕黑掉、本地键鼠失效（对端能力里有 "privacy" 才显示开关）
+    @Published var privacyOn = false
+    @Published var privacyBusy = false
+    private var peerWatch: AnyCancellable?
     let videoView = RemoteVideoNSView()
     private var channel: DisplayChannel?
     private var sinkAdapter: VideoSinkAdapter?
@@ -62,6 +67,7 @@ final class RemoteDesktopModel: TabModel {
             guard let app, let deviceId else { return }
             do {
                 let p = try await app.peer(deviceId)
+                if peer !== p { watchPeer(p) }
                 peer = p
                 displays = try await p.session.listDisplays()
                 guard let first = displays.first(where: \.primary) ?? displays.first else {
@@ -162,6 +168,32 @@ final class RemoteDesktopModel: TabModel {
 
     func special(_ c: ComboKey) { send(.specialCombo(combo: c)) }
 
+    /// 新的会话：被控端的隐私屏随旧会话结束已自动关闭；会话断开时开关复位
+    private func watchPeer(_ p: PeerConnection) {
+        privacyOn = false
+        peerWatch = p.$closedReason.sink { [weak self] reason in
+            if reason != nil { self?.privacyOn = false }
+        }
+    }
+
+    /// 对端支持隐私屏（能力列表里有 "privacy"）
+    var privacySupported: Bool { peer?.info.capabilities.contains("privacy") ?? false }
+
+    func setPrivacy(_ on: Bool) {
+        guard let peer, !privacyBusy else { return }
+        privacyBusy = true
+        Task {
+            do {
+                try await peer.session.setPrivacy(on: on)
+                privacyOn = on
+                app?.showToast(L(on ? "remote.privacy.on" : "remote.privacy.off"))
+            } catch {
+                app?.showToast(L("remote.privacy.failed", AppModel.describe(error)), error: true)
+            }
+            privacyBusy = false
+        }
+    }
+
     // MARK: 剪贴板同步（文字）：本机变化推给远端；切回窗口时拉取远端
     private func setupClipboardSync() {
         clipboardTimer?.invalidate()
@@ -193,6 +225,13 @@ final class RemoteDesktopModel: TabModel {
     }
 
     override func close() {
+        // 关掉远程桌面标签时顺手关隐私屏（同一会话可能还被终端、文件标签用着，被控端不会自动关）
+        if privacyOn, let peer, peer.closedReason == nil {
+            let session = peer.session
+            Task { try? await session.setPrivacy(on: false) }
+            privacyOn = false
+        }
+        peerWatch = nil
         channel?.stop()
         channel = nil
         decoder.invalidate()
@@ -546,6 +585,7 @@ struct RemoteToolbar: View {
             IconButton(icon: tab.clipboardSync ? "doc.on.clipboard.fill" : "doc.on.clipboard", help: loc("remote.clipboard"), active: tab.clipboardSync) {
                 tab.clipboardSync.toggle()
             }
+            if tab.privacySupported { privacyToggle }
             Spacer(minLength: 8)
             stats
             if let peer = tab.peer { PathBadge(peer: peer) }
@@ -568,6 +608,30 @@ struct RemoteToolbar: View {
     }
 
     private var divider: some View { Rectangle().fill(p.separator).frame(width: 1, height: 18).padding(.horizontal, 3) }
+
+    /// 隐私屏开关：开着时醒目显示，提醒对方屏幕现在是黑的
+    private var privacyToggle: some View {
+        let on = tab.privacyOn
+        let canControl = tab.peer?.info.permissions.control ?? false
+        return Button { tab.setPrivacy(!on) } label: {
+            HStack(spacing: 5) {
+                if tab.privacyBusy {
+                    ProgressView().controlSize(.mini).frame(width: 12, height: 12)
+                } else {
+                    Image(systemName: on ? "eye.slash.fill" : "eye.slash").font(.system(size: 11, weight: .medium))
+                }
+                Text(loc("remote.privacy")).font(.system(size: 11.5, weight: on ? .semibold : .regular))
+            }
+            .foregroundStyle(on ? Color.white : (canControl ? p.secondaryText : p.tertiaryText))
+            .padding(.horizontal, 8).frame(height: 24)
+            .background(RoundedRectangle(cornerRadius: 6).fill(on ? p.warning : .clear))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(on ? .clear : p.border, lineWidth: 0.7))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!canControl || tab.privacyBusy)
+        .help(loc(canControl ? "remote.privacy.help" : "remote.privacy.noControl"))
+    }
 
     private var qualityMenu: some View {
         Menu {

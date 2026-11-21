@@ -1,5 +1,12 @@
 package cn.lemonit.galaxy.screenshots
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import cn.lemonit.galaxy.ui.settings.UpdateDialog
+import cn.lemonit.galaxy.ui.settings.UpdateActions
+import cn.lemonit.galaxy.ui.hosts.RdpForwardBanner
+import cn.lemonit.galaxy.app.UpdateState
+import cn.lemonit.galaxy.app.RdpForward
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.os.Looper
@@ -252,6 +259,37 @@ class ScreenshotTest {
         HostKeyDialog("10.0.2.15", 22, "ssh-ed25519", "SHA256:3EDwKv5fv67WpFIHRKfVmkbbTSnNckJjoNmrY5SyKAM", changed, onTrust = {}, onReject = {})
     }
 
+    /** 经设备转发中的 RDP：主界面底部提示条 */
+    private fun rdpBanner(dark: Boolean) = shot("rdp_forward", dark) {
+        Column(Modifier.fillMaxSize()) {
+            Box(Modifier.weight(1f)) { HostsScreen(Fixtures.hosts, HostsFilter(), refreshing = false, actions = noHostsActions) }
+            RdpForwardBanner(
+                listOf(RdpForward("f1", MockData.RDP_FINANCE, "Finance PC", 53389), RdpForward("f2", "r-x", "WIN-SRV-2022", 53390)),
+                onStop = {}, onStopAll = {},
+            )
+        }
+    }
+
+    @Test fun rdpForwardZhLight() = rdpBanner(false)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun rdpForwardEnDark() = rdpBanner(true)
+
+    private val noUpdateActions = object : UpdateActions {
+        override fun onDownload() = Unit
+        override fun onInstall() = Unit
+        override fun onDismiss() = Unit
+    }
+
+    private fun update(dark: Boolean, state: (cn.lemonit.galaxy.core.bridge.UpdateInfo) -> UpdateState, name: String) = shotScreen(name, dark) {
+        UpdateDialog(state(MockData.update(zh)), "0.1.0", noUpdateActions)
+    }
+
+    @Test fun updateZhLight() = update(false, { UpdateState.Available(it) }, "update")
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun updateDownloadingEnDark() = update(true, { UpdateState.Downloading(it, it.size.toLong() * 37 / 100, it.size.toLong()) }, "update_downloading")
+
     @Test fun hostKeyZhLight() = hostKey(false, false)
 
     @Test fun hostKeyChangedZhDark() = hostKey(true, true)
@@ -369,12 +407,12 @@ class ScreenshotTest {
         override fun onDisconnect() = Unit
     }
 
-    private fun remote(dark: Boolean, toolbar: Boolean, keyboard: Boolean, name: String) {
+    private fun remote(dark: Boolean, toolbar: Boolean, keyboard: Boolean, name: String, privacy: Boolean = false) {
         val bytes = context.assets.open("mock/desktop_preview.jpg").use { it.readBytes() }
         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size).asImageBitmap()
         shot(name, dark) {
             RemoteDesktopScreen(
-                ui = Fixtures.remote(zh),
+                ui = Fixtures.remote(zh).let { if (privacy) it.copy(privacySupported = true, privacyAllowed = true, privacyOn = true) else it },
                 actions = noRemoteActions,
                 video = { m -> Image(bmp, null, contentScale = ContentScale.FillBounds, modifier = m) },
                 initialToolbarOpen = toolbar,
@@ -385,6 +423,10 @@ class ScreenshotTest {
 
     @Test @Config(qualifiers = PHONE_LAND_ZH)
     fun remoteToolbarZhDark() = remote(true, toolbar = true, keyboard = false, name = "remote_toolbar")
+
+    /** 隐私屏已开：工具栏开关高亮 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remotePrivacyZhDark() = remote(true, toolbar = true, keyboard = false, name = "remote_privacy", privacy = true)
 
     @Test @Config(qualifiers = PHONE_LAND_EN)
     fun remoteKeyboardEnLight() = remote(false, toolbar = false, keyboard = true, name = "remote_keyboard")
@@ -474,6 +516,7 @@ class ScreenshotTest {
             about = AboutInfo("0.1.0", "0.1.0-mock", true),
             biometricAvailable = true,
             actions = noSettingsActions,
+            update = UpdateState.Available(MockData.update(zh)),
         )
     }
 

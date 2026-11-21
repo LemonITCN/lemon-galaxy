@@ -4,6 +4,8 @@ import cn.lemonit.galaxy.app.AccountController
 import cn.lemonit.galaxy.app.HostItem
 import cn.lemonit.galaxy.app.HostTree
 import cn.lemonit.galaxy.app.HostsData
+import cn.lemonit.galaxy.app.RdpLinks
+import cn.lemonit.galaxy.core.bridge.RdpTarget
 import cn.lemonit.galaxy.core.bridge.FileKind
 import cn.lemonit.galaxy.core.bridge.InputEvent
 import cn.lemonit.galaxy.core.mock.AnnexB
@@ -18,6 +20,28 @@ import org.junit.Test
 
 /** 纯逻辑单元测试（不需要 Android 运行时）。 */
 class LogicTest {
+    @Test
+    fun rdpLinkEncodesAndOmitsPassword() {
+        val t = RdpTarget("Finance PC", "127.0.0.1", 53389u, "finance", "CORP", "s3cret", true, "f1")
+        val uri = RdpLinks.uri(t)
+        assertEquals("rdp://full%20address=s:127.0.0.1:53389&username=s:CORP%5Cfinance", uri)
+        assertFalse(uri.contains("s3cret"))
+        // 已经带域或是 UPN 的用户名不再拼域；IPv6 地址加方括号
+        assertEquals(
+            "rdp://full%20address=s:[240e:3b0::1]:3389&username=s:alice%40corp.example",
+            RdpLinks.uri(RdpTarget("v6", "240e:3b0::1", 3389u, "alice@corp.example", "CORP", null, false, "")),
+        )
+        assertEquals("rdp://full%20address=s:host:3389", RdpLinks.uri(RdpTarget("x", "host", 3389u, "", null, null, false, "")))
+    }
+
+    @Test
+    fun versionCompare() {
+        assertTrue(MockData.isNewer("0.2.0", "0.1.0"))
+        assertTrue(MockData.isNewer("0.10.0", "0.9.9"))
+        assertFalse(MockData.isNewer("0.2.0", "0.2.0"))
+        assertFalse(MockData.isNewer("0.1.9", "0.2"))
+    }
+
     @Test
     fun serverAddressValidation() {
         assertTrue(AccountController.isValidServer("galaxy.example.com:7443#sha256-AbCdEf0123456789"))

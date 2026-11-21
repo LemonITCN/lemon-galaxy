@@ -33,6 +33,7 @@ import cn.lemonit.galaxy.core.bridge.PeerInfo
 import cn.lemonit.galaxy.core.bridge.Permissions
 import cn.lemonit.galaxy.core.bridge.Platform
 import cn.lemonit.galaxy.core.bridge.PointerButton
+import cn.lemonit.galaxy.core.bridge.RdpTarget
 import cn.lemonit.galaxy.core.bridge.RiskLevel
 import cn.lemonit.galaxy.core.bridge.ServerInfo
 import cn.lemonit.galaxy.core.bridge.SshAuth
@@ -43,6 +44,7 @@ import cn.lemonit.galaxy.core.bridge.ToolCallView
 import cn.lemonit.galaxy.core.bridge.ToolResultView
 import cn.lemonit.galaxy.core.bridge.TotpSetup
 import cn.lemonit.galaxy.core.bridge.TouchPhase
+import cn.lemonit.galaxy.core.bridge.UpdateInfo
 import cn.lemonit.galaxy.core.bridge.UserInfo
 import cn.lemonit.galaxy.core.bridge.VaultData
 import cn.lemonit.galaxy.core.bridge.VaultEntry
@@ -79,6 +81,8 @@ import uniffi.galaxy_ffi.PeerInfo as FPeerInfo
 import uniffi.galaxy_ffi.Permissions as FPermissions
 import uniffi.galaxy_ffi.Platform as FPlatform
 import uniffi.galaxy_ffi.PointerButton as FPointerButton
+import uniffi.galaxy_ffi.RdpTarget as FRdpTarget
+import uniffi.galaxy_ffi.UpdateInfo as FUpdateInfo
 import uniffi.galaxy_ffi.RiskLevel as FRiskLevel
 import uniffi.galaxy_ffi.ServerInfo as FServerInfo
 import uniffi.galaxy_ffi.SshAuth as FSshAuth
@@ -150,6 +154,9 @@ internal fun FPathInfo.toBridge() = PathInfo(kind.toBridge(), rttMs, remoteAddr)
 internal fun FPermissions.toBridge() = Permissions(view, control, files, terminal, clipboard, audio, aiCap.toBridge())
 internal fun FPeerInfo.toBridge() = PeerInfo(deviceId, hostname, platform.toBridge(), osVersion, arch, systemUser, shell, permissions.toBridge(), capabilities, path.toBridge())
 internal fun FSshInfo.toBridge() = SshInfo(hostId, label, host, port, username, via)
+internal fun FRdpTarget.toBridge() = RdpTarget(label, host, port, username, domain, password, forwarded, forwardId)
+internal fun FUpdateInfo.toBridge() = UpdateInfo(version, fileName, size, sha256, url, notes)
+internal fun UpdateInfo.toFfi() = FUpdateInfo(version, fileName, size, sha256, url, notes)
 internal fun TerminalOptions.toFfi() = FTerminalOptions(attachSession, shell, cols, rows, env.map { FEnvVar(it.name, it.value) })
 internal fun FTerminalSessionInfo.toBridge() = TerminalSessionInfo(id, title, createdAt, attached)
 internal fun FFileEntry.toBridge() = FileEntry(name, path, kind.toBridge(), size, mode, modifiedAt, owner, group, linkTarget)

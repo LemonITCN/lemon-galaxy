@@ -205,6 +205,42 @@ class MockCoreTest {
     }
 
     @Test
+    fun rdpForwardsThroughDeviceAndCloses() = runBlocking<Unit> {
+        client.login(server, "alice", "pw", null)
+        val t = client.openRdp(MockData.RDP_FINANCE)
+        assertTrue(t.forwarded)
+        assertEquals("127.0.0.1", t.host)
+        assertTrue(t.forwardId.isNotEmpty())
+        client.closeRdp(t.forwardId)
+    }
+
+    @Test
+    fun updateCheckAndDownloadReportsResult() = runBlocking<Unit> {
+        client.login(server, "alice", "pw", null)
+        assertEquals(null, client.checkUpdate("mobile", "android", "", "9.9.9"))
+        val info = client.checkUpdate("mobile", "android", "", "0.1.0")
+        assertNotNull(info)
+        val done = CountDownLatch(1)
+        var progressed = false
+        client.downloadUpdate(info!!, File.createTempFile("upd", ".apk").path, object : TransferListener {
+            override fun onProgress(done: ULong, total: ULong) {
+                progressed = true
+            }
+
+            override fun onFinished(error: String?) {
+                this@MockCoreTest.updateError = error
+                done.countDown()
+            }
+        })
+        assertTrue(done.await(10, TimeUnit.SECONDS))
+        assertTrue(progressed)
+        // 模拟内核不提供真实安装包：以清楚的错误结束
+        assertNotNull(updateError)
+    }
+
+    @Volatile private var updateError: String? = null
+
+    @Test
     fun sshRejectingHostKeyCancels() = runBlocking<Unit> {
         client.login(server, "alice", "pw", null)
         val result = runCatching {

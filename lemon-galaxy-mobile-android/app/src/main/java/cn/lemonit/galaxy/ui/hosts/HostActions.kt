@@ -174,9 +174,9 @@ fun HostActionsContent(
                 ActionTile(Icons.Rounded.AutoAwesome, stringResource(R.string.action_ai), true) { onAction(HostAction.AI) }
             }
             is HostItem.Rdp -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                ActionTile(Icons.Rounded.Tv, stringResource(R.string.action_remote_desktop), false) {}
+                ActionTile(Icons.Rounded.Tv, stringResource(R.string.action_remote_desktop), true) { onAction(HostAction.REMOTE) }
                 Spacer(Modifier.width(4.dp))
-                InfoButton(stringResource(R.string.rdp_unsupported))
+                InfoButton(stringResource(R.string.rdp_info))
             }
         }
         Spacer(Modifier.height(12.dp))

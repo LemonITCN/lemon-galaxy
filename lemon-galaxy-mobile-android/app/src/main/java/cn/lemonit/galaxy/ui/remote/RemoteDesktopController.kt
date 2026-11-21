@@ -103,6 +103,12 @@ data class RemoteUi(
     val videoW: Int = 0,
     val videoH: Int = 0,
     val path: PathInfo? = null,
+    /** 对端能力里有 "privacy"：工具栏显示隐私屏开关 */
+    val privacySupported: Boolean = false,
+    /** 有控制权限才能切换隐私屏 */
+    val privacyAllowed: Boolean = false,
+    val privacyOn: Boolean = false,
+    val privacyBusy: Boolean = false,
 ) {
     val display: DisplayInfo? get() = displays.firstOrNull { it.id == displayId }
     val remoteW: Int get() = display?.width?.toInt() ?: videoW
@@ -133,8 +139,16 @@ class RemoteDesktopController(
         scope.launch {
             try {
                 val peer = conn.peer(deviceId)
-                _ui.update { it.copy(path = peer.path.value) }
+                _ui.update {
+                    it.copy(
+                        path = peer.path.value,
+                        privacySupported = "privacy" in peer.info.capabilities,
+                        privacyAllowed = peer.info.permissions.control,
+                    )
+                }
                 scope.launch { peer.path.collect { p -> _ui.update { it.copy(path = p) } } }
+                // 会话结束：被控端已自动关掉隐私屏，开关复位
+                scope.launch { peer.closedReason.collect { r -> if (r != null) _ui.update { it.copy(privacyOn = false) } } }
                 val displays = peer.session.listDisplays()
                 val first = displays.firstOrNull { it.primary } ?: displays.firstOrNull()
                     ?: throw IllegalStateException("no display")
@@ -176,6 +190,18 @@ class RemoteDesktopController(
 
     fun setMouseMode(on: Boolean) = _ui.update { it.copy(mouseMode = on) }
 
+    /** 切换隐私屏，失败时抛出（界面提示原因）。 */
+    suspend fun setPrivacy(on: Boolean) {
+        if (_ui.value.privacyBusy) return
+        _ui.update { it.copy(privacyBusy = true) }
+        try {
+            conn.peer(deviceId).session.setPrivacy(on)
+            _ui.update { it.copy(privacyOn = on) }
+        } finally {
+            _ui.update { it.copy(privacyBusy = false) }
+        }
+    }
+
     fun setSurface(s: Surface?) = decoder.setSurface(s)
 
     fun send(e: InputEvent) {
@@ -199,6 +225,11 @@ class RemoteDesktopController(
     }
 
     fun stop() {
+        // 离开远程桌面时关掉隐私屏（同一会话可能还被终端、文件用着，被控端不会自动关）
+        if (_ui.value.privacyOn) {
+            conn.existingPeer(deviceId)?.let { p -> scope.launch { runCatching { p.session.setPrivacy(false) } } }
+            _ui.update { it.copy(privacyOn = false) }
+        }
         channel?.stop()
         channel = null
         decoder.release()

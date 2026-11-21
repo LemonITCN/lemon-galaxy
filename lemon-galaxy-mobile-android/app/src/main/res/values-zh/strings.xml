@@ -145,7 +145,15 @@
     <string name="jump_info">内网里的主机可以经由一台运行 LemonGalaxy 的设备转过去，也可以经由另一台 SSH 主机（跳板机）。</string>
     <string name="use_default">跟随设置</string>
     <string name="none">无</string>
-    <string name="rdp_unsupported">安卓端暂不支持 RDP 直连，请在 Windows 或 Mac 客户端打开这台主机。</string>
+    <string name="rdp_info">用微软 Windows App 打开。经由设备时，本机先通过那台设备转发到目标的 RDP 端口；密码不经链接传递，请在 Windows App 里输入。</string>
+    <string name="rdp_forwarding">已经由设备把 %1$s 转发到本机端口 %2$d，用完请在底部停止转发</string>
+    <string name="rdp_bar_title">RDP 转发中</string>
+    <string name="rdp_bar_info">经由设备的 RDP 连接会在本机开一个端口，经那台设备转到目标主机，Windows App 连的就是这个端口。用完点「停止」；退出登录或退出应用时会全部关闭。</string>
+    <string name="rdp_bar_stop">停止</string>
+    <string name="rdp_bar_stop_all">全部停止</string>
+    <string name="rdp_noclient_title">没有找到远程桌面应用</string>
+    <string name="rdp_noclient_body">打开 RDP 主机需要微软的 Windows App（原 Microsoft Remote Desktop）。请从 Play 商店免费安装后再点连接。</string>
+    <string name="rdp_noclient_store">前往 Play 商店</string>
     <string name="device_offline">设备离线</string>
     <string name="assist_title">临时协助</string>
     <string name="assist_device_code">设备码</string>
@@ -253,6 +261,11 @@
     <string name="files_targets_empty">没有在线的设备或 SSH 主机</string>
 
     <!-- 远程桌面 -->
+    <string name="rd_privacy">隐私屏</string>
+    <string name="rd_privacy_on">隐私屏已开</string>
+    <string name="rd_privacy_on_toast">已开启隐私屏：对方屏幕已黑屏，本地键鼠已停用</string>
+    <string name="rd_privacy_off_toast">已关闭隐私屏</string>
+    <string name="rd_privacy_failed">隐私屏切换失败：%1$s</string>
     <string name="rd_connecting">正在连接画面…</string>
     <string name="rd_failed">无法打开远程画面</string>
     <string name="rd_mode">操作方式</string>
@@ -436,4 +449,29 @@
     <string name="totp_enabled_toast">两步验证已开启</string>
     <string name="totp_disabled_toast">两步验证已关闭</string>
     <string name="licenses_title">开源许可</string>
+
+    <!-- 检查更新 -->
+    <string name="update_check">检查更新</string>
+    <string name="update_idle">当前版本 %1$s</string>
+    <string name="update_checking">正在检查更新…</string>
+    <string name="update_up_to_date">已是最新版本（%1$s）</string>
+    <string name="update_available_short">有新版本 %1$s，点按查看</string>
+    <string name="update_downloading_short">正在下载 %1$s（%2$d%%）</string>
+    <string name="update_downloaded_short">%1$s 已下载，点按安装</string>
+    <string name="update_check_failed">检查更新失败：%1$s</string>
+    <string name="update_download_failed">下载失败：%1$s</string>
+    <string name="update_install_failed">无法打开安装器：%1$s</string>
+    <string name="update_title">发现新版本</string>
+    <string name="update_versions">当前 %1$s → 新版本 %2$s</string>
+    <string name="update_notes">更新说明</string>
+    <string name="update_no_notes">这个版本没有填写更新说明</string>
+    <string name="update_verified">已验证发布签名，下载后还会核对 SHA-256。</string>
+    <string name="update_downloading">已下载 %1$s / %2$s</string>
+    <string name="update_downloaded">安装包已下载并通过校验，正在打开系统安装器。</string>
+    <string name="update_download">下载并安装</string>
+    <string name="update_install">安装</string>
+    <string name="update_later">稍后</string>
+    <string name="update_unknown_title">需要允许安装应用</string>
+    <string name="update_unknown_body">系统还没允许 LemonGalaxy 安装应用。请在接下来的设置页打开「允许来自此来源的应用」，回来后再点「安装」。</string>
+    <string name="update_unknown_settings">去设置</string>
 </resources>

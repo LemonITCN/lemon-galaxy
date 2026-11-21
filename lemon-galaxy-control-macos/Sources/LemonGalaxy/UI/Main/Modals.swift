@@ -24,6 +24,7 @@ struct ModalOverlay: View {
         case .connectChooser(let id): ConnectChooser(deviceId: id).frame(width: 440)
         case .secretPrompt(let r): SecretPromptCard(request: r).frame(width: 380)
         case .hostKey(let r): HostKeyCard(request: r).frame(width: 460)
+        case .update: UpdateCard(model: app.update).frame(width: 480)
         case .assistConnect: AssistConnectCard().frame(width: 400)
         case .terminalSessions(let id, let list): TerminalSessionsCard(deviceId: id, sessions: list).frame(width: 440)
         case .confirm(let c): ConfirmCard(request: c).frame(width: 380)
@@ -203,6 +204,112 @@ struct HostKeyCard: View {
     private func answer(_ trust: Bool) {
         request.respond(trust)
         app.modal = nil
+    }
+}
+
+/// 新版本：版本号、更新说明、下载进度；下载完打开 DMG，提示拖进「应用程序」替换
+struct UpdateCard: View {
+    @ObservedObject var model: UpdateModel
+    @EnvironmentObject var app: AppModel
+    @Environment(\.palette) var p
+    @Environment(\.loc) var loc
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.down.circle.fill").font(.system(size: 22)).foregroundStyle(p.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(loc("update.title")).font(.system(size: 14, weight: .semibold))
+                    if let info {
+                        Text(loc("update.versions", AppInfo.version, info.version) + " · " + Fmt.bytes(info.size))
+                            .font(.system(size: 11.5)).foregroundStyle(p.secondaryText)
+                    }
+                }
+                Spacer()
+                if !model.busy { IconButton(icon: "xmark", size: 11) { close() } }
+            }
+            if let info {
+                VStack(alignment: .leading, spacing: 6) {
+                    SectionLabel(text: loc("update.notes"))
+                    ScrollView {
+                        Text(info.notes.isEmpty ? loc("update.noNotes") : info.notes)
+                            .font(.system(size: 12.5)).foregroundStyle(info.notes.isEmpty ? p.tertiaryText : p.text)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxHeight: 180)
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(p.elevated))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(p.border, lineWidth: 0.5))
+                }
+            }
+            status
+            HStack {
+                Spacer()
+                buttons
+            }
+        }
+        .padding(18)
+    }
+
+    private var info: UpdateInfo? {
+        switch model.state {
+        case .available(let i), .downloading(let i, _, _), .downloaded(let i, _): return i
+        default: return model.available
+        }
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        switch model.state {
+        case .downloading(_, let done, let total):
+            VStack(alignment: .leading, spacing: 6) {
+                ProgressView(value: total == 0 ? 0 : min(1, Double(done) / Double(total)))
+                Text(loc("update.downloading", Fmt.bytes(done), Fmt.bytes(total)))
+                    .font(.system(size: 11.5).monospacedDigit()).foregroundStyle(p.secondaryText)
+            }
+        case .downloaded(_, let path):
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(p.success)
+                Text(loc("update.downloaded", (path as NSString).lastPathComponent))
+                    .font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+            }
+        case .failed(let msg):
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(p.danger)
+                Text(msg).font(.system(size: 12.5)).foregroundStyle(p.danger).fixedSize(horizontal: false, vertical: true)
+            }
+        default:
+            Text(loc("update.verified")).font(.system(size: 11.5)).foregroundStyle(p.tertiaryText)
+        }
+    }
+
+    @ViewBuilder
+    private var buttons: some View {
+        switch model.state {
+        case .available:
+            Button(loc("update.later")) { close() }.buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+            Button(loc("update.download")) { model.download() }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
+        case .downloading:
+            Button(loc("update.background")) { app.modal = nil }.buttonStyle(SecondaryButtonStyle())
+        case .downloaded:
+            Button(loc("update.reveal")) { model.revealDownloaded() }.buttonStyle(SecondaryButtonStyle())
+            Button(loc("update.done")) { close() }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
+        case .failed:
+            Button(loc("common.close")) { close() }.buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+            if model.available != nil {
+                Button(loc("common.retry")) { model.reset(); model.download() }.buttonStyle(PrimaryButtonStyle())
+            }
+        default:
+            Button(loc("common.close")) { close() }.buttonStyle(SecondaryButtonStyle())
+        }
+    }
+
+    private func close() {
+        app.modal = nil
+        if case .downloaded = model.state { return }
+        model.reset()
     }
 }
 

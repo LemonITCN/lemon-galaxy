@@ -264,6 +264,34 @@ data class SshInfo(
     val via: String,
 )
 
+// ---------- 3.1.1 RDP 主机 ----------
+
+data class RdpTarget(
+    val label: String,
+    /** 远程桌面客户端要连的地址与端口（经设备转发时是 127.0.0.1 与本机端口） */
+    val host: String,
+    val port: UShort,
+    val username: String,
+    val domain: String?,
+    /** 加密库里保存的密码（不放进 rdp:// 链接） */
+    val password: String?,
+    /** 经设备转发时为 true；用完调 closeRdp 关掉转发 */
+    val forwarded: Boolean,
+    val forwardId: String,
+)
+
+// ---------- 5.0 自动更新 ----------
+
+data class UpdateInfo(
+    val version: String,
+    val fileName: String,
+    val size: ULong,
+    val sha256: String,
+    /** 服务器上的下载路径（交给 downloadUpdate） */
+    val url: String,
+    val notes: String,
+)
+
 // ---------- 3.3 远程画面 ----------
 
 data class DisplayInfo(

@@ -19,6 +19,9 @@ import cn.lemonit.galaxy.core.bridge.GalaxyException
 import cn.lemonit.galaxy.core.bridge.ImageData
 import cn.lemonit.galaxy.core.bridge.LoginResult
 import cn.lemonit.galaxy.core.bridge.PeerSessionInterface
+import cn.lemonit.galaxy.core.bridge.RdpTarget
+import cn.lemonit.galaxy.core.bridge.TransferListener
+import cn.lemonit.galaxy.core.bridge.UpdateInfo
 import cn.lemonit.galaxy.core.bridge.Platform
 import cn.lemonit.galaxy.core.bridge.RiskLevel
 import cn.lemonit.galaxy.core.bridge.SecretPrompt
@@ -37,6 +40,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -280,6 +284,41 @@ internal class MockClient(
         }
         val mh = hosts.getOrPut("ssh-$hostId") { MockHost("ssh-$hostId", h.label, Platform.LINUX, h.username, scope, ::tr) }
         return MockSshSession(mh, SshInfo(hostId, h.label, h.host, h.port, h.username, via))
+    }
+
+    private val rdpForwards = ConcurrentHashMap.newKeySet<String>()
+
+    override suspend fun openRdp(hostId: String): RdpTarget {
+        val h = vault[hostId]?.data as? VaultData.RdpHost ?: throw GalaxyException.NotFound(tr("找不到主机", "Host not found"))
+        delay(300)
+        val port = if (h.port.toInt() == 0) 3389.toUShort() else h.port
+        val jump = h.jumpDeviceId?.takeIf { it.isNotEmpty() }
+            ?: return RdpTarget(h.label, h.host, port, h.username, h.domain, h.password, false, "")
+        val d = devices.firstOrNull { it.id == jump }
+        if (d == null || (!d.online && !d.lanSeen)) throw GalaxyException.Network(tr("经由的设备离线", "The via device is offline"))
+        val id = UUID.randomUUID().toString()
+        rdpForwards.add(id)
+        return RdpTarget(h.label, "127.0.0.1", 53389u, h.username, h.domain, h.password, true, id)
+    }
+
+    override fun closeRdp(forwardId: String) {
+        rdpForwards.remove(forwardId)
+    }
+
+    override suspend fun checkUpdate(component: String, platform: String, arch: String, current: String): UpdateInfo? {
+        delay(400)
+        return MockData.update(core.zh).takeIf { MockData.isNewer(it.version, current) }
+    }
+
+    /** 模拟内核不提供真的安装包：走一段进度后报错。 */
+    override fun downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener) {
+        scope.launch {
+            for (i in 1..10) {
+                delay(60)
+                listener.onProgress(info.size / 10u * i.toULong(), info.size)
+            }
+            listener.onFinished(tr("模拟内核不提供真实安装包", "The mock core has no real update package"))
+        }
     }
 
     override suspend fun aiModels(): AiModels {

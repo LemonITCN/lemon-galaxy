@@ -46,6 +46,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // 应用退出：关掉经设备转发的 RDP 端口
+        if (isFinishing) container().rdp.closeAll()
         ProcessLifecycleOwner.get().lifecycle.removeObserver(processObserver)
         super.onDestroy()
     }

@@ -1,5 +1,7 @@
 package cn.lemonit.galaxy.ui.settings
 
+import cn.lemonit.galaxy.app.UpdateState
+import androidx.compose.material3.CircularProgressIndicator
 import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -83,6 +85,9 @@ interface SettingsActions {
     fun onAppLock(enabled: Boolean)
     fun onLicenses()
     fun onSource()
+
+    /** 关于 - 检查更新；有新版本时点它重新打开更新弹框。 */
+    fun onCheckUpdate() = Unit
 }
 
 data class AboutInfo(val appVersion: String, val coreVersion: String, val mockCore: Boolean)
@@ -98,6 +103,7 @@ fun SettingsScreen(
     about: AboutInfo,
     biometricAvailable: Boolean,
     actions: SettingsActions,
+    update: UpdateState = UpdateState.Idle,
 ) {
     Scaffold(topBar = { GalaxyTopBar(stringResource(R.string.settings_title)) }) { pad ->
         LazyColumn(Modifier.padding(pad).fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -234,12 +240,43 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                    UpdateRow(update, about.appVersion, actions::onCheckUpdate)
                     Row2(null, stringResource(R.string.about_licenses), onClick = actions::onLicenses) { Chevron() }
                     Row2(null, stringResource(R.string.about_source), onClick = actions::onSource) {
                         Icon(Icons.AutoMirrored.Rounded.OpenInNew, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                     }
                 }
             }
+        }
+    }
+}
+
+/** 关于里的「检查更新」行：状态写在副标题里，检查、下载时显示进度圈。 */
+@Composable
+private fun UpdateRow(state: UpdateState, current: String, onClick: () -> Unit) {
+    val subtitle = when (state) {
+        UpdateState.Idle -> stringResource(R.string.update_idle, current)
+        UpdateState.Checking -> stringResource(R.string.update_checking)
+        is UpdateState.UpToDate -> stringResource(R.string.update_up_to_date, state.current)
+        is UpdateState.Available -> stringResource(R.string.update_available_short, state.info.version)
+        is UpdateState.Downloading -> stringResource(
+            R.string.update_downloading_short, state.info.version,
+            if (state.total <= 0) 0 else (state.done * 100 / state.total).toInt(),
+        )
+        is UpdateState.Downloaded -> stringResource(R.string.update_downloaded_short, state.info.version)
+        is UpdateState.Failed -> state.message
+    }
+    val busy = state is UpdateState.Checking || state is UpdateState.Downloading
+    Row2(
+        null, stringResource(R.string.update_check), subtitle = subtitle,
+        color = MaterialTheme.colorScheme.onSurface,
+        onClick = if (state is UpdateState.Checking) null else onClick,
+    ) {
+        when {
+            busy -> CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            state is UpdateState.Available || state is UpdateState.Downloaded ->
+                Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
+            else -> Chevron()
         }
     }
 }

@@ -55,9 +55,12 @@ struct MainView: View {
                     .background(p.list)
                 Rectangle().fill(p.separator).frame(width: 1)
             }
-            MainArea()
-                .frame(minWidth: 520, maxWidth: .infinity)
-                .background(p.content)
+            VStack(spacing: 0) {
+                MainArea()
+                if !app.rdpForwards.isEmpty { RdpForwardBar() }
+            }
+            .frame(minWidth: 520, maxWidth: .infinity)
+            .background(p.content)
         }
         .background(p.content)
         .overlay(ModalOverlay())
@@ -113,6 +116,10 @@ struct Sidebar: View {
                 Image(systemName: s.icon)
                     .font(.system(size: 14, weight: .medium))
                     .frame(width: 20)
+                    // 有新版本：设置图标右上角小红点
+                    .overlay(alignment: .topTrailing) {
+                        if s == .settings, app.update.available != nil { UpdateDot().offset(x: 3, y: -2) }
+                    }
                 if !compact {
                     Text(loc(s.titleKey)).font(.system(size: 13, weight: selected ? .semibold : .regular))
                     Spacer(minLength: 0)
@@ -367,5 +374,57 @@ struct ToastView: View {
             .padding(.bottom, 18)
             .onTapGesture { app.toast = nil }
         }
+    }
+}
+
+/// 有新版本的小红点
+struct UpdateDot: View {
+    @Environment(\.palette) var p
+    var body: some View {
+        Circle().fill(p.danger).frame(width: 7, height: 7)
+            .overlay(Circle().stroke(p.sidebar, lineWidth: 1.5))
+    }
+}
+
+/// 主区底部：经设备转发中的 RDP。远程桌面应用连的是本机端口，用完在这里停止转发
+struct RdpForwardBar: View {
+    @EnvironmentObject var app: AppModel
+    @Environment(\.palette) var p
+    @Environment(\.loc) var loc
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.left.arrow.right.circle.fill").font(.system(size: 13)).foregroundStyle(p.info)
+            Text(loc("rdp.bar.title")).font(.system(size: 12, weight: .semibold))
+            InfoButton(text: loc("rdp.bar.info"))
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(app.rdpForwards) { f in
+                        HStack(spacing: 6) {
+                            Text(f.label).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                            Text(verbatim: "127.0.0.1:\(f.port)").font(.system(size: 11.5, design: .monospaced)).foregroundStyle(p.secondaryText)
+                            IconButton(icon: "doc.on.doc", help: loc("rdp.bar.copy"), size: 10.5) {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString("127.0.0.1:\(f.port)", forType: .string)
+                                app.showToast(loc("common.copied"))
+                            }
+                            Button(loc("rdp.bar.stop")) { app.closeRdp(f.id) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 11.5, weight: .medium)).foregroundStyle(p.danger)
+                        }
+                        .padding(.leading, 10).padding(.trailing, 8).frame(height: 26)
+                        .background(Capsule().fill(p.elevated))
+                        .overlay(Capsule().stroke(p.border, lineWidth: 0.6))
+                    }
+                }
+            }
+            if app.rdpForwards.count > 1 {
+                Button(loc("rdp.bar.stopAll")) { app.closeAllRdp() }.buttonStyle(SecondaryButtonStyle(destructive: true))
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 38)
+        .background(p.card)
+        .overlay(Rectangle().fill(p.separator).frame(height: 1), alignment: .top)
     }
 }

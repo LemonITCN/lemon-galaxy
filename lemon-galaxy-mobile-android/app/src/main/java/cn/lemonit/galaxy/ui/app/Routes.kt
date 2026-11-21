@@ -441,6 +441,8 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
     val sentText = stringResource(R.string.rd_clipboard_sent)
     val gotText = stringResource(R.string.rd_clipboard_received)
     val emptyText = stringResource(R.string.rd_clipboard_empty)
+    val privacyOnText = stringResource(R.string.rd_privacy_on_toast)
+    val privacyOffText = stringResource(R.string.rd_privacy_off_toast)
 
     // 横屏全屏沉浸，离开时恢复
     DisposableEffect(Unit) {
@@ -465,6 +467,16 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
             override fun onDisplay(id: UInt) = controller.switchDisplay(id)
             override fun onQuality(q: VideoQuality) = controller.setQuality(q)
             override fun onMouseMode(on: Boolean) = controller.setMouseMode(on)
+            override fun onPrivacy(on: Boolean) {
+                scope.launch {
+                    try {
+                        controller.setPrivacy(on)
+                        container.toast(if (on) privacyOnText else privacyOffText)
+                    } catch (e: Exception) {
+                        container.toast(context.getString(R.string.rd_privacy_failed, e.userMessage()))
+                    }
+                }
+            }
             override fun onClipboardSend() {
                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 val text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()

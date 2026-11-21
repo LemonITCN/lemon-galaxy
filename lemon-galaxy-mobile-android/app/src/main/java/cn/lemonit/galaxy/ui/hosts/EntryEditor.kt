@@ -352,7 +352,7 @@ private fun SshForm(f: FormState, data: HostsData, themes: List<TerminalTheme>) 
 private fun RdpForm(f: FormState, data: HostsData) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Field(f.label, { f.label = it }, stringResource(R.string.field_label), modifier = Modifier.weight(1f))
-        InfoButton(stringResource(R.string.rdp_unsupported))
+        InfoButton(stringResource(R.string.rdp_info))
     }
     HostPort(f)
     Field(f.username, { f.username = it.trim() }, stringResource(R.string.field_username), mono = true)

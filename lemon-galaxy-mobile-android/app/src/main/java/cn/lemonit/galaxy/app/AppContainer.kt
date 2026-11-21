@@ -52,6 +52,7 @@ class AppContainer(
 
         override fun onSessionRevoked() {
             scope.launch {
+                rdp.closeAll()
                 connections.disconnectAll()
                 terminals.closeAll()
                 account.onSessionRevoked()
@@ -66,6 +67,10 @@ class AppContainer(
     val connections = ConnectionManager(client, prompts)
     val terminals = TerminalController(scope, connections, appContext) { hosts.data.value.targetName(it) }
     val transfers = TransferManager(appContext, scope, connections)
+    val rdp = RdpController(client, scope, appContext, ::toast)
+    val updates = UpdateController(client, scope, appContext, currentVersion = {
+        appContext?.let { c -> runCatching { c.packageManager.getPackageInfo(c.packageName, 0).versionName }.getOrNull() } ?: "0.0.0"
+    }, toast = ::toast)
     val agents = AgentController(
         client, scope,
         configs = appContext?.let { cn.lemonit.galaxy.data.PrefsConversationConfigStore.create(it) } ?: MemoryConversationConfigStore(),
@@ -96,6 +101,7 @@ class AppContainer(
     }
 
     fun signOut() {
+        rdp.closeAll()
         terminals.closeAll()
         connections.disconnectAll()
         account.logout()

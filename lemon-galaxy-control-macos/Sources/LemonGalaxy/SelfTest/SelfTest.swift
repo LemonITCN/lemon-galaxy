@@ -256,6 +256,13 @@ enum SelfTest {
         app.modal = .terminalSessions(deviceId: "dev-build", sessions: MockTerminalRegistry.shared.sessions(for: "dev-build").filter { !$0.attached })
         shot("\(prefix)-16-terminal-reattach", app, window: window, host: host)
         app.modal = nil
+        // RDP 主机经设备转发：底部出现「RDP 转发中」提示条（selftest 不打开远程桌面应用）
+        app.selection = "r-win"
+        app.openRdp("r-win")
+        wait("RDP 转发") { !app.rdpForwards.isEmpty }
+        shot("\(prefix)-17-hosts-rdp-forward", app, window: window, host: host)
+        app.closeAllRdp()
+        app.selection = nil
 
         // 3. 终端
         app.openTerminal(deviceId: "dev-build")
@@ -338,6 +345,14 @@ enum SelfTest {
             r.measuredKbps = 8_400
         }
         shot("\(prefix)-40-remote-desktop", app, window: window, host: host, settle: 0.2)
+        // 隐私屏开关（对端能力里有 privacy 才显示）
+        if let r = app.activeTab as? RemoteDesktopModel {
+            if !r.privacySupported { problems.append("模拟的 Windows 设备应支持隐私屏") }
+            r.setPrivacy(true)
+            wait("隐私屏开启") { r.privacyOn && !r.privacyBusy }
+            shot("\(prefix)-41-remote-privacy", app, window: window, host: host, settle: 0.2)
+            app.toast = nil
+        }
 
         // 6. AI 智能体
         app.selectHome(.ai)
@@ -414,12 +429,30 @@ enum SelfTest {
             }
         }
 
-        // 9. 设置
+        // 9. 设置（先检查更新：关于页显示新版本，设置图标带小红点）
         app.selectHome(.settings)
+        var checked = false
+        Task { await app.update.check(manual: true); checked = true }
+        wait("检查更新") { checked }
+        if app.update.available == nil { problems.append("模拟内核应返回新版本") }
+        app.modal = nil
         for page in SettingsPage.allCases {
             app.settingsPage = page
             shot("\(prefix)-8\(SettingsPage.allCases.firstIndex(of: page)!)-settings-\(page.rawValue)", app, window: window, host: host)
         }
+
+        // 更新卡片：有新版本、下载中、下载完成
+        app.settingsPage = .about
+        app.modal = .update
+        shot("\(prefix)-87-update", app, window: window, host: host)
+        if let info = app.update.available {
+            app.update.state = .downloading(info, done: info.size * 37 / 100, total: info.size)
+            shot("\(prefix)-88-update-downloading", app, window: window, host: host)
+            app.update.state = .downloaded(info, path: "/Users/alice/Downloads/" + info.fileName)
+            shot("\(prefix)-89-update-downloaded", app, window: window, host: host)
+        }
+        app.modal = nil
+        app.update.reset()
 
         // 10. 文本编辑器窗口、紧凑侧栏
         if let src = (app.tabs.compactMap { $0 as? SFTPTabModel }.first?.right.source) {

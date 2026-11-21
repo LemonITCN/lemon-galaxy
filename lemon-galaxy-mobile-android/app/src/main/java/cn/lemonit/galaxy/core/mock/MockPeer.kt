@@ -103,7 +103,7 @@ internal class MockPeerSession(
         permissions = Permissions(view = hasGui, control = hasGui, files = true, terminal = true, clipboard = true, audio = false, aiCap = AiMode.FULL_TRUST),
         capabilities = buildList {
             addAll(listOf("terminal", "files", "exec", "clipboard", "port_forward"))
-            if (hasGui) addAll(listOf("display", "input", "screenshot", "ui_tree"))
+            if (hasGui) addAll(listOf("display", "input", "screenshot", "ui_tree", "privacy"))
         },
         path = currentPath,
     )
@@ -189,6 +189,11 @@ internal class MockPeerSession(
 
     override suspend fun wakeOnLan(mac: String) {
         delay(200)
+    }
+
+    override suspend fun setPrivacy(on: Boolean) {
+        delay(200)
+        if (!hasGui) throw GalaxyException.Permission(host.tr("被控端不支持隐私屏", "The remote device does not support the privacy screen"))
     }
 
     companion object {

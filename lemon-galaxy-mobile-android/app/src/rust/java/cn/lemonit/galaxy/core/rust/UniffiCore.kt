@@ -30,6 +30,7 @@ import cn.lemonit.galaxy.core.bridge.PeerInfo
 import cn.lemonit.galaxy.core.bridge.PeerListener
 import cn.lemonit.galaxy.core.bridge.PeerSessionInterface
 import cn.lemonit.galaxy.core.bridge.PortForwardInterface
+import cn.lemonit.galaxy.core.bridge.RdpTarget
 import cn.lemonit.galaxy.core.bridge.SecretPrompt
 import cn.lemonit.galaxy.core.bridge.SecureStore
 import cn.lemonit.galaxy.core.bridge.ServerInfo
@@ -42,6 +43,7 @@ import cn.lemonit.galaxy.core.bridge.TerminalSink
 import cn.lemonit.galaxy.core.bridge.TotpSetup
 import cn.lemonit.galaxy.core.bridge.TransferInterface
 import cn.lemonit.galaxy.core.bridge.TransferListener
+import cn.lemonit.galaxy.core.bridge.UpdateInfo
 import cn.lemonit.galaxy.core.bridge.UserInfo
 import cn.lemonit.galaxy.core.bridge.VaultEntry
 import cn.lemonit.galaxy.core.bridge.VideoSink
@@ -140,6 +142,21 @@ internal class UniffiClient(private val c: FGalaxyClient) : GalaxyClientInterfac
         return ffi { UniffiSsh(c.connectSsh(hostId, p)) }
     }
 
+    override suspend fun openRdp(hostId: String): RdpTarget = ffi { c.openRdp(hostId).toBridge() }
+    override fun closeRdp(forwardId: String) = c.closeRdp(forwardId)
+
+    override suspend fun checkUpdate(component: String, platform: String, arch: String, current: String): UpdateInfo? =
+        ffi { c.checkUpdate(component, platform, arch, current)?.toBridge() }
+
+    override fun downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener) =
+        c.downloadUpdate(
+            info.toFfi(), dest,
+            object : FTransferListener {
+                override fun onProgress(done: ULong, total: ULong) = listener.onProgress(done, total)
+                override fun onFinished(error: String?) = listener.onFinished(error)
+            },
+        )
+
     override suspend fun aiModels(): AiModels = ffi { c.aiModels().toBridge() }
 
     override suspend fun newConversation(config: ConversationConfig, listener: AgentListener): AgentConversationInterface =
@@ -209,6 +226,7 @@ internal class UniffiPeer(private val p: FPeerSession) : PeerSessionInterface {
         ffi { UniffiPortForward(p.forwardPort(localPort, remoteHost, remotePort)) }
 
     override suspend fun wakeOnLan(mac: String) = ffi { p.wakeOnLan(mac) }
+    override suspend fun setPrivacy(on: Boolean) = ffi { p.setPrivacy(on) }
 }
 
 internal class UniffiSsh(private val s: FSshSession) : SshSessionInterface {

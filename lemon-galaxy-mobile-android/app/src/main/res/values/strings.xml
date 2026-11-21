@@ -147,7 +147,15 @@
     <string name="jump_info">Reach a host inside a private network through one of your devices running LemonGalaxy, or through another SSH host (jump host).</string>
     <string name="use_default">Use default</string>
     <string name="none">None</string>
-    <string name="rdp_unsupported">RDP is not available on Android yet. Open this host from the Windows or Mac client.</string>
+    <string name="rdp_info">Opens in Microsoft Windows App. With a via device, a local port is forwarded through that device to the target\'s RDP port. The password is not put in the link; enter it in Windows App.</string>
+    <string name="rdp_forwarding">%1$s is forwarded through the device to local port %2$d. Stop the forward at the bottom when you are done.</string>
+    <string name="rdp_bar_title">RDP forwards</string>
+    <string name="rdp_bar_info">An RDP host with a via device gets a local port that is forwarded through that device to the target; Windows App connects to that port. Tap Stop when you are done. All forwards are closed when you sign out or quit.</string>
+    <string name="rdp_bar_stop">Stop</string>
+    <string name="rdp_bar_stop_all">Stop all</string>
+    <string name="rdp_noclient_title">No remote desktop app found</string>
+    <string name="rdp_noclient_body">RDP hosts open in Microsoft Windows App (formerly Microsoft Remote Desktop). Install it for free from Google Play, then connect again.</string>
+    <string name="rdp_noclient_store">Open Google Play</string>
     <string name="device_offline">The device is offline</string>
     <string name="assist_title">Remote assistance</string>
     <string name="assist_device_code">Device code</string>
@@ -255,6 +263,11 @@
     <string name="files_targets_empty">No online devices or SSH hosts</string>
 
     <!-- Remote desktop -->
+    <string name="rd_privacy">Privacy</string>
+    <string name="rd_privacy_on">Privacy on</string>
+    <string name="rd_privacy_on_toast">Privacy screen on: the remote screen is blank and its local keyboard and mouse are disabled</string>
+    <string name="rd_privacy_off_toast">Privacy screen off</string>
+    <string name="rd_privacy_failed">Could not switch the privacy screen: %1$s</string>
     <string name="rd_connecting">Connecting to the display…</string>
     <string name="rd_failed">Could not open the display</string>
     <string name="rd_mode">Input</string>
@@ -440,4 +453,29 @@
     <string name="totp_enabled_toast">Two-step verification is on</string>
     <string name="totp_disabled_toast">Two-step verification is off</string>
     <string name="licenses_title">Open-source licenses</string>
+
+    <!-- Updates -->
+    <string name="update_check">Check for updates</string>
+    <string name="update_idle">Current version %1$s</string>
+    <string name="update_checking">Checking for updates…</string>
+    <string name="update_up_to_date">You\'re up to date (%1$s)</string>
+    <string name="update_available_short">Version %1$s is available. Tap to view.</string>
+    <string name="update_downloading_short">Downloading %1$s (%2$d%%)</string>
+    <string name="update_downloaded_short">%1$s downloaded. Tap to install.</string>
+    <string name="update_check_failed">Could not check for updates: %1$s</string>
+    <string name="update_download_failed">Download failed: %1$s</string>
+    <string name="update_install_failed">Could not open the installer: %1$s</string>
+    <string name="update_title">New version available</string>
+    <string name="update_versions">Current %1$s → new %2$s</string>
+    <string name="update_notes">Release notes</string>
+    <string name="update_no_notes">No release notes for this version</string>
+    <string name="update_verified">Release signature verified. The SHA-256 is checked after download.</string>
+    <string name="update_downloading">Downloaded %1$s of %2$s</string>
+    <string name="update_downloaded">The package was downloaded and verified. Opening the system installer.</string>
+    <string name="update_download">Download and install</string>
+    <string name="update_install">Install</string>
+    <string name="update_later">Later</string>
+    <string name="update_unknown_title">Allow app installs</string>
+    <string name="update_unknown_body">Android has not allowed LemonGalaxy to install apps yet. Turn on “Allow from this source” on the next screen, then come back and tap Install.</string>
+    <string name="update_unknown_settings">Open settings</string>
 </resources>

@@ -1,10 +1,15 @@
 package cn.lemonit.galaxy.ui.app
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.biometric.BiometricManager
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -12,6 +17,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.core.content.FileProvider
 import cn.lemonit.galaxy.BuildConfig
 import cn.lemonit.galaxy.R
 import cn.lemonit.galaxy.app.AppContainer
@@ -22,6 +28,7 @@ import cn.lemonit.galaxy.app.Navigator
 import cn.lemonit.galaxy.app.Route
 import cn.lemonit.galaxy.app.Tab
 import cn.lemonit.galaxy.app.TargetRef
+import cn.lemonit.galaxy.app.UpdateState
 import cn.lemonit.galaxy.app.userMessage
 import cn.lemonit.galaxy.core.CoreProvider
 import cn.lemonit.galaxy.core.bridge.VaultData
@@ -39,19 +46,23 @@ import cn.lemonit.galaxy.ui.hosts.AssistDialog
 import cn.lemonit.galaxy.ui.hosts.FolderAction
 import cn.lemonit.galaxy.ui.hosts.HostAction
 import cn.lemonit.galaxy.ui.hosts.HostActionsContent
-import cn.lemonit.galaxy.ui.hosts.sshViaText
 import cn.lemonit.galaxy.ui.hosts.HostsActions
 import cn.lemonit.galaxy.ui.hosts.HostsFilter
 import cn.lemonit.galaxy.ui.hosts.HostsScreen
 import cn.lemonit.galaxy.ui.hosts.MoveDialog
 import cn.lemonit.galaxy.ui.hosts.reachable
+import cn.lemonit.galaxy.ui.hosts.sshViaText
 import cn.lemonit.galaxy.ui.settings.AboutInfo
 import cn.lemonit.galaxy.ui.settings.ChangePasswordDialog
 import cn.lemonit.galaxy.ui.settings.SettingsActions
 import cn.lemonit.galaxy.ui.settings.SettingsScreen
 import cn.lemonit.galaxy.ui.settings.TwoFactorDialog
+import cn.lemonit.galaxy.ui.settings.UnknownSourcesDialog
+import cn.lemonit.galaxy.ui.settings.UpdateActions
+import cn.lemonit.galaxy.ui.settings.UpdateDialog
 import cn.lemonit.galaxy.ui.theme.TerminalThemes
 import kotlinx.coroutines.launch
+import java.io.File
 
 @Composable
 fun TabContent(tab: Tab, container: AppContainer, nav: Navigator, openUrl: (String) -> Unit) {
@@ -71,7 +82,12 @@ fun openHostAction(container: AppContainer, nav: Navigator, item: HostItem, acti
         is HostItem.Rdp -> null
     }
     when (action) {
-        HostAction.REMOTE -> if (item is HostItem.Device) nav.push(Route.Remote(item.device.id))
+        HostAction.REMOTE -> when (item) {
+            is HostItem.Device -> nav.push(Route.Remote(item.device.id))
+            // RDP 主机交给系统里的 Windows App（经设备时内核先开本机端口转发）
+            is HostItem.Rdp -> container.rdp.open(item.entry.id)
+            is HostItem.Ssh -> Unit
+        }
         HostAction.TERMINAL -> target?.let {
             container.terminals.open(it)
             nav.push(Route.Terminal(it))
@@ -298,6 +314,9 @@ fun SettingsTab(container: AppContainer, nav: Navigator, openUrl: (String) -> Un
     var changePw by remember { mutableStateOf(false) }
     var twoFactor by remember { mutableStateOf(false) }
     var logout by remember { mutableStateOf(false) }
+    var unknownSources by remember { mutableStateOf(false) }
+    val updateState by container.updates.state.collectAsState()
+    val updateDialog by container.updates.dialog.collectAsState()
     val biometric = remember {
         BiometricManager.from(context).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL) ==
             BiometricManager.BIOMETRIC_SUCCESS
@@ -340,8 +359,44 @@ fun SettingsTab(container: AppContainer, nav: Navigator, openUrl: (String) -> Un
             override fun onAppLock(enabled: Boolean) = container.settings.update { it.copy(appLock = enabled) }
             override fun onLicenses() = nav.push(Route.Licenses)
             override fun onSource() = openUrl("https://github.com/LemonITCN/lemon-galaxy")
+            override fun onCheckUpdate() {
+                when (container.updates.state.value) {
+                    is UpdateState.Available, is UpdateState.Downloading, is UpdateState.Downloaded -> container.updates.openDialog()
+                    else -> container.updates.check()
+                }
+            }
         },
+        update = updateState,
     )
+    if (updateDialog) {
+        UpdateDialog(
+            updateState,
+            current = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "?",
+            actions = object : UpdateActions {
+                override fun onDownload() = container.updates.download()
+                override fun onInstall() {
+                    (updateState as? UpdateState.Downloaded)?.let { installApk(context, it.file, onNeedPermission = { unknownSources = true }, onError = container::toast) }
+                }
+
+                override fun onDismiss() = container.updates.dismissDialog()
+            },
+        )
+    }
+    // 下载完成后直接交给系统安装器（只自动弹一次，之后点「安装」）
+    LaunchedEffect(updateState) {
+        val s = updateState
+        if (s is UpdateState.Downloaded) installApk(context, s.file, onNeedPermission = { unknownSources = true }, onError = container::toast)
+    }
+    if (unknownSources) {
+        UnknownSourcesDialog(
+            onOpenSettings = {
+                runCatching {
+                    context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
+                }
+            },
+            onDismiss = { unknownSources = false },
+        )
+    }
     if (changePw) {
         ChangePasswordDialog(container.account::changePassword, requireTotp = totp == true, onDone = { container.toast(pwDone) }, onDismiss = { changePw = false })
     }
@@ -367,5 +422,25 @@ fun SettingsTab(container: AppContainer, nav: Navigator, openUrl: (String) -> Un
             },
             onDismiss = { logout = false },
         )
+    }
+}
+
+/**
+ * 把下载好的 APK 交给系统安装器（FileProvider 授权读取）。
+ * 系统还没允许本应用「安装未知应用」时先引导用户去设置里打开。
+ */
+fun installApk(context: Context, file: File, onNeedPermission: () -> Unit, onError: (String) -> Unit) {
+    if (!context.packageManager.canRequestPackageInstalls()) {
+        onNeedPermission()
+        return
+    }
+    try {
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".updates", file)
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        onError(context.getString(R.string.update_install_failed, e.message ?: e.javaClass.simpleName))
     }
 }

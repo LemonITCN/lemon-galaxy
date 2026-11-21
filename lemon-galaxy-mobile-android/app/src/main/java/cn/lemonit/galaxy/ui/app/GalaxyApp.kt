@@ -55,11 +55,14 @@ import androidx.compose.ui.unit.dp
 import cn.lemonit.galaxy.R
 import cn.lemonit.galaxy.app.AppContainer
 import cn.lemonit.galaxy.app.Navigator
+import cn.lemonit.galaxy.app.RdpLinks
 import cn.lemonit.galaxy.app.Route
 import cn.lemonit.galaxy.app.SecretPromptBroker
 import cn.lemonit.galaxy.app.Tab
 import cn.lemonit.galaxy.core.CoreProvider
 import cn.lemonit.galaxy.ui.hosts.HostKeyDialog
+import cn.lemonit.galaxy.ui.hosts.RdpForwardBanner
+import cn.lemonit.galaxy.ui.hosts.RdpMissingClientDialog
 import cn.lemonit.galaxy.ui.hosts.SecretAskDialog
 import cn.lemonit.galaxy.ui.icons.PlatformIcons
 import cn.lemonit.galaxy.ui.login.LoginRoute
@@ -156,6 +159,10 @@ fun MainRoute(container: AppContainer, navigator: Navigator = remember { Navigat
     val openUrl: (String) -> Unit = { url -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } }
     val wide = isWideLayout()
     val top = nav.top
+    val rdpForwards by container.rdp.forwards.collectAsState()
+    val rdpMissing by container.rdp.missingClient.collectAsState()
+    if (rdpMissing) RdpMissingClientDialog(onInstall = { openUrl(RdpLinks.PLAY_STORE) }, onDismiss = container.rdp::dismissMissingClient)
+    val banner = @Composable { RdpForwardBanner(rdpForwards, onStop = container.rdp::close, onStopAll = container.rdp::closeAll) }
     when {
         top != null && top.fullscreen -> RouteContent(top, container, nav, showBack = true, openUrl = openUrl)
         wide -> Row(Modifier.fillMaxSize()) {
@@ -172,9 +179,15 @@ fun MainRoute(container: AppContainer, navigator: Navigator = remember { Navigat
                 }
             }
             if (nav.tab == Tab.SETTINGS && top == null) {
-                Box(Modifier.weight(1f).fillMaxHeight()) { TabContent(Tab.SETTINGS, container, nav, openUrl) }
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    Box(Modifier.weight(1f)) { TabContent(Tab.SETTINGS, container, nav, openUrl) }
+                    banner()
+                }
             } else {
-                Box(Modifier.width(380.dp).fillMaxHeight()) { TabContent(nav.tab, container, nav, openUrl) }
+                Column(Modifier.width(380.dp).fillMaxHeight()) {
+                    Box(Modifier.weight(1f)) { TabContent(nav.tab, container, nav, openUrl) }
+                    banner()
+                }
                 VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Box(Modifier.weight(1f).fillMaxHeight()) {
                     if (top != null) {
@@ -190,14 +203,17 @@ fun MainRoute(container: AppContainer, navigator: Navigator = remember { Navigat
         top != null -> RouteContent(top, container, nav, showBack = true, openUrl = openUrl)
         else -> Scaffold(
             bottomBar = {
-                NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
-                    TABS.forEach { t ->
-                        NavigationBarItem(
-                            selected = nav.tab == t.tab,
-                            onClick = { nav.selectTab(t.tab) },
-                            icon = { Icon(if (nav.tab == t.tab) t.selectedIcon else t.icon, null) },
-                            label = { Text(stringResource(t.label)) },
-                        )
+                Column {
+                    banner()
+                    NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+                        TABS.forEach { t ->
+                            NavigationBarItem(
+                                selected = nav.tab == t.tab,
+                                onClick = { nav.selectTab(t.tab) },
+                                icon = { Icon(if (nav.tab == t.tab) t.selectedIcon else t.icon, null) },
+                                label = { Text(stringResource(t.label)) },
+                            )
+                        }
                     }
                 }
             },

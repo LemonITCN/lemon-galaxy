@@ -28,6 +28,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.automirrored.rounded.KeyboardBackspace
 import androidx.compose.material.icons.automirrored.rounded.KeyboardReturn
 import androidx.compose.material.icons.rounded.ContentPaste
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.Monitor
 import androidx.compose.material.icons.rounded.Mouse
 import androidx.compose.material.icons.rounded.TouchApp
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -100,6 +102,9 @@ interface RemoteActions {
     fun onClipboardSend()
     fun onClipboardGet()
     fun onDisconnect()
+
+    /** 隐私屏开关（对端能力里有 "privacy" 时才显示）。 */
+    fun onPrivacy(on: Boolean) = Unit
 }
 
 private fun click(button: PointerButton, x: Int, y: Int) = listOf(
@@ -369,6 +374,14 @@ private fun ToolbarPanel(ui: RemoteUi, actions: RemoteActions, onKeyboard: () ->
                 ToolButton(Icons.Rounded.Keyboard, stringResource(R.string.rd_keyboard)) { onKeyboard() }
                 ShortcutsButton(ui.platform, actions)
                 ClipboardButton(actions)
+                if (ui.privacySupported) {
+                    ToolButton(
+                        if (ui.privacyOn) Icons.Rounded.VisibilityOff else Icons.Outlined.VisibilityOff,
+                        stringResource(if (ui.privacyOn) R.string.rd_privacy_on else R.string.rd_privacy),
+                        active = ui.privacyOn,
+                        enabled = ui.privacyAllowed && !ui.privacyBusy,
+                    ) { actions.onPrivacy(!ui.privacyOn) }
+                }
                 ToolButton(Icons.Rounded.LinkOff, stringResource(R.string.rd_disconnect), danger = true) { actions.onDisconnect() }
                 Box(Modifier.align(Alignment.CenterVertically)) { InfoButton(stringResource(R.string.rd_mode_info)) }
             }
@@ -377,8 +390,9 @@ private fun ToolbarPanel(ui: RemoteUi, actions: RemoteActions, onKeyboard: () ->
 }
 
 @Composable
-private fun ToolButton(icon: ImageVector, label: String, active: Boolean = false, danger: Boolean = false, onClick: () -> Unit) {
+private fun ToolButton(icon: ImageVector, label: String, active: Boolean = false, danger: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
     val tint = when {
+        !enabled -> Color.White.copy(alpha = 0.4f)
         danger -> Color(0xFFFF7A85)
         active -> Color(0xFFC6E35A)
         else -> Color.White
@@ -386,7 +400,7 @@ private fun ToolButton(icon: ImageVector, label: String, active: Boolean = false
     Column(
         Modifier
             .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp)
             .widthIn(min = 56.dp),
         horizontalAlignment = Alignment.CenterHorizontally,

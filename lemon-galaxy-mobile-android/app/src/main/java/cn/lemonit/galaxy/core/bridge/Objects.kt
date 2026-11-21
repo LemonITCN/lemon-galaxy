@@ -67,6 +67,18 @@ interface GalaxyClientInterface {
     /** 连接加密库里的 ssh_host 条目（ffi.md 第 3.1 节）。需要密码、口令或确认主机密钥时经 [prompt] 问用户。 */
     suspend fun connectSsh(hostId: String, prompt: SecretPrompt): SshSessionInterface
 
+    /** 加密库里的 rdp_host（ffi.md 3.1.1）：设了经由设备时在本机开端口转发穿过那台设备。 */
+    suspend fun openRdp(hostId: String): RdpTarget
+
+    /** 关掉 openRdp 开的端口转发。 */
+    fun closeRdp(forwardId: String)
+
+    /** 向服务器查询新版本（ffi.md 5.0），返回前已验发布签名；没有新版本返回 null。 */
+    suspend fun checkUpdate(component: String, platform: String, arch: String, current: String): UpdateInfo?
+
+    /** 下载新版本到本地文件并核对 SHA-256，进度与结果经 [listener]。 */
+    fun downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener)
+
     suspend fun aiModels(): AiModels
     suspend fun newConversation(config: ConversationConfig, listener: AgentListener): AgentConversationInterface
 
@@ -111,6 +123,9 @@ interface PeerSessionInterface {
 
     suspend fun forwardPort(localPort: UShort, remoteHost: String, remotePort: UShort): PortForwardInterface
     suspend fun wakeOnLan(mac: String)
+
+    /** 隐私屏：被控端本地屏幕黑掉、本地键鼠失效；本会话结束时自动关闭。能力列表里有 "privacy" 才支持。 */
+    suspend fun setPrivacy(on: Boolean)
 }
 
 interface PeerListener {
