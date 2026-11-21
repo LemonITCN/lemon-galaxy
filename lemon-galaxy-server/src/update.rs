@@ -261,3 +261,89 @@ pub async fn file(State(st): State<St>, _u: crate::auth::User, Path(id): Path<i6
         .body(body)
         .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal").detail(e.to_string()))
 }
+
+/// 从发布文件名里取版本号（第一个形如 0.1.0.5 的段）。
+fn version_in_name(name: &str) -> Option<String> {
+    name.split(['-', '_']).find(|p| p.contains('.') && p.split('.').all(|x| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit()))).map(|s| s.to_string())
+}
+
+/// 后台手动上传：更新文件 + 同一版的 SHA256SUMS.txt + SHA256SUMS.txt.sig（服务器连不上 GitHub 时用）。
+pub async fn upload(State(st): State<St>, crate::auth::Admin(s): crate::auth::Admin, mut mp: axum::extract::Multipart) -> AppResult<Json<serde_json::Value>> {
+    let bad = |m: String| AppError::bad_request(m).lang(s.lang);
+    let tmp_dir = updates_dir(&st).join(".upload");
+    tokio::fs::create_dir_all(&tmp_dir).await.map_err(|e| bad(e.to_string()))?;
+    let tmp = tmp_dir.join(format!("{}", galaxy_proto::now_ms()));
+    let (mut name, mut got_sha, mut size) = (String::new(), String::new(), 0u64);
+    let (mut sums, mut sig_b64) = (String::new(), String::new());
+    while let Some(mut field) = mp.next_field().await.map_err(|e| bad(e.to_string()))? {
+        match field.name().unwrap_or("") {
+            "file" => {
+                name = field.file_name().unwrap_or("").rsplit(['/', '\\']).next().unwrap_or("").to_string();
+                let mut f = tokio::fs::File::create(&tmp).await.map_err(|e| bad(e.to_string()))?;
+                let mut h = Sha256::new();
+                while let Some(c) = field.chunk().await.map_err(|e| bad(e.to_string()))? {
+                    h.update(&c);
+                    size += c.len() as u64;
+                    f.write_all(&c).await.map_err(|e| bad(e.to_string()))?;
+                }
+                f.flush().await.map_err(|e| bad(e.to_string()))?;
+                got_sha = hex::encode(h.finalize());
+            }
+            "sums" => sums = field.text().await.map_err(|e| bad(e.to_string()))?,
+            "signature" => sig_b64 = field.text().await.map_err(|e| bad(e.to_string()))?.trim().to_string(),
+            _ => {}
+        }
+    }
+    let r = async {
+        let sig = base64::engine::general_purpose::STANDARD.decode(&sig_b64).map_err(|_| "签名文件格式不对".to_string())?;
+        galaxy_crypto::verify(&RELEASE_SIGN_PUBKEY, RELEASE_SIGN_DOMAIN, sums.as_bytes(), &sig).map_err(|_| "清单签名无效（不是 LemonGalaxy 官方发布，或清单与签名不是同一版）".to_string())?;
+        let want = parse_sums(&sums).into_iter().find(|(n, _)| n == &name).map(|(_, h)| h).ok_or_else(|| format!("{name} 不在校验清单里"))?;
+        if want != got_sha {
+            return Err(format!("{name} 的 SHA-256 与清单不符"));
+        }
+        let (component, platform, arch) = classify_asset(&name).ok_or_else(|| format!("认不出 {name} 是哪个端的更新包"))?;
+        let version = version_in_name(&name).ok_or_else(|| format!("{name} 里没有版本号"))?;
+        Ok::<_, String>((component, platform, arch, version))
+    }
+    .await;
+    let (component, platform, arch, version) = match r {
+        Ok(x) => x,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(bad(e));
+        }
+    };
+    let dir = updates_dir(&st).join(&version);
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| bad(e.to_string()))?;
+    tokio::fs::rename(&tmp, dir.join(&name)).await.map_err(|e| bad(e.to_string()))?;
+    let _ = tokio::fs::write(dir.join(SUMS_FILE), &sums).await;
+    let _ = tokio::fs::write(dir.join(SUMS_SIG_FILE), &sig_b64).await;
+    let now = galaxy_proto::now_ms();
+    let (v, n, comp, plat, ar, sha, sb) = (version.clone(), name.clone(), component.to_string(), platform.to_string(), arch.clone(), got_sha.clone(), sig_b64.clone());
+    let id: i64 = st
+        .db
+        .call(move |c| {
+            c.execute("DELETE FROM update_packages WHERE version = ?1 AND file_name = ?2", params![v, n])?;
+            c.execute(
+                "INSERT INTO update_packages(component, platform, arch, version, file_name, size, sha256, signature, signature_ok, source, created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,1,'manual',?9)",
+                params![comp, plat, ar, v, n, size as i64, sha, sb, now],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .await?;
+    crate::audit::log(&st, &s.actor(), "update.upload", crate::audit::Target::new("update", id, &name), serde_json::json!({ "version": version, "size": size })).await;
+    Ok(Json(serde_json::json!({
+        "id": id, "component": component, "platform": platform, "arch": arch, "version": version, "file_name": name,
+        "size": size, "sha256": got_sha, "signature_ok": true, "source": "manual", "created_at": now,
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn version_from_name() {
+        assert_eq!(super::version_in_name("lemon-galaxy-worker-0.1.0.5-linux-x86_64").as_deref(), Some("0.1.0.5"));
+        assert_eq!(super::version_in_name("LemonGalaxy-0.2.0-macOS.dmg").as_deref(), Some("0.2.0"));
+        assert_eq!(super::version_in_name("nothing"), None);
+    }
+}

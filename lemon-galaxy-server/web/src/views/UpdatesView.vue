@@ -66,6 +66,7 @@ const columns = computed(() => [
 // 手动上传
 const uploadOpen = ref(false)
 const file = ref<File | null>(null)
+const sums = ref<File | null>(null)
 const sig = ref<File | null>(null)
 const progress = ref(0)
 const uploading = ref(false)
@@ -73,16 +74,17 @@ let abort: (() => void) | null = null
 
 function openUpload() {
   file.value = null
+  sums.value = null
   sig.value = null
   progress.value = 0
   uploadOpen.value = true
 }
 
 async function doUpload() {
-  if (!file.value || !sig.value) return
+  if (!file.value || !sums.value || !sig.value) return
   uploading.value = true
   progress.value = 0
-  const h = api.uploadUpdate(file.value, sig.value, (p) => (progress.value = p))
+  const h = api.uploadUpdate(file.value, sums.value, sig.value, (p) => (progress.value = p))
   abort = h.abort
   try {
     const p = await h.promise
@@ -190,8 +192,12 @@ function cancelUpload() {
           <FilePick v-model:file="file" :button-text="t('updates.chooseFile')" />
         </div>
         <div class="up-row">
+          <div class="up-label">{{ t('updates.sums') }}</div>
+          <FilePick v-model:file="sums" accept=".txt" :button-text="t('updates.chooseFile')" />
+        </div>
+        <div class="up-row">
           <div class="up-label">{{ t('updates.signature') }}</div>
-          <FilePick v-model:file="sig" accept=".sig,.minisig,.sign" :button-text="t('updates.chooseFile')" />
+          <FilePick v-model:file="sig" accept=".sig" :button-text="t('updates.chooseFile')" />
         </div>
         <a-progress v-if="uploading" :percent="progress" size="small" />
       </div>

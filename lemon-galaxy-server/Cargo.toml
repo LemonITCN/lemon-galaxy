@@ -36,7 +36,7 @@ rcgen.workspace = true
 reqwest.workspace = true
 time.workspace = true
 uuid.workspace = true
-axum = { version = "0.8.9", features = ["ws", "macros"] }
+axum = { version = "0.8.9", features = ["ws", "macros", "multipart"] }
 r2d2 = "0.8.10"
 r2d2_sqlite = { version = "0.37.1", features = ["bundled"] }
 totp-rs = { version = "6.0.0", features = ["otpauth", "gen_secret"] }

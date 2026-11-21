@@ -127,6 +127,20 @@ async fn main() -> anyhow::Result<()> {
             std::fs::write(dir.join("controller.json"), serde_json::to_vec_pretty(&saved)?)?;
             println!("登录成功：{}（用户 {}）", l.user.username, l.user.id);
         }
+        "update-test" => {
+            // galaxy-dev --data <目录> update-test <组件> <平台> <架构> <当前版本> [下载到]
+            let (api, _s, _) = load(&dir, &id)?;
+            match galaxy_client::update::check(&api, &args[1], &args[2], &args[3], &args[4]).await? {
+                Some(i) => {
+                    println!("有新版本 {}：{}（{} 字节，签名有效）", i.version, i.file_name, i.size);
+                    if let Some(dest) = args.get(5) {
+                        galaxy_client::update::download(&api, &i, Path::new(dest), &|_, _| {}).await?;
+                        println!("已下载并核对 SHA-256：{dest}");
+                    }
+                }
+                None => println!("没有新版本"),
+            }
+        }
         "devices" => {
             let (api, _s, _) = load(&dir, &id)?;
             let resp: galaxy_proto::api::ListResp<galaxy_proto::api::ClientDevice> = api.get("/devices").await?;

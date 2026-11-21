@@ -107,6 +107,6 @@ export const updateSettings = (body: Partial<Settings>) => patch<Settings>('/set
 // 12. 更新包
 export const listUpdates = () => get<UpdateList>('/updates')
 export const checkUpdates = () => post<UpdateList>('/updates/check')
-export const uploadUpdate = (file: File, signature: File, onProgress?: (p: number) => void) =>
-  upload<UpdatePackage>('/updates/upload', { file, signature }, onProgress)
+export const uploadUpdate = (file: File, sums: File, signature: File, onProgress?: (p: number) => void) =>
+  upload<UpdatePackage>('/updates/upload', { file, sums, signature }, onProgress)
 export const deleteUpdate = (id: number) => del<OkResult>(`/updates/${id}`)

@@ -6,7 +6,7 @@ use crate::auth::{new_token, token_hash, Admin, AdminAny, Ctx, ADMIN_COOKIE};
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, St};
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -56,7 +56,7 @@ pub fn routes() -> Router<St> {
         .route("/settings", get(get_settings).patch(patch_settings))
         .route("/updates", get(list_updates))
         .route("/updates/check", post(check_updates))
-        .route("/updates/upload", post(upload_update))
+        .route("/updates/upload", post(crate::update::upload).layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)))
         .route("/updates/{id}", axum::routing::delete(delete_update))
 }
 
@@ -1171,10 +1171,6 @@ async fn check_updates(State(st): State<St>, Admin(s): Admin) -> AppResult<Json<
     // 失败原因记在 last_error 里，照常返回列表
     let _ = crate::update::check(&st).await;
     list_updates(State(st), Admin(s)).await
-}
-
-async fn upload_update(Admin(s): Admin, _h: HeaderMap) -> AppResult<Json<Value>> {
-    Err(AppError::new(StatusCode::NOT_IMPLEMENTED, "not_implemented").lang(s.lang))
 }
 
 async fn delete_update(State(st): State<St>, Admin(_s): Admin, Path(id): Path<i64>) -> AppResult<Json<Value>> {
