@@ -59,7 +59,7 @@ fun Exec.checkRustEnv() {
     doFirst {
         require(repoRoot.resolve("Cargo.toml").isFile) { "找不到内核工程 $repoRoot/Cargo.toml（或用 -Pgalaxy.skipRust=true 跳过）" }
         requireNotNull(sdkDir) { "local.properties 里没有 sdk.dir，也没有 ANDROID_HOME" }
-        require(ndkBin.isDirectory) { "找不到 NDK $ndkVersionName：$ndkBin" }
+        require(ndkBin.isDirectory) { "找不到 NDK ${ndkVersionName}：$ndkBin" }
     }
 }
 

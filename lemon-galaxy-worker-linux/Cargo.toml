@@ -12,15 +12,5 @@ path = "src/main.rs"
 
 [dependencies]
 galaxy-proto.workspace = true
-galaxy-crypto.workspace = true
-galaxy-net.workspace = true
-galaxy-client.workspace = true
 galaxy-host.workspace = true
-anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tokio.workspace = true
-futures.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-rpassword = "7"
+galaxy-worker.workspace = true

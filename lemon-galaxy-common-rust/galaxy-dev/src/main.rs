@@ -246,16 +246,36 @@ impl TerminalSink for Collect {
     }
 }
 
+/// 等输出里出现某段文字（最多 `secs` 秒）。
+async fn wait_for(buf: &Arc<std::sync::Mutex<Vec<u8>>>, needle: &str, secs: u64) -> String {
+    let end = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let s = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+        if s.contains(needle) || std::time::Instant::now() > end {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn term_test(session: &Arc<PeerSession>) -> anyhow::Result<()> {
+    // 按被控端默认 shell 选命令（Windows 默认 PowerShell）
+    let shell = session.ack.host.shell.to_ascii_lowercase();
+    let (set_cmd, echo_cmd): (&[u8], &[u8]) = if shell.contains("powershell") || shell.contains("pwsh") {
+        (b"$env:LG_MARK='persist-ok'; echo \"first-$(40+2)\"\r", b"echo \"again-$env:LG_MARK\"\r")
+    } else if shell.ends_with("cmd.exe") || shell.ends_with("cmd") {
+        (b"set LG_MARK=persist-ok & set /a 40+2 >nul & echo first-42\r", b"echo again-%LG_MARK%\r")
+    } else {
+        (b"export LG_MARK=persist-ok; echo first-$((40+2))\r", b"echo again-$LG_MARK\r")
+    };
     let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
     let t = session
         .open_terminal(TerminalOpen { attach: None, shell: None, cols: 100, rows: 30, env: vec![], origin: Origin::User }, Arc::new(Collect(buf.clone())))
         .await?;
-    println!("终端会话 {}（{}）", t.session_id, t.title);
+    println!("终端会话 {}（{}，shell {}）", t.session_id, t.title, session.ack.host.shell);
     tokio::time::sleep(Duration::from_millis(800)).await;
-    t.write(b"export LG_MARK=persist-ok; echo first-$((40+2))\r".to_vec()).await?;
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    let out1 = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+    t.write(set_cmd.to_vec()).await?;
+    let out1 = wait_for(&buf, "first-42", 15).await;
     println!("第一次输出包含 first-42：{}", out1.contains("first-42"));
     t.detach().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -266,9 +286,8 @@ async fn term_test(session: &Arc<PeerSession>) -> anyhow::Result<()> {
         .open_terminal(TerminalOpen { attach: Some(t.session_id.clone()), shell: None, cols: 100, rows: 30, env: vec![], origin: Origin::User }, Arc::new(Collect(buf2.clone())))
         .await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    t2.write(b"echo again-$LG_MARK\r".to_vec()).await?;
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    let out2 = String::from_utf8_lossy(&buf2.lock().unwrap()).to_string();
+    t2.write(echo_cmd.to_vec()).await?;
+    let out2 = wait_for(&buf2, "again-persist-ok", 15).await;
     println!("接续后回放了之前的输出：{}", out2.contains("first-42"));
     println!("接续后环境变量还在（断线继承）：{}", out2.contains("again-persist-ok"));
     let snap = t2.snapshot().await?;

@@ -34,12 +34,12 @@ cd "$ROOT"
 
 BINS=()
 for ARCH in arm64 x86_64; do
-  echo "编译 $ARCH（$CONFIG）…"
+  echo "编译 ${ARCH}（${CONFIG}）…"
   LOG="$SCRATCH/build-$ARCH.log"
   mkdir -p "$SCRATCH"
   if ! swift build -c "$CONFIG" --arch "$ARCH" --scratch-path "$SCRATCH" >"$LOG" 2>&1; then
     grep -E "error" "$LOG" | head -40 >&2
-    echo "编译失败：$ARCH（完整日志 $LOG）" >&2
+    echo "编译失败：${ARCH}（完整日志 ${LOG}）" >&2
     exit 1
   fi
   tail -1 "$LOG"

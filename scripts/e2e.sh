@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# 端到端测试：本机起服务器 + Linux 被控端 + 开发用主控端，验证登录、连接（直连 / UDP 中转 / TCP 中转）、
-# 命令执行、终端断线继承、文件传输；有免密 sudo 时再以 root 运行被控端，验证切换系统用户与降权文件操作。
-#   scripts/e2e-linux.sh <二进制目录>
+# 端到端测试：本机起服务器 + 被控端 + 开发用主控端，验证登录、连接（直连 / UDP 中转 / TCP 中转）、
+# 命令执行、终端断线继承、文件传输。
+# Linux / macOS：有免密 sudo 时再以 root 运行被控端，验证切换系统用户与降权文件操作。
+# Windows（Git Bash）：有管理员权限时再装成 SYSTEM 服务，验证命令与文件以指定账号身份执行。
+#   scripts/e2e.sh <二进制目录>
 set -euo pipefail
+WIN=0
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) WIN=1 ;; esac
 BIN="$(cd "${1:-target/debug}" && pwd)"
 WORK="$(mktemp -d)"
 PORT=$((20000 + RANDOM % 20000))
@@ -15,7 +19,7 @@ trap cleanup EXIT
 fail() { echo "失败：$*" >&2; for f in "$WORK"/*.log; do echo "== $f"; tail -40 "$f"; done; exit 1; }
 step() { echo; echo "==== $*"; }
 
-step "启动服务器（端口 $PORT）"
+step "启动服务器（端口 ${PORT}）"
 "$BIN/lemon-galaxy-server" --data-dir "$WORK/srv" --port "$PORT" user create alice init-pass-123 --display-name Alice
 "$BIN/lemon-galaxy-server" --data-dir "$WORK/srv" --port "$PORT" >"$WORK/server.log" 2>&1 &
 PIDS+=($!)
@@ -33,18 +37,23 @@ LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "
 WPID=$!
 PIDS+=($WPID)
 sleep 2
-"$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" status | head -6
+"$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" status >"$WORK/status.txt"
+head -6 "$WORK/status.txt"
 
 check() { # 期望输出里包含某段文字
   local want="$1"; shift
   local out
   out="$("$@" 2>&1 | grep -v -E 'INFO|DEBUG' || true)"
   echo "$out" | tail -6
-  echo "$out" | grep -q -- "$want" || fail "没有看到「$want」：$*"
+  echo "$out" | grep -q -- "$want" || fail "没有看到「${want}」：$*"
 }
 
 step "远程执行（自动选路）"
-check "hello-e2e" timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" exec "" "echo hello-e2e && uname -sm && id -un"
+if [ "$WIN" = 1 ]; then
+  check "hello-e2e" timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" exec "" "echo hello-e2e; whoami; [Environment]::OSVersion.VersionString"
+else
+  check "hello-e2e" timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" exec "" "echo hello-e2e && uname -sm && id -un"
+fi
 
 step "终端断线继承"
 check "接续后环境变量还在（断线继承）：true" timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" term-test ""
@@ -75,7 +84,7 @@ for mode in udp tcp; do
 done
 kill "$WPID" 2>/dev/null || true
 
-if sudo -n true 2>/dev/null; then
+if [ "$WIN" = 0 ] && sudo -n true 2>/dev/null; then
   step "以 root 运行被控端，终端与文件以普通用户身份执行"
   ME="$(id -un)"
   sudo -n env LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/rootworker" login --server "$ADDR" --user alice --system-user "$ME" | tail -1
@@ -88,9 +97,33 @@ if sudo -n true 2>/dev/null; then
   echo "root-helper-test" >"$WORK/rt.txt"
   timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" put "${RID:0:8}" "$WORK/rt.txt" "/tmp/lg-e2e-$$.txt" >/dev/null 2>&1 || fail "root 被控端上传失败"
   OWNER="$(stat -c %U "/tmp/lg-e2e-$$.txt")"
-  [ "$OWNER" = "$ME" ] || fail "文件属主应为 $ME，实际 $OWNER（降权没生效）"
+  [ "$OWNER" = "$ME" ] || fail "文件属主应为 ${ME}，实际 ${OWNER}（降权没生效）"
   echo "降权文件操作正确：属主 $OWNER"
   rm -f "/tmp/lg-e2e-$$.txt"
+fi
+
+if [ "$WIN" = 1 ] && net session >/dev/null 2>&1; then
+  step "装成 Windows 服务（SYSTEM），命令与文件以当前账号身份执行"
+  ME="${USERNAME:-$(id -un)}"
+  SVC="$WORK/svc"
+  LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$SVC" login --server "$ADDR" --user alice --system-user "$ME" | tail -1
+  "$BIN/lemon-galaxy-worker" --data-dir "$SVC" install-service || fail "安装服务失败"
+  cleanup_svc() { "$BIN/lemon-galaxy-worker" uninstall-service >/dev/null 2>&1 || true; }
+  trap 'cleanup_svc; cleanup' EXIT
+  for i in $(seq 1 30); do "$BIN/lemon-galaxy-worker" --data-dir "$SVC" status 2>/dev/null | grep -q "已连上服务器\|connected" && break; sleep 1; done
+  "$BIN/lemon-galaxy-worker" --data-dir "$SVC" status >"$WORK/svc-status.txt" 2>&1 || true
+  head -8 "$WORK/svc-status.txt"
+  SID_HEX="$(od -An -tx1 "$SVC/keys/device_id" | tr -d ' \n')"
+  check "$ME" timeout 90 "$BIN/galaxy-dev" --data "$WORK/ctl" exec "${SID_HEX:0:8}" "whoami"
+  echo "svc-helper-test" >"$WORK/st.txt"
+  DEST="C:/Users/Public/lg-e2e-$$.txt"
+  timeout 90 "$BIN/galaxy-dev" --data "$WORK/ctl" put "${SID_HEX:0:8}" "$WORK/st.txt" "$DEST" >/dev/null 2>&1 || fail "服务被控端上传失败"
+  OWNER="$(powershell -NoProfile -Command "(Get-Acl '$DEST').Owner")"
+  echo "文件属主：$OWNER"
+  echo "$OWNER" | grep -qi "$ME" || fail "文件属主应为 ${ME}（以指定账号写文件没生效）"
+  rm -f "$DEST"
+  check "first-42" timeout 90 "$BIN/galaxy-dev" --data "$WORK/ctl" term-test "${SID_HEX:0:8}"
+  cleanup_svc
 fi
 
 echo

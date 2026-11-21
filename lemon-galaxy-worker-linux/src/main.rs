@@ -1,654 +1,88 @@
-//! LemonGalaxy Linux 被控端（命令行）。
-//!
-//! ```text
-//! lemon-galaxy-worker                 查看状态；还没登录时引导登录
-//! lemon-galaxy-worker login           登录一个账号（可登录多个）
-//! lemon-galaxy-worker logout <用户名>  退出某个账号
-//! lemon-galaxy-worker policy <用户名> [选项]   修改该账号在本机的权限
-//! lemon-galaxy-worker install-service 安装为开机自启服务（root 装系统服务，普通用户装用户服务）
-//! lemon-galaxy-worker run             前台运行（服务调用）
-//! lemon-galaxy-worker assist          临时协助：显示设备码与验证码，本人确认后对方才能连入
-//! lemon-galaxy-worker disable|enable  一键禁止 / 允许远程
-//! lemon-galaxy-worker events          查看本机远程操作日志
-//! ```
+//! LemonGalaxy Linux 被控端（命令行）。命令与说明见 galaxy-worker。
 
-use galaxy_client::account::{self, DeviceMeta, LoginOutcome};
-use galaxy_client::api::Api;
-use galaxy_client::identity::{FileStore, Identity, SecureStore};
-use galaxy_host::accounts::HostState;
-use galaxy_host::{HostConfig, HostPolicy, HostService};
-use galaxy_net::ServerAddr;
-use galaxy_proto::{AiMode, DeviceKind, Platform};
-use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use galaxy_proto::Platform;
+use galaxy_worker::{t, WorkerOs};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-fn zh() -> bool {
-    let l = std::env::var("LC_ALL").or_else(|_| std::env::var("LC_MESSAGES")).or_else(|_| std::env::var("LANG")).unwrap_or_default();
-    l.is_empty() || l.starts_with("zh")
-}
-
-macro_rules! t {
-    ($zh:expr, $en:expr) => {
-        if zh() { $zh } else { $en }
-    };
-}
+struct LinuxOs;
 
 fn is_root() -> bool {
     galaxy_host::sysuser::is_root()
 }
 
-fn data_dir(arg: Option<PathBuf>) -> PathBuf {
-    if let Some(d) = arg.or_else(|| std::env::var_os("LEMON_GALAXY_WORKER_DIR").map(PathBuf::from)) {
-        return d;
+impl WorkerOs for LinuxOs {
+    fn platform(&self) -> Platform {
+        if cfg!(target_os = "macos") {
+            Platform::Macos
+        } else {
+            Platform::Linux
+        }
     }
-    if is_root() {
-        PathBuf::from("/var/lib/lemon-galaxy-worker")
-    } else {
-        let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-            home.join(".local/share")
-        });
-        base.join("lemon-galaxy-worker")
-    }
-}
 
-fn os_version() -> String {
-    if let Ok(s) = std::fs::read_to_string("/etc/os-release") {
-        for l in s.lines() {
-            if let Some(v) = l.strip_prefix("PRETTY_NAME=") {
-                return v.trim_matches('"').to_string();
+    fn os_version(&self) -> String {
+        if let Ok(s) = std::fs::read_to_string("/etc/os-release") {
+            for l in s.lines() {
+                if let Some(v) = l.strip_prefix("PRETTY_NAME=") {
+                    return v.trim_matches('"').to_string();
+                }
             }
         }
+        if cfg!(target_os = "macos") {
+            return "macOS".into();
+        }
+        std::process::Command::new("uname").arg("-sr").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|| "Linux".into())
     }
-    if cfg!(target_os = "macos") {
-        return "macOS".into();
-    }
-    std::process::Command::new("uname").arg("-sr").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|| "Linux".into())
-}
 
-fn meta(kind: DeviceKind) -> DeviceMeta {
-    DeviceMeta {
-        kind,
-        platform: if cfg!(target_os = "macos") { Platform::Macos } else { Platform::Linux },
-        os_version: os_version(),
-        arch: std::env::consts::ARCH.into(),
-        hostname: galaxy_host::hostname(),
-        app_version: VERSION.into(),
-    }
-}
-
-fn prompt(label: &str, default: Option<&str>) -> String {
-    match default {
-        Some(d) if !d.is_empty() => print!("{label} [{d}]: "),
-        _ => print!("{label}: "),
-    }
-    let _ = std::io::stdout().flush();
-    let mut s = String::new();
-    let _ = std::io::stdin().lock().read_line(&mut s);
-    let s = s.trim().to_string();
-    if s.is_empty() {
-        default.unwrap_or("").to_string()
-    } else {
-        s
-    }
-}
-
-fn prompt_secret(label: &str) -> String {
-    rpassword::prompt_password(format!("{label}: ")).unwrap_or_default()
-}
-
-fn store(dir: &std::path::Path) -> Arc<dyn SecureStore> {
-    Arc::new(FileStore::new(dir.join("keys")).expect("无法创建密钥目录"))
-}
-
-struct Args {
-    cmd: String,
-    rest: Vec<String>,
-    data_dir: Option<PathBuf>,
-}
-
-fn parse_args() -> Args {
-    let mut v: Vec<String> = std::env::args().skip(1).collect();
-    let mut data_dir = None;
-    if let Some(i) = v.iter().position(|a| a == "--data-dir") {
-        if i + 1 < v.len() {
-            data_dir = Some(PathBuf::from(v[i + 1].clone()));
-            v.drain(i..=i + 1);
+    fn default_data_dir(&self, admin: bool) -> PathBuf {
+        if admin {
+            PathBuf::from("/var/lib/lemon-galaxy-worker")
+        } else {
+            let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| {
+                let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+                home.join(".local/share")
+            });
+            base.join("lemon-galaxy-worker")
         }
     }
-    let cmd = if v.is_empty() { "status".to_string() } else { v.remove(0) };
-    Args { cmd, rest: v, data_dir }
-}
 
-fn flag(rest: &[String], name: &str) -> Option<String> {
-    rest.iter().position(|a| a == name).and_then(|i| rest.get(i + 1).cloned())
+    fn default_system_user(&self) -> String {
+        if is_root() {
+            std::env::var("SUDO_USER").unwrap_or_else(|_| "root".into())
+        } else {
+            galaxy_host::sysuser::SysUser::current().name
+        }
+    }
+
+    fn superuser_name(&self) -> &'static str {
+        "root"
+    }
+
+    fn install_service(&self, dir: &Path) -> i32 {
+        install_service(dir)
+    }
+
+    fn uninstall_service(&self) -> i32 {
+        uninstall_service()
+    }
 }
 
 fn main() {
-    // 降权文件子进程
-    let raw: Vec<String> = std::env::args().collect();
-    if raw.get(1).map(|s| s.as_str()) == Some("__lg-file-helper") {
-        std::process::exit(galaxy_host::files::helper_main(&raw[2..]));
-    }
-    galaxy_net::init_crypto();
-    let a = parse_args();
-    let log_level = if a.cmd == "run" { "info" } else { "warn" };
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| format!("{log_level},quinn=warn,rustls=warn").into()))
-        .with_writer(std::io::stderr)
-        .init();
-    let dir = data_dir(a.data_dir.clone());
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("runtime");
-    let code = rt.block_on(async move {
-        match a.cmd.as_str() {
-            "status" => status(&dir, true).await,
-            "login" => login(&dir, &a.rest).await,
-            "logout" => logout(&dir, &a.rest).await,
-            "policy" => policy(&dir, &a.rest),
-            "run" => run(&dir).await,
-            "assist" => assist(&a.rest).await,
-            "enable" => set_enabled(&dir, true),
-            "disable" => set_enabled(&dir, false),
-            "events" => events(&dir, &a.rest),
-            "install-service" => install_service(&dir),
-            "uninstall-service" => uninstall_service(),
-            "version" | "--version" | "-V" => {
-                println!("lemon-galaxy-worker {VERSION}");
-                0
-            }
-            "help" | "--help" | "-h" => {
-                help();
-                0
-            }
-            other => {
-                eprintln!("{} {other}", t!("未知命令", "Unknown command"));
-                help();
-                2
-            }
+    // 命令行输出接到 head 等程序时，对方先关管道就安静退出，不报错
+    if std::env::args().nth(1).map(|c| c != "run").unwrap_or(true) {
+        unsafe {
+            signal(13, 0);
         }
-    });
-    std::process::exit(code);
+    }
+    galaxy_worker::main(Arc::new(LinuxOs));
 }
 
-fn help() {
-    println!("LemonGalaxy worker {VERSION}\n");
-    if zh() {
-        println!("用法：lemon-galaxy-worker [命令]\n");
-        println!("  （无）              查看状态；还没登录时引导登录");
-        println!("  login               登录一个账号（可登录多个账号）");
-        println!("  logout <用户名>     退出某个账号");
-        println!("  policy <用户名>     修改该账号在本机的权限：");
-        println!("                        --system-user <名>  终端与文件以哪个系统用户运行");
-        println!("                        --ai off|read_only|confirm_all|confirm_dangerous|full_trust");
-        println!("                        --terminal on|off  --files on|off");
-        println!("  install-service     安装开机自启服务（root 装系统服务，普通用户装用户服务）");
-        println!("  uninstall-service   卸载服务");
-        println!("  run                 前台运行（服务调用）");
-        println!("  assist              临时协助：显示设备码与验证码，需本人确认对方才能连入");
-        println!("  disable / enable    一键禁止 / 允许远程");
-        println!("  events [-n 50]      查看本机远程操作日志");
-        println!("\n全局选项：--data-dir <目录>（默认 root 为 /var/lib/lemon-galaxy-worker，普通用户为 ~/.local/share/lemon-galaxy-worker）");
-    } else {
-        println!("Usage: lemon-galaxy-worker [command]\n");
-        println!("  (none)              Show status; guide you to sign in if not signed in");
-        println!("  login               Sign in an account (multiple accounts allowed)");
-        println!("  logout <user>       Sign out an account");
-        println!("  policy <user>       Change this account's permissions on this machine:");
-        println!("                        --system-user <name> --ai <mode> --terminal on|off --files on|off");
-        println!("  install-service     Install as a startup service");
-        println!("  uninstall-service   Remove the service");
-        println!("  run                 Run in foreground (used by the service)");
-        println!("  assist              Remote assistance with device code and verification code");
-        println!("  disable / enable    Disable / enable remote access");
-        println!("  events [-n 50]      Show local remote-operation log");
-    }
-}
-
-async fn status(dir: &std::path::Path, guide: bool) -> i32 {
-    let st = HostState::load(&dir.join("host.json"));
-    let id = Identity::load_or_create(&store(dir));
-    println!("LemonGalaxy worker {VERSION}");
-    println!("{}: {}", t!("设备 ID", "Device ID"), id.device_id);
-    println!("{}: {}", t!("数据目录", "Data dir"), dir.display());
-    if st.accounts.is_empty() {
-        println!("\n{}", t!("还没有登录任何账号。", "No account signed in."));
-        if guide && atty_stdin() {
-            println!();
-            return login(dir, &[]).await;
-        }
-        println!("{}", t!("运行 lemon-galaxy-worker login 登录。", "Run `lemon-galaxy-worker login` to sign in."));
-        return 0;
-    }
-    println!("{}: {}", t!("服务器", "Server"), st.server);
-    let live: Option<galaxy_host::HostStatus> = std::fs::read(dir.join("status.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
-    let fresh = std::fs::metadata(dir.join("status.json")).and_then(|m| m.modified()).map(|t| t.elapsed().map(|e| e.as_secs() < 30).unwrap_or(false)).unwrap_or(false);
-    match (&live, fresh) {
-        (Some(s), true) => {
-            println!("{}: {}", t!("服务", "Service"), if s.online { t!("运行中，已连上服务器", "running, connected") } else { t!("运行中，正在连接服务器", "running, connecting") });
-            if !s.public_ip.is_empty() {
-                println!("{}: {}", t!("公网 IP", "Public IP"), s.public_ip);
-            }
-            if !s.sessions.is_empty() {
-                println!("\n{}", t!("当前被控：", "Active sessions:"));
-                for x in &s.sessions {
-                    println!("  {}  {:?}  {}{}", x.from_user, x.path, if x.ai_active { "AI " } else { "" }, x.id);
-                }
-            }
-        }
-        _ => println!("{}: {}", t!("服务", "Service"), t!("未运行（运行 lemon-galaxy-worker install-service 安装开机自启，或 lemon-galaxy-worker run 前台运行）", "not running")),
-    }
-    println!("{}: {}", t!("远程", "Remote access"), if st.remote_enabled { t!("允许", "enabled") } else { t!("已禁止", "disabled") });
-    println!("\n{}", t!("账号：", "Accounts:"));
-    for a in &st.accounts {
-        let status = match a.status {
-            galaxy_host::AccountStatus::Active => t!("正常", "active"),
-            galaxy_host::AccountStatus::NeedsRelogin => t!("需要重新登录", "needs re-login"),
-        };
-        println!(
-            "  {} ({})  {}  {}={}  AI={}  {}={} {}={}",
-            a.username,
-            a.display_name,
-            status,
-            t!("系统用户", "system user"),
-            a.policy.system_user,
-            a.policy.ai_cap.as_str(),
-            t!("终端", "terminal"),
-            onoff(a.policy.terminal),
-            t!("文件", "files"),
-            onoff(a.policy.files)
-        );
-    }
-    0
-}
-
-fn onoff(b: bool) -> &'static str {
-    if b {
-        "on"
-    } else {
-        "off"
-    }
-}
-
-fn atty_stdin() -> bool {
-    #[cfg(unix)]
-    unsafe {
-        libc_isatty(0) == 1
-    }
-    #[cfg(not(unix))]
-    true
-}
-
-#[cfg(unix)]
 extern "C" {
-    #[link_name = "isatty"]
-    fn libc_isatty(fd: i32) -> i32;
+    /// signal(SIGPIPE=13, SIG_DFL=0)
+    fn signal(sig: i32, handler: usize) -> usize;
 }
 
-async fn login(dir: &std::path::Path, rest: &[String]) -> i32 {
-    let path = dir.join("host.json");
-    let mut st = HostState::load(&path);
-    let server_s = match flag(rest, "--server") {
-        Some(s) => s,
-        None => prompt(t!("服务器地址（后台「概览」页给出，形如 host:7443#sha256-...）", "Server address (host:7443#sha256-...)"), if st.server.is_empty() { None } else { Some(&st.server) }),
-    };
-    let server = match ServerAddr::parse(&server_s) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{}: {e}", t!("服务器地址错误", "Invalid server address"));
-            return 2;
-        }
-    };
-    if !st.server.is_empty() && st.server != server.to_string_full() && !st.accounts.is_empty() {
-        let ok = prompt(t!("更换服务器会退出所有已登录的账号，继续？(yes/no)", "Changing server signs out all accounts. Continue? (yes/no)"), Some("no"));
-        if ok != "yes" {
-            return 1;
-        }
-        st.accounts.clear();
-    }
-    let username = flag(rest, "--user").unwrap_or_else(|| prompt(t!("用户名", "Username"), None));
-    // 无人值守部署可用环境变量传密码（不要放在命令行参数里，会被 ps 看到）
-    let password = std::env::var("LEMON_GALAXY_PASSWORD").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| prompt_secret(t!("密码", "Password")));
-    let api = match Api::new(server.clone(), if zh() { "zh-CN" } else { "en" }) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
-        }
-    };
-    let id = Identity::load_or_create(&store(dir));
-    let m = meta(DeviceKind::Worker);
-    let mut out = account::login(&api, &id, &m, &username, &password, None).await;
-    if let Ok(LoginOutcome::NeedTotp) = out {
-        let code = prompt(t!("两步验证码", "Two-factor code"), None);
-        out = account::login(&api, &id, &m, &username, &password, Some(&code)).await;
-    }
-    let logged = match out {
-        Ok(LoginOutcome::Done(l)) => l,
-        Ok(LoginOutcome::MustChangePassword(fl)) => {
-            println!("{}", t!("首次登录需要设置新密码（至少 8 位）。设置后服务器和管理员都不知道你的密码。", "First sign-in: please set a new password (8+ characters)."));
-            let (p1, p2) = match std::env::var("LEMON_GALAXY_NEW_PASSWORD").ok().filter(|s| !s.is_empty()) {
-                Some(p) => (p.clone(), p),
-                None => (prompt_secret(t!("新密码", "New password")), prompt_secret(t!("再输入一次", "Repeat"))),
-            };
-            if p1 != p2 {
-                eprintln!("{}", t!("两次输入不一致", "Passwords do not match"));
-                return 1;
-            }
-            match account::complete_first_login(&api, &id, &m, fl, &p1).await {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("{e}");
-                    return 1;
-                }
-            }
-        }
-        Ok(LoginOutcome::NeedTotp) => {
-            eprintln!("{}", t!("两步验证码不正确", "Invalid two-factor code"));
-            return 1;
-        }
-        Err(e) => {
-            eprintln!("{}: {e}", t!("登录失败", "Sign-in failed"));
-            return 1;
-        }
-    };
-
-    // 选择系统用户
-    let default_user = if is_root() { std::env::var("SUDO_USER").unwrap_or_else(|_| "root".into()) } else { galaxy_host::sysuser::SysUser::current().name };
-    let sys = match flag(rest, "--system-user") {
-        Some(s) => s,
-        None if is_root() => prompt(t!("这个账号的远程终端和文件操作以哪个系统用户运行", "Run remote terminal and files as which system user"), Some(&default_user)),
-        None => default_user.clone(),
-    };
-    if galaxy_host::sysuser::SysUser::lookup(&sys).is_none() {
-        eprintln!("{} {sys}", t!("系统用户不存在：", "No such system user:"));
-        return 1;
-    }
-    if sys == "root" {
-        let ok = flag(rest, "--yes-root").map(|_| "yes".to_string()).unwrap_or_else(|| prompt(t!("以 root 身份开放远程终端风险很高，确认？(yes/no)", "Allow remote root terminal? This is risky. (yes/no)"), Some("no")));
-        if ok != "yes" {
-            return 1;
-        }
-    }
-    let mut st = HostState::load(&path);
-    st.server = server.to_string_full();
-    st.accounts.retain(|a| a.user_id != logged.user.id);
-    st.accounts.push(galaxy_host::HostAccount {
-        user_id: logged.user.id,
-        username: logged.user.username.clone(),
-        display_name: logged.user.display_name.clone(),
-        account_pubkey: logged.account_pubkey,
-        epoch: logged.epoch,
-        cert: logged.cert.clone(),
-        token: logged.token.clone(),
-        status: galaxy_host::AccountStatus::Active,
-        policy: HostPolicy::default_for(&sys),
-        revoked: vec![],
-        added_at: galaxy_proto::now_ms(),
-    });
-    if let Ok(info) = api.get::<galaxy_proto::api::ServerInfoResp>("/info").await {
-        st.server_sign_pubkey = info.server_sign_pubkey;
-    }
-    if let Err(e) = st.save(&path) {
-        eprintln!("{}: {e}", t!("保存失败", "Save failed"));
-        return 1;
-    }
-    println!("\n{} {}（{}）", t!("已登录", "Signed in as"), logged.user.username, logged.user.display_name);
-    println!("{} {sys}", t!("远程终端与文件以此系统用户运行：", "Remote terminal and files run as:"));
-    let running = std::fs::metadata(dir.join("status.json")).and_then(|m| m.modified()).map(|t| t.elapsed().map(|e| e.as_secs() < 30).unwrap_or(false)).unwrap_or(false);
-    if !running {
-        println!("{}", t!("服务未运行。运行 lemon-galaxy-worker install-service 安装开机自启（推荐），或 lemon-galaxy-worker run 前台运行。", "Service not running. Run `lemon-galaxy-worker install-service`."));
-    }
-    0
-}
-
-async fn logout(dir: &std::path::Path, rest: &[String]) -> i32 {
-    let Some(name) = rest.first() else {
-        eprintln!("{}", t!("用法：lemon-galaxy-worker logout <用户名>", "Usage: lemon-galaxy-worker logout <user>"));
-        return 2;
-    };
-    let path = dir.join("host.json");
-    let mut st = HostState::load(&path);
-    let Some(a) = st.accounts.iter().find(|a| a.username.eq_ignore_ascii_case(name)).cloned() else {
-        eprintln!("{} {name}", t!("本机没有登录这个账号：", "Account not signed in:"));
-        return 1;
-    };
-    if let Ok(server) = ServerAddr::parse(&st.server) {
-        if let Ok(api) = Api::new(server, "zh-CN") {
-            api.set_token(Some(a.token.clone()));
-            let _ = api.post::<_, serde_json::Value>("/auth/logout", &serde_json::json!({})).await;
-        }
-    }
-    st.accounts.retain(|x| x.user_id != a.user_id);
-    let _ = st.save(&path);
-    println!("{} {}", t!("已退出", "Signed out"), a.username);
-    0
-}
-
-fn policy(dir: &std::path::Path, rest: &[String]) -> i32 {
-    let Some(name) = rest.first() else {
-        eprintln!("{}", t!("用法：lemon-galaxy-worker policy <用户名> [选项]", "Usage: lemon-galaxy-worker policy <user> [options]"));
-        return 2;
-    };
-    let path = dir.join("host.json");
-    let mut st = HostState::load(&path);
-    let Some(a) = st.accounts.iter_mut().find(|a| a.username.eq_ignore_ascii_case(name)) else {
-        eprintln!("{} {name}", t!("本机没有登录这个账号：", "Account not signed in:"));
-        return 1;
-    };
-    if let Some(u) = flag(rest, "--system-user") {
-        if galaxy_host::sysuser::SysUser::lookup(&u).is_none() {
-            eprintln!("{} {u}", t!("系统用户不存在：", "No such system user:"));
-            return 1;
-        }
-        a.policy.system_user = u;
-    }
-    if let Some(m) = flag(rest, "--ai") {
-        match AiMode::parse(&m) {
-            Some(x) => a.policy.ai_cap = x,
-            None => {
-                eprintln!("--ai off|read_only|confirm_all|confirm_dangerous|full_trust");
-                return 2;
-            }
-        }
-    }
-    for (f, field) in [("--terminal", 0), ("--files", 1), ("--view", 2), ("--control", 3), ("--clipboard", 4)] {
-        if let Some(v) = flag(rest, f) {
-            let on = v == "on" || v == "true" || v == "1";
-            match field {
-                0 => a.policy.terminal = on,
-                1 => a.policy.files = on,
-                2 => a.policy.view = on,
-                3 => a.policy.control = on,
-                _ => a.policy.clipboard = on,
-            }
-        }
-    }
-    let p = a.policy.clone();
-    let _ = st.save(&path);
-    println!("{}: {} AI={} {}={} {}={}", name, p.system_user, p.ai_cap.as_str(), t!("终端", "terminal"), onoff(p.terminal), t!("文件", "files"), onoff(p.files));
-    0
-}
-
-fn set_enabled(dir: &std::path::Path, on: bool) -> i32 {
-    let path = dir.join("host.json");
-    let mut st = HostState::load(&path);
-    st.remote_enabled = on;
-    let _ = st.save(&path);
-    println!("{}", if on { t!("已允许远程。", "Remote access enabled.") } else { t!("已禁止远程，现有连接会被断开。", "Remote access disabled.") });
-    0
-}
-
-fn events(dir: &std::path::Path, rest: &[String]) -> i32 {
-    let n: usize = flag(rest, "-n").and_then(|s| s.parse().ok()).unwrap_or(50);
-    let Ok(s) = std::fs::read_to_string(dir.join("events.log")) else {
-        println!("{}", t!("暂无记录", "No events"));
-        return 0;
-    };
-    let lines: Vec<&str> = s.lines().collect();
-    for l in lines.iter().skip(lines.len().saturating_sub(n)) {
-        if let Ok(e) = serde_json::from_str::<galaxy_host::service::HostLogEvent>(l) {
-            let secs = e.at / 1000;
-            println!("{} {} {:<10} {}{}", fmt_time(secs), e.user, e.kind, if e.ai { "[AI] " } else { "" }, e.detail);
-        }
-    }
-    0
-}
-
-fn fmt_time(secs: i64) -> String {
-    let d = secs / 86400;
-    let s = secs % 86400;
-    // 以 UTC 显示，避免引入时区依赖
-    let (y, m, dd) = civil(d);
-    format!("{y:04}-{m:02}-{dd:02} {:02}:{:02}:{:02}Z", s / 3600, (s % 3600) / 60, s % 60)
-}
-
-fn civil(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-async fn run(dir: &std::path::Path) -> i32 {
-    let st = HostState::load(&dir.join("host.json"));
-    if st.server.is_empty() {
-        eprintln!("{}", t!("还没有登录，请先运行 lemon-galaxy-worker login", "Not signed in. Run `lemon-galaxy-worker login` first."));
-        return 1;
-    }
-    let server = match ServerAddr::parse(&st.server) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
-        }
-    };
-    let id = Identity::load_or_create(&store(dir));
-    let helper = if is_root() { std::env::current_exe().ok() } else { None };
-    let cfg = HostConfig { server, data_dir: dir.to_path_buf(), meta: meta(DeviceKind::Worker), multi_account: true, file_helper: helper };
-    let host = match HostService::start(cfg, id).await {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("{}: {e}", t!("启动失败", "Start failed"));
-            return 1;
-        }
-    };
-    tracing::info!("LemonGalaxy worker {VERSION} 已启动，设备 {}", host.identity.device_id);
-    let path = dir.join("host.json");
-    let mut last = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-    let mut tick = tokio::time::interval(Duration::from_secs(2));
-    let mut n = 0u64;
-    loop {
-        tokio::select! {
-            _ = tick.tick() => {
-                n += 1;
-                let now = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                if now != last {
-                    last = now;
-                    if host.reload_from_disk() {
-                        tracing::info!("已重新读取账号配置");
-                    }
-                }
-                if n % 3 == 1 {
-                    host.write_status_file();
-                }
-            }
-            _ = shutdown_signal() => {
-                tracing::info!("收到退出信号");
-                host.write_status_file();
-                let _ = std::fs::remove_file(dir.join("status.json"));
-                return 0;
-            }
-        }
-    }
-}
-
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
-/// 临时协助：用一次性的匿名设备身份前台运行，在终端里确认请求。
-async fn assist(rest: &[String]) -> i32 {
-    let server_s = flag(rest, "--server").unwrap_or_else(|| prompt(t!("服务器地址", "Server address"), None));
-    let server = match ServerAddr::parse(&server_s) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
-        }
-    };
-    let tmp = std::env::temp_dir().join(format!("lemon-galaxy-assist-{}", std::process::id()));
-    let id = Identity::load_or_create(&store(&tmp));
-    let cfg = HostConfig { server, data_dir: tmp.clone(), meta: meta(DeviceKind::Worker), multi_account: false, file_helper: None };
-    let host = match HostService::start(cfg, id).await {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
-        }
-    };
-    struct Ask;
-    impl galaxy_host::HostEvents for Ask {
-        fn ask_assist(&self, from_user: String, _from_device: String) -> futures::future::BoxFuture<'static, bool> {
-            Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    let a = prompt(&format!("{} {from_user} {} (yes/no)", t!("收到协助请求：", "Assistance request from"), t!("允许对方控制本机终端和文件？", "allow?")), Some("no"));
-                    a == "yes" || a == "y"
-                })
-                .await
-                .unwrap_or(false)
-            })
-        }
-        fn on_session_started(&self, s: &galaxy_host::service::SessionInfo) {
-            println!("{} {}", t!("对方已连入：", "Connected:"), s.from_user);
-        }
-        fn on_session_ended(&self, _id: &str) {
-            println!("{}", t!("对方已断开。", "Disconnected."));
-        }
-    }
-    host.set_events(Arc::new(Ask));
-    let code = host.start_assist();
-    let mut shown = false;
-    for _ in 0..100 {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        if let Some((dc, c)) = host.status().assist {
-            println!("\n{}: {}", t!("设备码", "Device code"), dc);
-            println!("{}: {}\n", t!("验证码", "Verification code"), c);
-            println!("{}", t!("把这两个码告诉协助你的人。按 Ctrl+C 结束协助。", "Tell both codes to your helper. Press Ctrl+C to stop."));
-            shown = true;
-            break;
-        }
-    }
-    if !shown {
-        eprintln!("{} ({code})", t!("连不上服务器", "Cannot reach server"));
-        return 1;
-    }
-    shutdown_signal().await;
-    let _ = std::fs::remove_dir_all(tmp);
-    0
-}
-
-fn install_service(dir: &std::path::Path) -> i32 {
+fn install_service(dir: &Path) -> i32 {
     let exe = std::env::current_exe().ok().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
     let has_systemd = std::path::Path::new("/run/systemd/system").exists();
     if !has_systemd {

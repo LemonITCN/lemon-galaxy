@@ -9,8 +9,10 @@ members = [
     "lemon-galaxy-common-rust/galaxy-agent",
     "lemon-galaxy-common-rust/galaxy-ffi",
     "lemon-galaxy-common-rust/galaxy-dev",
+    "lemon-galaxy-common-rust/galaxy-worker",
     "lemon-galaxy-server",
     "lemon-galaxy-worker-linux",
+    "lemon-galaxy-worker-windows",
 ]
 
 [workspace.package]
@@ -25,6 +27,7 @@ galaxy-proto = { path = "lemon-galaxy-common-rust/galaxy-proto" }
 galaxy-crypto = { path = "lemon-galaxy-common-rust/galaxy-crypto" }
 galaxy-net = { path = "lemon-galaxy-common-rust/galaxy-net" }
 galaxy-client = { path = "lemon-galaxy-common-rust/galaxy-client" }
+galaxy-worker = { path = "lemon-galaxy-common-rust/galaxy-worker" }
 galaxy-host = { path = "lemon-galaxy-common-rust/galaxy-host" }
 galaxy-agent = { path = "lemon-galaxy-common-rust/galaxy-agent" }
 

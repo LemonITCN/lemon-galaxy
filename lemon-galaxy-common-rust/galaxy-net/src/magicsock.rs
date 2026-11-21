@@ -352,11 +352,15 @@ impl MagicSock {
 
     /// 设置 TCP 中转通道（WebSocket 写端）。
     pub fn set_relay_tcp(&self, peer: &Arc<Peer>, tx: Option<mpsc::Sender<Bytes>>) {
-        let mut s = peer.state.lock();
-        s.relay_tcp = tx;
-        if s.relay_tcp.is_none() {
-            s.paths.remove(&Route::RelayTcp);
+        {
+            let mut s = peer.state.lock();
+            s.relay_tcp = tx;
+            if s.relay_tcp.is_none() {
+                s.paths.remove(&Route::RelayTcp);
+            }
         }
+        // 没有测出延迟前也要把「走 TCP 中转」报上去
+        recompute_best(peer);
     }
 
     /// TCP 中转收到的负载（对端发来的 QUIC 或探测包）。

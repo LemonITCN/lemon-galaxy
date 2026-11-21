@@ -4,6 +4,7 @@
 # 产物
 #   服务器         lemon-galaxy-server  Linux x86_64 / ARM64 静态单文件（内嵌 Web 管理后台）
 #   Linux 被控端   lemon-galaxy-worker  Linux x86_64 / ARM64 静态单文件
+#   Windows 被控端 lemon-galaxy-worker.exe  Windows 10 / Server 2016 起，x64 / ARM64 单文件（系统服务 + 画面代理）
 #   Mac 客户端     LemonGalaxy.dmg      macOS 13 起，Apple 芯片 + Intel 通用（主控 + 被控）
 #   安卓客户端     LemonGalaxy.apk      Android 8.0 起
 #
@@ -115,13 +116,69 @@ jobs:
           file dist/* || true
           ls -l dist
       - name: 端到端测试（服务器 + Linux 被控端 + 主控）
-        run: scripts/e2e-linux.sh dist
+        run: scripts/e2e.sh dist
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: |
             dist/lemon-galaxy-server
             dist/lemon-galaxy-worker
+          if-no-files-found: error
+
+  windows:
+    name: Windows 被控端 (${{ matrix.arch }})
+    needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025, arch: x86_64 }
+          - { os: windows-11-arm, arch: aarch64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      # 静态链接 C 运行库，目标机器不用装 VC++ 运行库
+      RUSTFLAGS: -C target-feature=+crt-static
+      TARGET: ${{ matrix.arch }}-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: lemon-galaxy-server/web/dist
+      - name: 准备 Rust
+        run: |
+          rustup update stable --no-self-update && rustup default stable
+          rustup target add "$TARGET"
+          rustc -vV
+          which clang || echo "没有 clang"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-windows-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-windows-${{ matrix.arch }}-
+      - name: 编译
+        run: |
+          cargo build --release --target "$TARGET" -p lemon-galaxy-worker-windows -p lemon-galaxy-server -p galaxy-dev
+          mkdir -p dist
+          for b in lemon-galaxy-worker lemon-galaxy-server galaxy-dev; do cp "target/$TARGET/release/$b.exe" dist/; done
+          ls -l dist
+      - name: 单元测试（Windows 部分）
+        run: cargo test --release --target "$TARGET" -p galaxy-host -p galaxy-worker
+      - name: 截屏与编码自检
+        continue-on-error: true
+        run: dist/lemon-galaxy-worker.exe selftest-capture
+      - name: 端到端测试（服务器 + Windows 被控端 + 主控，含系统服务）
+        run: scripts/e2e.sh dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist/lemon-galaxy-worker.exe
           if-no-files-found: error
 
   macos:
@@ -239,8 +296,9 @@ jobs:
 
   release:
     name: 发布
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs: [rust-tests, linux, macos, android]
+    # Windows 被控端还在打磨：它失败时照常发布，只是不带 Windows 文件
+    if: always() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && needs.rust-tests.result == 'success' && needs.linux.result == 'success' && needs.macos.result == 'success' && needs.android.result == 'success'
+    needs: [rust-tests, linux, windows, macos, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -266,6 +324,13 @@ jobs:
             chmod +x "out/lemon-galaxy-worker-$V-linux-$a"
             tar -C "art/linux-$a" -czf "out/lemon-galaxy-server-$V-linux-$a.tar.gz" lemon-galaxy-server
           done
+          WINS=()
+          for a in x86_64 aarch64; do
+            if [ -f "art/windows-$a/lemon-galaxy-worker.exe" ]; then
+              cp "art/windows-$a/lemon-galaxy-worker.exe" "out/lemon-galaxy-worker-$V-windows-$a.exe"
+              WINS+=("$a")
+            fi
+          done
           (cd out && sha256sum * > SHA256SUMS.txt)
           DL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
           PREV="$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)"
@@ -278,6 +343,10 @@ jobs:
             echo "| 安卓客户端（主控） | Android 8.0 及以上 | [LemonGalaxy-$V-Android.apk]($DL/LemonGalaxy-$V-Android.apk) |"
             echo "| Linux 被控端 | x86_64，任意发行版 | [lemon-galaxy-worker-$V-linux-x86_64]($DL/lemon-galaxy-worker-$V-linux-x86_64) |"
             echo "| Linux 被控端 | ARM64，任意发行版 | [lemon-galaxy-worker-$V-linux-aarch64]($DL/lemon-galaxy-worker-$V-linux-aarch64) |"
+            for a in "${WINS[@]}"; do
+              case $a in x86_64) W="x64" ;; *) W="ARM64" ;; esac
+              echo "| Windows 被控端 | Windows 10 / Server 2016 及以上，$W | [lemon-galaxy-worker-$V-windows-$a.exe]($DL/lemon-galaxy-worker-$V-windows-$a.exe) |"
+            done
             echo "| 服务器（内嵌管理后台） | Linux x86_64 | [lemon-galaxy-server-$V-linux-x86_64.tar.gz]($DL/lemon-galaxy-server-$V-linux-x86_64.tar.gz) |"
             echo "| 服务器（内嵌管理后台） | Linux ARM64 | [lemon-galaxy-server-$V-linux-aarch64.tar.gz]($DL/lemon-galaxy-server-$V-linux-aarch64.tar.gz) |"
             echo
@@ -288,6 +357,7 @@ jobs:
             echo '1. 服务器：解压后运行 `./lemon-galaxy-server --public-host <你的域名或公网 IP>`，日志里会打印初始化网址和「客户端填写的服务器地址」。放行 TCP 与 UDP 7443 端口。'
             echo '2. 打开初始化网址创建管理员、绑定两步验证，在后台「用户」里创建账号。'
             echo '3. Linux 被控端：`chmod +x lemon-galaxy-worker && ./lemon-galaxy-worker login`，再 `sudo ./lemon-galaxy-worker install-service` 安装开机自启。'
+            echo '   Windows 被控端：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service` 安装为系统服务。'
             echo '4. 在 Mac 或安卓客户端用同一服务器地址和账号登录。'
             echo
             if [ "$MAC_NOTARIZED" != true ]; then
