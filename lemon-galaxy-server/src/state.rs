@@ -70,6 +70,13 @@ pub struct OnlineDevice {
     pub connected_at: i64,
 }
 
+impl OnlineDevice {
+    /// 能被连：能被控的设备要有被控那条连接（主控端不跑本机被控时只有主控连接，不算）；手机只要在线即可。
+    pub fn reachable(&self) -> bool {
+        !self.kind.can_host() || self.conns.iter().any(|c| !c.client)
+    }
+}
+
 #[derive(Default)]
 pub struct Hub {
     pub devices: RwLock<HashMap<DeviceId, OnlineDevice>>,

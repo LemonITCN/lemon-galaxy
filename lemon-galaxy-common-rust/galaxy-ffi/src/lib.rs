@@ -57,6 +57,7 @@ pub(crate) fn config() -> CoreConfig {
         os_version: String::new(),
         hostname: "device".into(),
         locale: "zh-CN".into(),
+        host_enabled: true,
     })
 }
 

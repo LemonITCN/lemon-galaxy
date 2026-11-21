@@ -479,7 +479,7 @@ async fn list_devices(State(st): State<St>, User(s): User) -> AppResult<Json<Lis
                 arch,
                 hostname: host,
                 app_version: ver,
-                online: online.is_some(),
+                online: online.map(|d| d.reachable()).unwrap_or(false),
                 last_seen_at: seen,
                 cert,
                 cert_signature: sig,

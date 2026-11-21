@@ -148,6 +148,9 @@ pub struct CoreConfig {
     pub os_version: String,
     pub hostname: String,
     pub locale: String,
+    /// control 客户端是否在进程内跑本机被控（Mac 是；Windows 主控端由系统服务被控，设为 false）
+    #[uniffi(default = true)]
+    pub host_enabled: bool,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]

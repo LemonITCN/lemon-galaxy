@@ -245,7 +245,7 @@ impl Inner {
             *me.online.lock() = Some(Arc::new(Online { signal: signal.clone(), connector, stop }));
 
             // 本机被控（control 客户端）
-            if me.meta.kind == galaxy_proto::DeviceKind::Control && me.host.lock().is_none() {
+            if me.meta.kind == galaxy_proto::DeviceKind::Control && config().host_enabled && me.host.lock().is_none() {
                 let cfg = galaxy_host::HostConfig {
                     server: server.clone(),
                     data_dir: std::path::PathBuf::from(config().data_dir).join("host"),

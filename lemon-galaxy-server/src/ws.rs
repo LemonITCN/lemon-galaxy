@@ -168,6 +168,7 @@ async fn run_ws(st: St, sock: WebSocket, ip: IpAddr, q: WsQuery) -> anyhow::Resu
         let conn = crate::state::WsConn { serial, client: client_role, tx: tx.clone() };
         match devs.get_mut(&device_id) {
             Some(d) => {
+                let was = d.reachable();
                 // 同一角色只保留最新的一条
                 let old = d.conns.iter().position(|c| c.client == client_role).map(|i| d.conns.remove(i));
                 d.conns.push(conn);
@@ -183,22 +184,21 @@ async fn run_ws(st: St, sock: WebSocket, ip: IpAddr, q: WsQuery) -> anyhow::Resu
                     }
                     d.assist_code = assist_code.clone();
                 }
-                (old, false)
+                (old, !was && d.reachable())
             }
             None => {
-                devs.insert(
-                    device_id,
-                    OnlineDevice {
-                        conns: vec![conn],
-                        kind,
-                        public_ip: ip,
-                        accounts: accounts.clone(),
-                        assist_code: assist_code.clone(),
-                        hostname: hostname.clone(),
-                        connected_at: now,
-                    },
-                );
-                (None, true)
+                let d = OnlineDevice {
+                    conns: vec![conn],
+                    kind,
+                    public_ip: ip,
+                    accounts: accounts.clone(),
+                    assist_code: assist_code.clone(),
+                    hostname: hostname.clone(),
+                    connected_at: now,
+                };
+                let up = d.reachable();
+                devs.insert(device_id, d);
+                (None, up)
             }
         }
     };
@@ -263,17 +263,23 @@ async fn run_ws(st: St, sock: WebSocket, ip: IpAddr, q: WsQuery) -> anyhow::Resu
     }
 
     // 下线：去掉这条连接；设备没有连接了才算离线
-    let gone = {
+    let (gone, went_down, accts_now) = {
         let mut devs = st.hub.devices.write();
         let mut gone = None;
         let mut dropped_code = None;
+        let mut went_down = false;
+        let mut accts_now = vec![];
         if let Some(d) = devs.get_mut(&device_id) {
+            let was = d.reachable();
             if let Some(i) = d.conns.iter().position(|c| c.serial == serial) {
                 d.conns.remove(i);
                 if !client_role {
                     dropped_code = d.assist_code.take();
                 }
             }
+            // 还剩主控连接但被控连接没了：对别人来说已经连不上
+            went_down = was && !d.conns.is_empty() && !d.reachable();
+            accts_now = d.accounts.clone();
             if d.conns.is_empty() {
                 gone = devs.remove(&device_id);
             }
@@ -281,8 +287,13 @@ async fn run_ws(st: St, sock: WebSocket, ip: IpAddr, q: WsQuery) -> anyhow::Resu
         if let Some(code) = dropped_code {
             st.hub.assist_codes.write().remove(&code);
         }
-        gone
+        (gone, went_down, accts_now)
     };
+    if went_down {
+        for u in &accts_now {
+            st.hub.notify_user(*u, WsMsg::Presence { device_id, online: false });
+        }
+    }
     writer.abort();
     if let Some(d) = gone {
         for u in &d.accounts {
@@ -381,11 +392,11 @@ async fn handle_connect(
     let target = match mode {
         ConnMode::Control => {
             let t = target.ok_or(("bad_request", String::new()))?;
-            let ok = st.hub.devices.read().get(&t).map(|d| d.accounts.contains(&user_id) && d.kind.can_host());
+            let ok = st.hub.devices.read().get(&t).map(|d| (d.accounts.contains(&user_id) && d.kind.can_host(), d.reachable()));
             match ok {
-                None => return Err(("offline", String::new())),
-                Some(false) => return Err(("forbidden", String::new())),
-                Some(true) => t,
+                None | Some((true, false)) => return Err(("offline", String::new())),
+                Some((false, _)) => return Err(("forbidden", String::new())),
+                Some((true, true)) => t,
             }
         }
         ConnMode::Assist => {
