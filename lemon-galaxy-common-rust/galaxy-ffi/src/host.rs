@@ -24,6 +24,10 @@ impl EncodedFrameSink {
     pub fn set_resolution(&self, width: u32, height: u32) {
         self.inner.resized(width, height);
     }
+    /// 光标位置（这块屏的画面像素）变了，位置变化时调用即可（约 30 次/秒以内）。
+    pub fn set_cursor(&self, x: i32, y: i32, visible: bool) {
+        self.inner.cursor(x, y, visible);
+    }
 }
 
 /// 平台层采到系统声音后推给内核。
@@ -81,6 +85,9 @@ impl hp::HostPlatform for PlatformBridge {
     }
     fn set_privacy(&self, on: bool) -> bool {
         self.0.set_privacy(on)
+    }
+    fn set_cursor_in_video(&self, display: u32, show: bool) {
+        self.0.set_cursor_in_video(display, show)
     }
     fn start_audio(&self, sink: Arc<dyn galaxy_host::audio::AudioSink>) -> std::result::Result<(), String> {
         if self.0.start_audio(Arc::new(AudioPcmSink { inner: sink })) {

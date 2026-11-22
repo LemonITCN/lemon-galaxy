@@ -7,6 +7,8 @@ use std::sync::Arc;
 pub trait FrameSink: Send + Sync {
     fn push(&self, data: Vec<u8>, pts_us: u64, keyframe: bool);
     fn resized(&self, width: u32, height: u32);
+    /// 光标位置（这块屏的画面像素）变了。平台层在位置变化时调用，频率自己控制（约 30 次/秒以内）。
+    fn cursor(&self, _x: i32, _y: i32, _visible: bool) {}
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +28,8 @@ pub trait HostPlatform: Send + Sync {
     fn stop_capture(&self, _display: u32) {}
     fn request_keyframe(&self, _display: u32) {}
     fn set_bitrate(&self, _display: u32, _kbps: u32) {}
+    /// 画面里要不要画光标（主控端在本地画时关掉）。支持的平台在能力里报 "client_cursor"。
+    fn set_cursor_in_video(&self, _display: u32, _show: bool) {}
     /// 注入输入；坐标是 `display` 这块屏幕的像素。
     fn inject(&self, _display: u32, _ev: InputEvent) {}
     fn screenshot(&self, _display: u32, _max_width: u32, _max_height: u32) -> Option<ImageData> {

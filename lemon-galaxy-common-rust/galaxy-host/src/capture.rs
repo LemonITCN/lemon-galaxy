@@ -13,12 +13,16 @@ struct Sub {
     id: u64,
     sink: Arc<dyn FrameSink>,
     kbps: u32,
+    /// 这个会话自己画光标
+    client_cursor: bool,
 }
 
 struct Shared {
     subs: Vec<Sub>,
     started: CaptureStarted,
     applied_kbps: u32,
+    /// 画面里现在画不画光标
+    cursor_in_video: bool,
 }
 
 pub struct CaptureHub {
@@ -44,6 +48,13 @@ impl FrameSink for FanSink {
             // 最后一个直接拿走，前面的各复制一份
             let d = if i + 1 == n { data.take().unwrap_or_default() } else { data.as_ref().cloned().unwrap_or_default() };
             s.push(d, pts_us, keyframe);
+        }
+    }
+    fn cursor(&self, x: i32, y: i32, visible: bool) {
+        let Some(hub) = self.hub.upgrade() else { return };
+        let sinks: Vec<Arc<dyn FrameSink>> = hub.displays.lock().get(&self.display).map(|s| s.subs.iter().map(|x| x.sink.clone()).collect()).unwrap_or_default();
+        for s in sinks {
+            s.cursor(x, y, visible);
         }
     }
     fn resized(&self, width: u32, height: u32) {
@@ -86,7 +97,7 @@ impl CaptureHub {
                     if !codecs.is_empty() && !codecs.contains(&s.started.codec) {
                         return Err("这块屏正被别的会话以对方不支持的编码查看".into());
                     }
-                    s.subs.push(Sub { id, sink: sink.clone(), kbps });
+                    s.subs.push(Sub { id, sink: sink.clone(), kbps, client_cursor: false });
                     Some(s.started.clone())
                 }
                 None => None,
@@ -96,11 +107,12 @@ impl CaptureHub {
             // 新来的会话要从关键帧开始解码
             platform.request_keyframe(display);
             self.apply_bitrate(platform, display);
+            self.apply_cursor(platform, display);
             return Ok((id, started));
         }
         let fan: Arc<dyn FrameSink> = Arc::new(FanSink { hub: self.me.clone(), display });
         // 先登记再开始：平台层可能在 start_capture 返回前就推第一帧
-        self.displays.lock().insert(display, Shared { subs: vec![Sub { id, sink, kbps }], started: CaptureStarted { width: 0, height: 0, codec: VideoCodec::H264 }, applied_kbps: kbps });
+        self.displays.lock().insert(display, Shared { subs: vec![Sub { id, sink, kbps, client_cursor: false }], started: CaptureStarted { width: 0, height: 0, codec: VideoCodec::H264 }, applied_kbps: kbps, cursor_in_video: true });
         match platform.start_capture(display, max_fps, kbps, codecs, fan) {
             Ok(started) => {
                 if let Some(s) = self.displays.lock().get_mut(&display) {
@@ -133,7 +145,32 @@ impl CaptureHub {
             platform.stop_capture(display);
         } else {
             self.apply_bitrate(platform, display);
+            self.apply_cursor(platform, display);
         }
+    }
+
+    /// 某个会话改了「自己画光标」。所有在看的会话都自己画时，画面里才不画光标。
+    pub fn set_client_cursor(&self, platform: &Arc<dyn HostPlatform>, display: u32, id: u64, client: bool) {
+        if let Some(s) = self.displays.lock().get_mut(&display) {
+            if let Some(x) = s.subs.iter_mut().find(|x| x.id == id) {
+                x.client_cursor = client;
+            }
+        }
+        self.apply_cursor(platform, display);
+    }
+
+    fn apply_cursor(&self, platform: &Arc<dyn HostPlatform>, display: u32) {
+        let show = {
+            let mut g = self.displays.lock();
+            let Some(s) = g.get_mut(&display) else { return };
+            let show = s.subs.iter().any(|x| !x.client_cursor);
+            if show == s.cursor_in_video {
+                return;
+            }
+            s.cursor_in_video = show;
+            show
+        };
+        platform.set_cursor_in_video(display, show);
     }
 
     /// 某个会话要求的码率变了（自适应或用户选择）。实际用所有会话里最低的。
@@ -176,6 +213,7 @@ mod tests {
         stops: AtomicU32,
         keyframes: AtomicU32,
         bitrate: AtomicU32,
+        cursor_off: AtomicU32,
         sink: Mutex<Option<Arc<dyn FrameSink>>>,
     }
     impl HostPlatform for FakePlatform {
@@ -193,6 +231,9 @@ mod tests {
         }
         fn set_bitrate(&self, _d: u32, kbps: u32) {
             self.bitrate.store(kbps, Ordering::Relaxed);
+        }
+        fn set_cursor_in_video(&self, _d: u32, show: bool) {
+            self.cursor_off.store(if show { 0 } else { 1 }, Ordering::Relaxed);
         }
     }
 
@@ -241,5 +282,26 @@ mod tests {
         hub.unsubscribe(&p, 0, ic);
         assert_eq!(fp.stops.load(Ordering::Relaxed), 1);
         assert_eq!(hub.viewers(0), 0);
+    }
+
+    #[test]
+    fn cursor_hidden_only_when_every_viewer_draws_it() {
+        let fp = Arc::new(FakePlatform::default());
+        let p: Arc<dyn HostPlatform> = fp.clone();
+        let hub = CaptureHub::new();
+        let (a, _) = hub.subscribe(&p, 0, 60, 8000, vec![], Arc::new(Counter::default())).unwrap();
+        let (b, _) = hub.subscribe(&p, 0, 60, 8000, vec![], Arc::new(Counter::default())).unwrap();
+        hub.set_client_cursor(&p, 0, a, true);
+        assert_eq!(fp.cursor_off.load(Ordering::Relaxed), 0, "还有人要画面里的光标");
+        hub.set_client_cursor(&p, 0, b, true);
+        assert_eq!(fp.cursor_off.load(Ordering::Relaxed), 1);
+        // 新来一个默认要光标的会话：加入时画面里立即重新画
+        let (c, _) = hub.subscribe(&p, 0, 60, 8000, vec![], Arc::new(Counter::default())).unwrap();
+        assert_eq!(fp.cursor_off.load(Ordering::Relaxed), 0);
+        // 它离开后又只剩自己画光标的会话
+        hub.unsubscribe(&p, 0, c);
+        assert_eq!(fp.cursor_off.load(Ordering::Relaxed), 1);
+        hub.unsubscribe(&p, 0, a);
+        hub.unsubscribe(&p, 0, b);
     }
 }

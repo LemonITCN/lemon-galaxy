@@ -350,6 +350,7 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
                         host.captures.set_bitrate(&platform, req.display_id, sub_id, k);
                     }
                     DisplayIn::Stop => break,
+                    DisplayIn::ClientCursor(on) => host.captures.set_client_cursor(&platform, req.display_id, sub_id, on),
                 }
             }
             adapt.abort();
@@ -620,6 +621,11 @@ impl FrameSink for VideoSender {
     fn resized(&self, width: u32, height: u32) {
         if let Some(tx) = self.ctl.lock().as_ref() {
             let _ = tx.try_send(DisplayOut::Resized { width, height });
+        }
+    }
+    fn cursor(&self, x: i32, y: i32, visible: bool) {
+        if let Some(tx) = self.ctl.lock().as_ref() {
+            let _ = tx.try_send(DisplayOut::Cursor { x, y, visible });
         }
     }
 }

@@ -28,6 +28,7 @@ struct Capture {
     sink: Arc<dyn FrameSink>,
     max_fps: u32,
     bitrate_kbps: u32,
+    cursor_in_video: bool,
 }
 
 struct Inner {
@@ -183,6 +184,12 @@ fn route(inner: &Inner, m: FromAgent) {
                 s.resized(width, height);
             }
         }
+        FromAgent::Cursor { display, x, y, visible } => {
+            let sink = inner.captures.lock().get(&display).map(|c| c.sink.clone());
+            if let Some(s) = sink {
+                s.cursor(x, y, visible);
+            }
+        }
         FromAgent::Audio { pcm, rate, channels } => {
             let sink = inner.audio.lock().clone();
             if let Some(s) = sink {
@@ -240,6 +247,9 @@ fn restart_captures(inner: &Arc<Inner>) {
         let r = request(inner, |id| ToAgent::StartCapture { id, display, max_fps: c.max_fps, bitrate_kbps: c.bitrate_kbps }, Duration::from_secs(8));
         if let Some(FromAgent::Started { result: Ok((w, h)), .. }) = r {
             c.sink.resized(w, h);
+            if !c.cursor_in_video {
+                send(inner, ToAgent::CursorInVideo { display, show: false });
+            }
         }
     }
 }
@@ -256,7 +266,7 @@ impl HostPlatform for WinPlatform {
         if !codecs.is_empty() && !codecs.contains(&VideoCodec::H264) {
             return Err("被控端只支持 H.264".into());
         }
-        self.inner.captures.lock().insert(display, Capture { sink, max_fps, bitrate_kbps });
+        self.inner.captures.lock().insert(display, Capture { sink, max_fps, bitrate_kbps, cursor_in_video: true });
         match request(&self.inner, |id| ToAgent::StartCapture { id, display, max_fps, bitrate_kbps }, Duration::from_secs(10)) {
             Some(FromAgent::Started { result: Ok((width, height)), .. }) => Ok(CaptureStarted { width, height, codec: VideoCodec::H264 }),
             Some(FromAgent::Started { result: Err(e), .. }) => {
@@ -287,6 +297,13 @@ impl HostPlatform for WinPlatform {
             c.bitrate_kbps = kbps;
         }
         send(&self.inner, ToAgent::SetBitrate { display, kbps });
+    }
+
+    fn set_cursor_in_video(&self, display: u32, show: bool) {
+        if let Some(c) = self.inner.captures.lock().get_mut(&display) {
+            c.cursor_in_video = show;
+        }
+        send(&self.inner, ToAgent::CursorInVideo { display, show });
     }
 
     fn inject(&self, display: u32, ev: InputEvent) {
@@ -409,7 +426,7 @@ impl HostPlatform for WinPlatform {
     }
 
     fn capabilities(&self) -> Vec<String> {
-        let mut c: Vec<String> = vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into()];
+        let mut c: Vec<String> = vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into(), "client_cursor".into()];
         if self.virtual_display_max() > 0 {
             c.push("virtual_display".into());
         }

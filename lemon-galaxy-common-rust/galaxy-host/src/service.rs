@@ -798,6 +798,9 @@ impl HostService {
         if perms.control && pc.iter().any(|x| x == "input") {
             c.push("input".into());
         }
+        if perms.view && pc.iter().any(|x| x == "client_cursor") {
+            c.push("client_cursor".into());
+        }
         // 隐私屏要有控制权限（开着时被控端本地键鼠失效）
         if perms.control && pc.iter().any(|x| x == "privacy") {
             c.push("privacy".into());

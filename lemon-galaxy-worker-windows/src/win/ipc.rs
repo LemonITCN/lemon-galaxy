@@ -25,6 +25,8 @@ pub enum ToAgent {
     VirtualRemove { id: u64, display: u32 },
     /// 查现有虚拟屏与是否需要无头兜底屏
     VirtualState { id: u64 },
+    /// 画面里画不画光标（主控端自己画光标时关掉）
+    CursorInVideo { display: u32, show: bool },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,6 +48,8 @@ pub enum FromAgent {
     VirtualAdded { id: u64, result: Result<DisplayInfo, String> },
     VirtualRemoved { id: u64, result: Result<(), String> },
     VirtualState { id: u64, ids: Vec<u32>, needs_headless: bool },
+    /// 光标热点在画面里的位置（画面像素），变化时才发
+    Cursor { display: u32, x: i32, y: i32, visible: bool },
 }
 
 impl FromAgent {

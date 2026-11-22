@@ -389,6 +389,9 @@ pub enum DisplayIn {
     RequestKeyframe,
     SetBitrate(u32),
     Stop,
+    /// 主控端自己在本地画光标（跟手）：被控端发出的画面里不画光标，只在位置变化时发 Cursor。
+    /// 加在末尾，老版本被控端收到会关流——主控端只在能力列表有 "client_cursor" 时才发。
+    ClientCursor(bool),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

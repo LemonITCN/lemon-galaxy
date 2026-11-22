@@ -60,6 +60,8 @@ pub trait HostPlatform: Send + Sync {
     fn stop_capture(&self, display_id: u32);
     fn request_keyframe(&self, display_id: u32);
     fn set_bitrate(&self, display_id: u32, kbps: u32);
+    /// 画面里要不要画光标（主控端在本地画时关掉）；支持时在 capabilities 里报 "client_cursor"。
+    fn set_cursor_in_video(&self, display_id: u32, show: bool);
     /// 坐标是 `display_id` 这块屏幕的像素。
     fn inject(&self, display_id: u32, event: InputEvent);
     fn screenshot(&self, display_id: u32, max_width: u32, max_height: u32) -> Option<ImageData>;

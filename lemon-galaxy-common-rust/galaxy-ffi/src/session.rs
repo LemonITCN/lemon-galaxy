@@ -581,6 +581,7 @@ enum DispCmd {
     Input(pp::InputEvent),
     Keyframe,
     Bitrate(u32),
+    ClientCursor(bool),
     Stop,
 }
 
@@ -610,6 +611,7 @@ impl DisplayChannel {
                     DispCmd::Input(e) => ch.send_input(e).await,
                     DispCmd::Keyframe => ch.request_keyframe().await,
                     DispCmd::Bitrate(k) => ch.set_bitrate(k).await,
+                    DispCmd::ClientCursor(on) => ch.set_client_cursor(on).await,
                     DispCmd::Stop => {
                         ch.stop().await;
                         sink.on_closed("stopped".into());
@@ -632,6 +634,11 @@ impl DisplayChannel {
     }
     pub fn set_bitrate(&self, kbps: u32) {
         let _ = self.tx.send(DispCmd::Bitrate(kbps));
+    }
+    /// 主控端在本地画光标（跟手）：被控端画面里不再画光标，位置变化经 VideoSink.on_cursor 告知。
+    /// 只在对端能力列表有 "client_cursor" 时调用。
+    pub fn set_client_cursor(&self, on: bool) {
+        let _ = self.tx.send(DispCmd::ClientCursor(on));
     }
     pub fn stop(&self) {
         if self.ch.is_recording() {

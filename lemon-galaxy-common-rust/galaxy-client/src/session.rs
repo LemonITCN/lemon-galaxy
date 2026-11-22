@@ -697,6 +697,10 @@ impl DisplayChannel {
     pub async fn request_keyframe(&self) {
         let _ = frame::write(&mut *self.send.lock().await, &DisplayIn::RequestKeyframe).await;
     }
+    /// 主控端自己画光标（被控端能力里有 "client_cursor" 才发）。
+    pub async fn set_client_cursor(&self, on: bool) {
+        let _ = frame::write(&mut *self.send.lock().await, &DisplayIn::ClientCursor(on)).await;
+    }
     pub async fn set_bitrate(&self, kbps: u32) {
         let _ = frame::write(&mut *self.send.lock().await, &DisplayIn::SetBitrate(kbps)).await;
     }

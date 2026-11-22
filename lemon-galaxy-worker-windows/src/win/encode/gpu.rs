@@ -228,10 +228,12 @@ impl Gpu {
     }
 
     /// 画上光标并转成 NV12，返回这次写入的 NV12 纹理。
-    pub fn convert(&mut self, mon: &Monitor) -> anyhow::Result<ID3D11Texture2D> {
+    pub fn convert(&mut self, mon: &Monitor, cursor: bool) -> anyhow::Result<ID3D11Texture2D> {
         unsafe {
             self.ctx.CopyResource(&self.composed, &self.desktop);
-            self.draw_cursor(mon);
+            if cursor {
+                self.draw_cursor(mon);
+            }
             let (tex, view) = &self.outputs[self.next];
             self.next = (self.next + 1) % self.outputs.len();
             let stream = D3D11_VIDEO_PROCESSOR_STREAM { Enable: true.into(), pInputSurface: ManuallyDrop::new(Some(self.input.clone())), ..Default::default() };

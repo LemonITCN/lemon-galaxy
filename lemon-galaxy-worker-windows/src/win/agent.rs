@@ -14,13 +14,15 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{FILETIME, POINT};
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, GetCursorPos, CURSORINFO, CURSOR_SHOWING};
 
 struct CaptureCtl {
     stop: AtomicBool,
     keyframe: AtomicBool,
     bitrate: AtomicU32,
     reconfig: AtomicBool,
+    /// 画面里画光标；关掉时只上报光标位置
+    cursor_in_video: AtomicBool,
 }
 
 enum VdJob {
@@ -184,7 +186,7 @@ pub fn main() -> i32 {
                 if let Some(old) = captures.remove(&display) {
                     old.stop.store(true, Ordering::Relaxed);
                 }
-                let ctl = Arc::new(CaptureCtl { stop: AtomicBool::new(false), keyframe: AtomicBool::new(true), bitrate: AtomicU32::new(bitrate_kbps), reconfig: AtomicBool::new(false) });
+                let ctl = Arc::new(CaptureCtl { stop: AtomicBool::new(false), keyframe: AtomicBool::new(true), bitrate: AtomicU32::new(bitrate_kbps), reconfig: AtomicBool::new(false), cursor_in_video: AtomicBool::new(true) });
                 captures.insert(display, ctl.clone());
                 let out = out_tx.clone();
                 std::thread::spawn(move || capture_thread(id, display, max_fps.clamp(1, 60), ctl, out));
@@ -203,6 +205,11 @@ pub fn main() -> i32 {
                 if let Some(c) = captures.get(&display) {
                     c.bitrate.store(kbps, Ordering::Relaxed);
                     c.reconfig.store(true, Ordering::Relaxed);
+                }
+            }
+            ToAgent::CursorInVideo { display, show } => {
+                if let Some(c) = captures.get(&display) {
+                    c.cursor_in_video.store(show, Ordering::Relaxed);
                 }
             }
             ToAgent::Inject { display, ev } => {
@@ -243,6 +250,11 @@ fn cursor_pos() -> (i32, i32) {
     (p.x, p.y)
 }
 
+fn cursor_showing() -> bool {
+    let mut ci = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
+    unsafe { GetCursorInfo(&mut ci).is_ok() && ci.flags.0 & CURSOR_SHOWING.0 != 0 }
+}
+
 /// 重开截屏：先放掉旧的桌面复制再建新的。`prefer` 是编码器的设备（同一块显卡就共用，零拷贝）。
 fn reopen(cap: &mut Box<dyn Capturer>, mon: &Monitor, fps: u32, prefer: Option<&ID3D11Device>) {
     *cap = Box::new(GdiCapturer::new(mon, fps));
@@ -270,6 +282,8 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
     let mut have = false;
     let mut last_sent = Instant::now();
     let mut last_cursor = (i32::MIN, i32::MIN);
+    let mut last_report: Option<(i32, i32, bool)> = None;
+    let mut last_in_video = true;
     let mut failures = 0u32;
     // 硬件编码连续出错后，这次采集改用软件编码
     let mut hw_allowed = true;
@@ -391,10 +405,26 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
         }
         let cursor = cursor_pos();
         let need_key = ctl.keyframe.swap(false, Ordering::Relaxed);
-        // 画面变了、光标动了、要关键帧、或空闲超过 1 秒（保活）时才编码
-        if changed || need_key || cursor != last_cursor || last_sent.elapsed() > Duration::from_secs(1) {
+        let in_video = ctl.cursor_in_video.load(Ordering::Relaxed);
+        // 主控端自己画光标：光标变了就报位置（换算到画面像素），画面里不画
+        if !in_video {
+            let (w, h) = (mon.width().max(1) as i64, mon.height().max(1) as i64);
+            let (rx, ry) = ((cursor.0 - mon.rect.left) as i64, (cursor.1 - mon.rect.top) as i64);
+            let visible = cursor_showing() && rx >= 0 && ry >= 0 && rx < w && ry < h;
+            let report = ((rx * e.width as i64 / w) as i32, (ry * e.height as i64 / h) as i32, visible);
+            if Some(report) != last_report {
+                last_report = Some(report);
+                let _ = out.try_send(FromAgent::Cursor { display, x: report.0, y: report.1, visible: report.2 });
+            }
+        } else {
+            last_report = None;
+        }
+        let toggled = in_video != last_in_video;
+        last_in_video = in_video;
+        // 画面变了、画面里的光标动了、要关键帧、或空闲超过 1 秒（保活）时才编码
+        if changed || need_key || toggled || (in_video && cursor != last_cursor) || last_sent.elapsed() > Duration::from_secs(1) {
             last_cursor = cursor;
-            match e.encode(&frame, &mon, need_key, t0.elapsed().as_micros() as u64) {
+            match e.encode(&frame, &mon, in_video, need_key, t0.elapsed().as_micros() as u64) {
                 Ok(frames) => {
                     enc_errors = 0;
                     for f in frames {
@@ -509,7 +539,7 @@ fn bench(label: &str, req: &Request, mon: &Monitor, base: &Frame, cap: &mut Box<
             }
         }
         let t = Instant::now();
-        match e.encode(&cur, mon, i == 0, w0.elapsed().as_micros() as u64) {
+        match e.encode(&cur, mon, true, i == 0, w0.elapsed().as_micros() as u64) {
             Ok(fs) => {
                 times.push(t.elapsed().as_secs_f64() * 1000.0);
                 check(&fs, &mut stream, &mut sizes);
@@ -578,7 +608,7 @@ fn bench(label: &str, req: &Request, mon: &Monitor, base: &Frame, cap: &mut Box<
         }
         let t = Instant::now();
         e.upload(&syn);
-        match e.encode(&syn, mon, i == 0 || i == 75, (i as u64 + 1000) * 33_333) {
+        match e.encode(&syn, mon, true, i == 0 || i == 75, (i as u64 + 1000) * 33_333) {
             Ok(fs) => {
                 times.push(t.elapsed().as_secs_f64() * 1000.0);
                 let s = &mut seg[(i / 30) as usize];
@@ -610,7 +640,7 @@ fn bench(label: &str, req: &Request, mon: &Monitor, base: &Frame, cap: &mut Box<
             let mut sz = Vec::new();
             for i in 0..10u32 {
                 e2.upload(&half);
-                match e2.encode(&half, mon, i == 0, i as u64 * 33_333) {
+                match e2.encode(&half, mon, true, i == 0, i as u64 * 33_333) {
                     Ok(fs) => check(&fs, &mut stream, &mut sz),
                     Err(err) => {
                         println!("      {hw}x{hh} 编码失败：{err}");
@@ -641,7 +671,7 @@ fn bench(label: &str, req: &Request, mon: &Monitor, base: &Frame, cap: &mut Box<
 fn agent_run(secs: u64, dump: Option<&std::path::Path>) {
     let Some(mon) = find_monitor(0) else { return };
     let (tx, rx) = mpsc::sync_channel::<FromAgent>(64);
-    let ctl = Arc::new(CaptureCtl { stop: AtomicBool::new(false), keyframe: AtomicBool::new(true), bitrate: AtomicU32::new(6000), reconfig: AtomicBool::new(false) });
+    let ctl = Arc::new(CaptureCtl { stop: AtomicBool::new(false), keyframe: AtomicBool::new(true), bitrate: AtomicU32::new(6000), reconfig: AtomicBool::new(false), cursor_in_video: AtomicBool::new(true) });
     let c2 = ctl.clone();
     let th = std::thread::spawn(move || capture_thread(1, mon.id, 30, c2, tx));
     let t0 = Instant::now();
@@ -760,7 +790,7 @@ pub fn selftest(args: &[String]) -> i32 {
                 let mut bytes = 0;
                 let mut fail = None;
                 for i in 0..10 {
-                    match e.encode(&f, m, i == 0, i as u64 * 33_333) {
+                    match e.encode(&f, m, true, i == 0, i as u64 * 33_333) {
                         Ok(fs) => bytes += fs.iter().map(|x| x.data.len()).sum::<usize>(),
                         Err(err) => fail = Some(err),
                     }

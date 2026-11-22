@@ -251,15 +251,17 @@ impl VideoEncoder {
         }
     }
 
-    /// 画上光标并编码当前画面。`frame` 只有软件编码用（硬件编码用 `upload` / 零拷贝进来的画面）。
-    pub fn encode(&mut self, frame: &Frame, mon: &Monitor, keyframe: bool, pts_us: u64) -> anyhow::Result<Vec<EncodedFrame>> {
+    /// 画上光标（`cursor` 为 false 时不画）并编码当前画面。`frame` 只有软件编码用（硬件编码用 `upload` / 零拷贝进来的画面）。
+    pub fn encode(&mut self, frame: &Frame, mon: &Monitor, cursor: bool, keyframe: bool, pts_us: u64) -> anyhow::Result<Vec<EncodedFrame>> {
         match &mut self.inner {
             Inner::Soft { enc, work } => {
                 work.width = frame.width;
                 work.height = frame.height;
                 work.data.clear();
                 work.data.extend_from_slice(&frame.data);
-                draw_cursor(work, mon);
+                if cursor {
+                    draw_cursor(work, mon);
+                }
                 if keyframe {
                     enc.force_keyframe();
                 }
@@ -272,7 +274,7 @@ impl VideoEncoder {
                 })
             }
             Inner::Hw { gpu, enc } => {
-                let nv12 = gpu.convert(mon)?;
+                let nv12 = gpu.convert(mon, cursor)?;
                 enc.encode(&nv12, keyframe, pts_us)
             }
         }
