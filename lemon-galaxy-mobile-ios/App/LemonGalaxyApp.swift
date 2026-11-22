@@ -3,6 +3,7 @@ import GalaxyKit
 
 @main
 struct LemonGalaxyApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var app = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 

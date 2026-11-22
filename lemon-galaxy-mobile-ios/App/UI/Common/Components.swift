@@ -142,6 +142,28 @@ struct TagChip: View {
     }
 }
 
+/// 连接路径的简称与颜色（局域网 / 直连为绿，中转为黄）
+enum PathStyle {
+    static func label(_ kind: PathKind, _ loc: Strings) -> String {
+        switch kind {
+        case .lan: return loc("path.lan")
+        case .direct: return loc("path.direct")
+        case .relayUdp: return loc("path.relay")
+        case .relayTcp: return loc("path.relayTcp")
+        case .connecting: return loc("path.connecting")
+        case .closed: return loc("path.closed")
+        }
+    }
+
+    static func color(_ kind: PathKind, _ p: Palette) -> Color {
+        switch kind {
+        case .lan, .direct: return p.success
+        case .relayUdp, .relayTcp: return p.warning
+        case .connecting, .closed: return p.offline
+        }
+    }
+}
+
 /// 连接路径：局域网 / 直连 / 中转 + 往返时延
 struct PathBadge: View {
     let path: PathInfo
@@ -158,24 +180,9 @@ struct PathBadge: View {
         }
     }
 
-    var label: String {
-        switch path.kind {
-        case .lan: return loc("path.lan")
-        case .direct: return loc("path.direct")
-        case .relayUdp: return loc("path.relay")
-        case .relayTcp: return loc("path.relayTcp")
-        case .connecting: return loc("path.connecting")
-        case .closed: return loc("path.closed")
-        }
-    }
+    var label: String { PathStyle.label(path.kind, loc) }
 
-    var color: Color {
-        switch path.kind {
-        case .lan, .direct: return p.success
-        case .relayUdp, .relayTcp: return p.warning
-        case .connecting, .closed: return p.offline
-        }
-    }
+    var color: Color { PathStyle.color(path.kind, p) }
 }
 
 struct EmptyState: View {

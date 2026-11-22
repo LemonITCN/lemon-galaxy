@@ -38,7 +38,11 @@ final class RemoteSession: ObservableObject, Identifiable {
     @Published private(set) var recordingBusy = false
     /// 停止后要给用户看的录像（弹「已保存」，可分享或存到相册）
     @Published var savedRecording: SavedRecording?
+    /// 画面是否放大 / 是否原始像素（菜单「视图」用；只在这几项变化时发布，捏合过程中不跟着每帧刷新）
+    @Published private(set) var viewFlags = ViewportFlags()
     let canvas = RemoteCanvasView()
+    /// 画面上方的短暂提示（缩放倍数、切换显示器、操作方式）
+    let hud = RemoteHud()
     weak var app: AppModel?
 
     private var channel: DisplayChannel?
@@ -67,6 +71,12 @@ final class RemoteSession: ObservableObject, Identifiable {
         canvas.mouseMode = mouseMode
         canvas.platform = platform
         canvas.send = { [weak self] events in self?.send(events) }
+        canvas.onViewportChange = { [weak self] v, reason in
+            guard let self else { return }
+            let flags = ViewportFlags(v)
+            if flags != self.viewFlags { self.viewFlags = flags }
+            if reason == .gesture { self.hud.show(L("remote.zoomLevel", Int((v.zoom * 100).rounded()))) }
+        }
         let display = canvas.displayLayer
         decoder.onFrame = { [weak self] pb, _ in
             DispatchQueue.main.async {
@@ -210,10 +220,14 @@ final class RemoteSession: ObservableObject, Identifiable {
             decoder.configure(codec: codec)
             DispatchQueue.main.async {
                 guard let self else { return }
+                let size = CGSize(width: Int(w), height: Int(h))
+                let changed = self.status == .streaming && self.videoSize != .zero && self.videoSize != size
                 self.codec = codec
-                self.videoSize = CGSize(width: Int(w), height: Int(h))
+                self.videoSize = size
                 // 没拿到屏幕信息时按码流尺寸摆放
                 if self.display == nil { self.canvas.setRemoteSize(Int(w), Int(h)) }
+                // 画面中途变了尺寸（对方改分辨率）：重新取屏幕信息，输入坐标和画面比例跟着更新
+                if changed { self.refreshDisplays() }
             }
         }
         adapter.onData = { data, pts, key in decoder.decode(data, ptsUs: pts, keyframe: key) }
@@ -237,6 +251,16 @@ final class RemoteSession: ObservableObject, Identifiable {
             startAudioIfWanted()
         } catch {
             status = .failed(describeError(error))
+        }
+    }
+
+    /// 重新取屏幕列表（分辨率变化后）；失败不影响画面
+    private func refreshDisplays() {
+        guard let peer else { return }
+        Task {
+            guard let list = try? await peer.session.listDisplays(), !list.isEmpty else { return }
+            displays = list
+            if let d = display { canvas.setRemoteSize(Int(d.width), Int(d.height)) }
         }
     }
 

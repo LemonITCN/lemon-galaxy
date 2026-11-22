@@ -19,50 +19,76 @@ struct RemoteCanvasHost: UIViewRepresentable {
     }
 }
 
-/// 远程桌面：画面占满，右侧一个可拖动的悬浮球，点开是工具栏（屏幕、画质、输入方式、键盘、快捷键、声音、录像、隐私屏、剪贴板、断开）。
+/// 右侧菜单的二级面板
+enum RemotePanel: Equatable {
+    case display, shortcuts, tools
+}
+
+/// 右侧菜单里要由画面层处理的操作（其余直接调 RemoteSession）
+struct DockActions {
+    let switchDisplay: (Int) -> Void
+    let pickDisplay: (UInt32) -> Void
+    let keyboard: () -> Void
+    let mouseMode: () -> Void
+    let fit: () -> Void
+    let actualSize: () -> Void
+    /// 只有 iPhone 有（横屏 / 竖屏切换）
+    let rotate: ((_ portraitNow: Bool) -> Void)?
+    let files: () -> Void
+    let disconnect: () -> Void
+    /// iPhone 全屏层：收起画面回到列表（会话照常运行）
+    let minimize: (() -> Void)?
+}
+
+/// 远程桌面：画面占满（始终保持被控屏幕比例）+ 手势 + 右侧贴边菜单（与安卓端一致）。
+/// 收起时是贴右边缘的把手：轻点展开，上下滑动切换显示器，长按后拖动改位置；
+/// 展开是右侧竖排菜单，二级面板（显示器、快捷键、工具）从菜单左侧弹出。
 struct RemoteScreen: View {
     @ObservedObject var session: RemoteSession
     var onMinimize: (() -> Void)?
     @EnvironmentObject var app: AppModel
     @Environment(\.loc) private var loc
-    @State private var toolbarOpen = false
-    @State private var ball = CGPoint(x: -1, y: -1)
-    @State private var dragStart: CGPoint?
+    @State private var expanded = false
+    @State private var panel: RemotePanel?
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .topLeading) {
-                RemoteCanvasHost(session: session)
-                    .ignoresSafeArea()
-                statusOverlay
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if toolbarOpen {
-                    toolbar
-                        .frame(maxWidth: .infinity, alignment: .top)
-                        .padding(.top, 8)
-                        .padding(.horizontal, 10)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                } else if let start = session.recordingStartedAt {
-                    // 工具栏收起时也看得到在录像
-                    RecordingBadge(start: start)
-                        .frame(maxWidth: .infinity, alignment: .top)
-                        .padding(.top, 8)
-                }
-                floatingBall(in: geo.size)
-            }
+        ZStack {
+            // 只铺满容器安全区以外的区域：弹出键盘时画面让出键盘的位置（保持倍数与中心）
+            RemoteCanvasHost(session: session)
+                .ignoresSafeArea(.container)
+            statusOverlay
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            recordingBadge
+            RemoteNoticeLayer(hud: session.hud)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 16)
+            RemoteDock(session: session, actions: dockActions, expanded: $expanded, panel: $panel)
         }
         .background(Color.black.ignoresSafeArea())
+        .environment(\.palette, Palettes.make("galaxy", dark: true))
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .onAppear { session.canvas.onHideKeyboard = { setKeyboard(false) } }
-        // 离开画面（收起、切到别的会话）就停止录像
-        .onDisappear { session.stopRecording(.left) }
+        .onDisappear {
+            // 离开画面（收起、切到别的会话）就停止录像，并解除方向锁定
+            session.stopRecording(.left)
+            OrientationLock.release()
+        }
         .modifier(RecordingSavedAlert(session: session))
     }
 
     private func setKeyboard(_ on: Bool) {
         session.keyboardShown = on
         if on { _ = session.canvas.becomeFirstResponder() } else { _ = session.canvas.resignFirstResponder() }
+    }
+
+    /// 菜单收起时左上角一直显示录像中（红点 + 计时）
+    @ViewBuilder private var recordingBadge: some View {
+        if let start = session.recordingStartedAt, !expanded {
+            RecordingBadge(start: start)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(12)
+        }
     }
 
     @ViewBuilder private var statusOverlay: some View {
@@ -75,281 +101,71 @@ struct RemoteScreen: View {
                 Text(loc("remote.connecting")).font(.subheadline).foregroundStyle(.white.opacity(0.8))
             }
         case .failed(let m):
-            VStack(spacing: 14) {
-                Image(systemName: "display.trianglebadge.exclamationmark").font(.system(size: 34)).foregroundStyle(.white.opacity(0.8))
-                Text(m.isEmpty ? loc("remote.failed") : m).font(.subheadline).foregroundStyle(.white).multilineTextAlignment(.center)
-                HStack {
-                    Button(loc("common.retry")) { session.retry() }.buttonStyle(.borderedProminent)
-                    Button(loc("remote.disconnect")) { app.sessions.close(session.id) }.buttonStyle(.bordered).tint(.white)
-                }
-            }
-            .padding(24)
-            .frame(maxWidth: 340)
+            failedView(m)
         }
     }
 
-    private func floatingBall(in size: CGSize) -> some View {
-        let d: CGFloat = 48
-        let pos = ball.x < 0 ? CGPoint(x: size.width - d / 2 - 14, y: size.height * 0.4) : ball
-        return ZStack {
-            Circle().fill(Color(hex: "#1B1E2B").opacity(0.82))
-            Circle().stroke(Color.white.opacity(0.25), lineWidth: 1)
-            Image(systemName: toolbarOpen ? "xmark" : "slider.horizontal.3")
-                .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(toolbarOpen ? Color.white : Color(hex: "#C6E35A"))
+    private func failedView(_ m: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "display.trianglebadge.exclamationmark").font(.system(size: 34)).foregroundStyle(.white.opacity(0.8))
+            Text(m.isEmpty ? loc("remote.failed") : m).font(.subheadline).foregroundStyle(.white).multilineTextAlignment(.center)
+            HStack {
+                Button(loc("common.retry")) { session.retry() }.buttonStyle(.borderedProminent)
+                Button(loc("remote.disconnect")) { app.sessions.close(session.id) }.buttonStyle(.bordered).tint(.white)
+            }
         }
-        .frame(width: d, height: d)
-        .contentShape(Circle())
-        .position(pos)
-        .gesture(
-            DragGesture(minimumDistance: 4)
-                .onChanged { v in
-                    if dragStart == nil { dragStart = pos }
-                    let s = dragStart!
-                    ball = CGPoint(x: min(max(s.x + v.translation.width, d / 2), size.width - d / 2),
-                                   y: min(max(s.y + v.translation.height, d / 2), size.height - d / 2))
-                }
-                .onEnded { _ in dragStart = nil }
+        .padding(24)
+        .frame(maxWidth: 340)
+    }
+
+    // MARK: 菜单操作
+
+    private var dockActions: DockActions {
+        DockActions(
+            switchDisplay: switchDisplay,
+            pickDisplay: pickDisplay,
+            keyboard: toggleKeyboard,
+            mouseMode: toggleMouseMode,
+            fit: { session.canvas.fitToScreen() },
+            actualSize: { session.canvas.actualSize() },
+            rotate: OrientationLock.supported ? { OrientationLock.toggle(portraitNow: $0) } : nil,
+            files: { app.openFiles(.device(session.deviceId)) },
+            disconnect: { app.sessions.close(session.id) },
+            minimize: onMinimize
         )
-        .onTapGesture { withAnimation(.spring(response: 0.3)) { toolbarOpen.toggle() } }
-        .accessibilityLabel(loc("remote.toolbar"))
     }
 
-    // 工具栏拆成小块、字符串先算好再交给视图：大的 ViewBuilder 表达式在较慢的机器上会超出编译器的类型检查时限
-    private var toolbar: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            toolbarHeader
-            ScrollView(.horizontal, showsIndicators: false) {
-                toolbarButtons
-            }
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 6)
-        .frame(maxWidth: 720)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(hex: "#1B1E2B").opacity(0.94)))
-        .shadow(color: .black.opacity(0.4), radius: 14, y: 6)
+    /// 循环切换：两块屏时上滑下滑都能换过去
+    private func switchDisplay(_ step: Int) {
+        let ids = session.displays.map(\.id)
+        guard let next = DisplayCycle.next(after: session.displayId, in: ids, step: step) else { return }
+        pickDisplay(next)
     }
 
-    private var toolbarHeader: some View {
-        HStack(spacing: 10) {
-            Text(session.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-            if let p = session.peer { PathBadge(path: p.path, light: true) }
-            if let d = session.display {
-                let stats: String = "\(d.width)×\(d.height) · \(session.fps) fps"
-                Text(stats)
-                    .font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(0.7))
-            }
-            Spacer(minLength: 0)
-            InfoButton(text: loc("remote.modeInfo"))
-                .environment(\.palette, Palettes.make("galaxy", dark: true))
-        }
-        .padding(.horizontal, 8)
+    private func pickDisplay(_ id: UInt32) {
+        if let d = session.displays.first(where: { $0.id == id }) { showDisplay(d) }
+        session.switchDisplay(id)
     }
 
-    private var toolbarButtons: some View {
-        HStack(spacing: 2) {
-            if let onMinimize {
-                ToolButton(icon: "chevron.down", label: loc("session.minimize")) { onMinimize() }
-            }
-            displayMenu
-            qualityMenu
-            inputModeButton
-            ToolButton(icon: "keyboard", label: loc("remote.keyboard"), active: session.keyboardShown) {
-                setKeyboard(!session.keyboardShown)
-                toolbarOpen = false
-            }
-            shortcutsMenu
-            mediaButtons
-            clipboardMenu
-            ToolButton(icon: "xmark.circle", label: loc("remote.disconnect"), danger: true) {
-                app.sessions.close(session.id)
-            }
-        }
+    /// 「显示器 2 / 3」+「名称 · 分辨率 · 主屏」
+    private func showDisplay(_ d: DisplayInfo) {
+        let ids = session.displays.map(\.id)
+        let i = DisplayCycle.index(of: d.id, in: ids)
+        var sub: String = d.name + " · \(d.width)×\(d.height)"
+        if d.primary { sub += " · " + loc("remote.primary") }
+        session.hud.show(loc("remote.displayN", i + 1, ids.count), sub)
     }
 
-    private func displayTitle(_ d: DisplayInfo) -> String {
-        var t: String = d.name + "  \(d.width)×\(d.height)"
-        if d.primary { t += " · " + loc("remote.primary") }
-        if d.isVirtual { t += " · " + loc("remote.virtual") }
-        return t
+    private func toggleKeyboard() {
+        setKeyboard(!session.keyboardShown)
+        expanded = false
+        panel = nil
     }
 
-    private var displayMenu: some View {
-        Menu {
-            ForEach(session.displays, id: \.id) { (d: DisplayInfo) in
-                let icon: String = d.id == session.displayId ? "checkmark" : "display"
-                Button {
-                    session.switchDisplay(d.id)
-                } label: {
-                    Label(displayTitle(d), systemImage: icon)
-                }
-            }
-        } label: { ToolLabel(icon: "display.2", label: loc("remote.display")) }
-    }
-
-    private func qualityTitle(_ q: VideoQuality) -> String {
-        let name: String = loc("quality." + q.rawValue)
-        guard q.bitrateKbps > 0 else { return name }
-        return name + " · \(q.bitrateKbps / 1000) Mbps"
-    }
-
-    private var qualityMenu: some View {
-        Menu {
-            ForEach(VideoQuality.allCases) { (q: VideoQuality) in
-                let icon: String = q == session.quality ? "checkmark" : "dial.medium"
-                Button {
-                    session.setQuality(q)
-                } label: {
-                    Label(qualityTitle(q), systemImage: icon)
-                }
-            }
-        } label: { ToolLabel(icon: "sparkles.tv", label: loc("quality." + session.quality.rawValue)) }
-    }
-
-    private var inputModeButton: some View {
-        let mouse: Bool = session.mouseMode
-        let icon: String = mouse ? "cursorarrow.motionlines" : "hand.tap"
-        let label: String = loc(mouse ? "remote.modeMouse" : "remote.modeTouch")
-        return ToolButton(icon: icon, label: label, active: mouse) {
-            session.mouseMode.toggle()
-            app.settings.remoteMouseMode = session.mouseMode
-        }
-    }
-
-    private var shortcutsMenu: some View {
-        let list: [RemoteShortcut] = RemoteShortcuts.list(for: session.platform)
-        let common: [RemoteShortcut] = list.filter { $0.group == 0 }
-        let system: [RemoteShortcut] = list.filter { $0.group == 1 }
-        return Menu {
-            Section {
-                ForEach(common) { (s: RemoteShortcut) in
-                    Button(loc("combo." + s.id)) { session.send(s.events) }
-                }
-            }
-            Section {
-                ForEach(system) { (s: RemoteShortcut) in
-                    Button(loc("combo." + s.id)) { session.send(s.events) }
-                }
-            }
-        } label: { ToolLabel(icon: "command", label: loc("remote.shortcuts")) }
-    }
-
-    /// 声音、录像、隐私屏（单独成组：一个 ViewBuilder 块里的子视图不超过 10 个）
-    @ViewBuilder private var mediaButtons: some View {
-        if session.supportsAudio { soundButton }
-        RecordButton(session: session)
-        if session.supportsPrivacy { privacyButton }
-    }
-
-    private var soundButton: some View {
-        let on: Bool = session.audioOn
-        let icon: String = on ? "speaker.wave.2.fill" : "speaker.slash"
-        return ToolButton(icon: icon, label: loc("remote.sound"), active: on) {
-            session.setAudio(!on)
-        }
-        .disabled(session.audioBusy)
-    }
-
-    private var privacyButton: some View {
-        let on: Bool = session.privacyOn
-        let icon: String = on ? "eye.slash.fill" : "eye.slash"
-        return ToolButton(icon: icon, label: loc("remote.privacy"), active: on) {
-            session.setPrivacy(!on)
-        }
-        .disabled(session.privacyBusy)
-    }
-
-    private var clipboardMenu: some View {
-        Menu {
-            Button { session.sendClipboard() } label: { Label(loc("remote.sendClipboard"), systemImage: "arrow.up.doc.on.clipboard") }
-            Button { session.fetchClipboard() } label: { Label(loc("remote.getClipboard"), systemImage: "arrow.down.doc") }
-        } label: { ToolLabel(icon: "doc.on.clipboard", label: loc("remote.clipboard")) }
-    }
-}
-
-private struct ToolLabel: View {
-    let icon: String
-    let label: String
-    var active = false
-    var danger = false
-    var body: some View {
-        let tint: Color = danger ? Color(hex: "#FF7A85") : (active ? Color(hex: "#C6E35A") : .white)
-        VStack(spacing: 4) {
-            Image(systemName: icon).font(.system(size: 19)).frame(height: 22)
-            Text(label).font(.caption2).lineLimit(1)
-        }
-        .foregroundStyle(tint)
-        .frame(minWidth: 58)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
-        .contentShape(Rectangle())
-    }
-}
-
-/// 录像按钮：录制中变成红色停止键，标签是计时
-private struct RecordButton: View {
-    @ObservedObject var session: RemoteSession
-    @Environment(\.loc) private var loc
-
-    var body: some View {
-        let recording: Bool = session.isRecording
-        let disabled: Bool = session.recordingBusy || (!recording && session.status != .streaming)
-        let a11y: String = loc(recording ? "remote.recordStop" : "remote.record")
-        Button { session.toggleRecording() } label: { label }
-            .buttonStyle(.plain)
-            .disabled(disabled)
-            .opacity(disabled ? 0.5 : 1)
-            .accessibilityLabel(a11y)
-    }
-
-    @ViewBuilder private var label: some View {
-        if let start = session.recordingStartedAt {
-            TimelineView(.periodic(from: start, by: 1)) { ctx in
-                ToolLabel(icon: "stop.circle.fill", label: RecordingClock.text(since: start, now: ctx.date), danger: true)
-            }
-        } else {
-            ToolLabel(icon: "record.circle", label: loc("remote.record"))
-        }
-    }
-}
-
-/// 工具栏收起时画面顶部的红点与计时（不挡触控）
-private struct RecordingBadge: View {
-    let start: Date
-
-    var body: some View {
-        TimelineView(.periodic(from: start, by: 1)) { ctx in
-            badge(RecordingClock.text(since: start, now: ctx.date))
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-
-    private func badge(_ text: String) -> some View {
-        HStack(spacing: 6) {
-            Circle().fill(Color(hex: "#FF4D5E")).frame(width: 8, height: 8)
-            Text(text).font(.caption.monospacedDigit().weight(.semibold)).foregroundStyle(.white)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Capsule().fill(Color.black.opacity(0.6)))
-    }
-}
-
-enum RecordingClock {
-    static func text(since start: Date, now: Date) -> String {
-        Fmt.elapsed(Int(now.timeIntervalSince(start)))
-    }
-}
-
-private struct ToolButton: View {
-    let icon: String
-    let label: String
-    var active = false
-    var danger = false
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) { ToolLabel(icon: icon, label: label, active: active, danger: danger) }
-            .buttonStyle(.plain)
+    private func toggleMouseMode() {
+        let on = !session.mouseMode
+        session.mouseMode = on
+        app.settings.remoteMouseMode = on
+        session.hud.show(loc(on ? "remote.modeMouse" : "remote.modeTouch"), loc(on ? "remote.modeMouseHint" : "remote.modeTouchHint"))
     }
 }

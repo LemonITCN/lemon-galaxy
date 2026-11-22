@@ -6,17 +6,21 @@ import GalaxyKit
 /// 远程画面 + 手势 + 键盘。
 /// 触控模式：点哪里点哪里，长按右键，拖动即按住左键拖。
 /// 鼠标（触控板）模式：单指移动光标，单指轻点左键，双指轻点右键，双指拖动滚轮，长按后移动是拖拽。
-/// 两种模式都能双指捏合缩放；放大后触控模式双指拖动平移，鼠标模式画面跟随光标。
+/// 两种模式都能双指捏合缩放（以双指中心为准，画面始终保持被控屏幕比例），双指双击在适应屏幕与放大之间切换；
+/// 放大后触控模式双指拖动平移，鼠标模式画面跟随光标。单指双击不拦截，照常发两次单击（被控端收到的就是双击）。
+/// 光标由被控端画进画面里，这里不再叠加本地箭头，只记住光标位置（鼠标模式相对移动、画面跟随用）。
 final class RemoteCanvasView: UIView, UIKeyInput {
+    /// 画面摆放变化的原因：捏合 / 双指双击要提示倍数，其余（布局、菜单里的适应屏幕等）不提示
+    enum ViewportChange { case gesture, other }
+
     let displayLayer = AVSampleBufferDisplayLayer()
-    private let cursorLayer = CAShapeLayer()
     var send: (([InputEvent]) -> Void)?
-    var mouseMode = false { didSet { updateCursor() } }
+    var onViewportChange: ((Viewport, ViewportChange) -> Void)?
+    var mouseMode = false
     var viewOnly = false
     var platform: Platform = .windows
     private(set) var viewport = Viewport(containerW: 1, containerH: 1, remoteW: 1, remoteH: 1)
     private var cursor: (Int32, Int32) = (0, 0)
-    private var cursorVisible = false
 
     // 键盘上方特殊键的粘滞修饰键
     private var mods: [String: Bool] = [:]
@@ -27,15 +31,10 @@ final class RemoteCanvasView: UIView, UIKeyInput {
         backgroundColor = .black
         clipsToBounds = true
         isMultipleTouchEnabled = true
+        // 图层大小始终按被控屏幕比例摆放，拉伸填满即不变形
         displayLayer.videoGravity = .resize
         displayLayer.backgroundColor = UIColor.black.cgColor
         layer.addSublayer(displayLayer)
-        cursorLayer.path = Self.arrowPath()
-        cursorLayer.fillColor = UIColor.white.cgColor
-        cursorLayer.strokeColor = UIColor.black.cgColor
-        cursorLayer.lineWidth = 1.2
-        cursorLayer.isHidden = true
-        layer.addSublayer(cursorLayer)
         // iPad 外接鼠标 / 触控板：悬停移动光标、右键、双指滚动
         addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:))))
         let right = UITapGestureRecognizer(target: self, action: #selector(secondaryClick(_:)))
@@ -67,53 +66,42 @@ final class RemoteCanvasView: UIView, UIKeyInput {
 
     // MARK: 布局
 
+    /// 被控屏幕分辨率（换屏、对方改分辨率时回到适应屏幕；同一分辨率重开画面保持缩放）
     func setRemoteSize(_ w: Int, _ h: Int) {
-        viewport = viewport.resized(containerW: bounds.width, containerH: bounds.height, remoteW: max(w, 1), remoteH: max(h, 1))
-        cursor = (Int32(w / 2), Int32(h / 2))
-        applyViewport()
+        let changed = w != viewport.remoteW || h != viewport.remoteH
+        if changed { cursor = (Int32(w / 2), Int32(h / 2)) }
+        setViewport(viewport.resized(containerW: bounds.width, containerH: bounds.height, remoteW: w, remoteH: h), .other)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        viewport = viewport.resized(containerW: bounds.width, containerH: bounds.height, remoteW: viewport.remoteW, remoteH: viewport.remoteH)
-        applyViewport()
+        // 旋转、弹出键盘：保持倍数，原来在中心的画面点仍在中心
+        setViewport(viewport.resized(containerW: bounds.width, containerH: bounds.height, remoteW: viewport.remoteW, remoteH: viewport.remoteH), .other)
     }
 
-    private func applyViewport() {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        displayLayer.frame = viewport.contentRect
-        CATransaction.commit()
-        updateCursor()
+    /// 回到适应屏幕（菜单「视图」）
+    func fitToScreen() { setViewport(viewport.fit(), .other) }
+
+    /// 原始像素：1 个被控像素占 1 个视图点，以视图中心为准
+    func actualSize() {
+        setViewport(viewport.zoomedTo(viewport.actualSizeZoom, fx: bounds.midX, fy: bounds.midY), .other)
     }
 
+    private func setViewport(_ v: Viewport, _ reason: ViewportChange) {
+        let old = viewport
+        viewport = v
+        if v.contentRect != displayLayer.frame {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            displayLayer.frame = v.contentRect
+            CATransaction.commit()
+        }
+        if v != old || reason == .gesture { onViewportChange?(v, reason) }
+    }
+
+    /// 被控端报来的光标位置（画面里已经画了光标，这里只记位置）
     func remoteCursor(_ x: Int32, _ y: Int32, visible: Bool) {
         cursor = (x, y)
-        cursorVisible = visible
-        updateCursor()
-    }
-
-    private func updateCursor() {
-        let p = viewport.toView(cursor.0, cursor.1)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        cursorLayer.position = p
-        cursorLayer.isHidden = !(mouseMode || cursorVisible)
-        CATransaction.commit()
-    }
-
-    private static func arrowPath() -> CGPath {
-        let s: CGFloat = 1
-        let p = UIBezierPath()
-        p.move(to: .zero)
-        p.addLine(to: CGPoint(x: 0, y: 19 * s))
-        p.addLine(to: CGPoint(x: 4.5 * s, y: 14.8 * s))
-        p.addLine(to: CGPoint(x: 7.6 * s, y: 21.6 * s))
-        p.addLine(to: CGPoint(x: 10.6 * s, y: 20.3 * s))
-        p.addLine(to: CGPoint(x: 7.6 * s, y: 13.6 * s))
-        p.addLine(to: CGPoint(x: 13.6 * s, y: 13.6 * s))
-        p.close()
-        return p.cgPath
     }
 
     // MARK: 输入事件
@@ -131,13 +119,13 @@ final class RemoteCanvasView: UIView, UIKeyInput {
             default: break
             }
         }
-        updateCursor()
         send?(events)
     }
 
-    // 手势状态机（与安卓端一致）
+    // 手势状态机（与安卓端 RemoteGestures.kt 一致）
     private var touches = Set<UITouch>()
     private var downAt = CGPoint.zero
+    private var downTime: TimeInterval = 0
     private var lastPos = CGPoint.zero
     private var maxPointers = 0
     private var moved = false
@@ -145,6 +133,7 @@ final class RemoteCanvasView: UIView, UIKeyInput {
     private var dragging = false
     private var dragButtonDown = false
     private var twoMode = 0          // 0 未定 1 缩放 2 滚动或平移
+    private var twoDownCentroid: CGPoint?
     private var twoStartCenter = CGPoint.zero
     private var twoStartSpan: CGFloat = 0
     private var prevCenter = CGPoint.zero
@@ -152,6 +141,9 @@ final class RemoteCanvasView: UIView, UIKeyInput {
     private var longPressTimer: Timer?
     private var scrollRemainder = CGPoint.zero
     private let slop: CGFloat = 10
+    /// 双指轻点先挂起，等双击间隔：期间再来一次 → 双指双击（切换缩放），否则 → 右键
+    private var twoTaps = TwoFingerTapResolver(interval: 0.3, maxDistance: 60)
+    private var twoTapTimer: Timer?
 
     private func centroid(_ ps: [CGPoint]) -> CGPoint {
         CGPoint(x: ps.map(\.x).reduce(0, +) / CGFloat(ps.count), y: ps.map(\.y).reduce(0, +) / CGFloat(ps.count))
@@ -161,11 +153,23 @@ final class RemoteCanvasView: UIView, UIKeyInput {
         ps.map { hypot($0.x - c.x, $0.y - c.y) }.reduce(0, +) / CGFloat(ps.count)
     }
 
+    /// 挂起的双指轻点交出去当右键（光标所在处）
+    private func flushTwoTap() {
+        twoTapTimer?.invalidate()
+        twoTapTimer = nil
+        if twoTaps.flush() {
+            let (x, y) = cursor
+            emit(click(.right, x, y))
+        }
+    }
+
     override func touchesBegan(_ set: Set<UITouch>, with event: UIEvent?) {
         let wasEmpty = touches.isEmpty
         touches.formUnion(set)
         if wasEmpty {
-            downAt = set.first!.location(in: self)
+            let t = set.first!
+            downAt = t.location(in: self)
+            downTime = t.timestamp
             lastPos = downAt
             maxPointers = touches.count
             moved = false
@@ -173,6 +177,7 @@ final class RemoteCanvasView: UIView, UIKeyInput {
             dragging = false
             twoMode = 0
             twoStartSpan = 0
+            twoDownCentroid = nil
             longPressTimer?.invalidate()
             longPressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
                 DispatchQueue.main.async { self?.longPressFired() }
@@ -181,10 +186,14 @@ final class RemoteCanvasView: UIView, UIKeyInput {
             maxPointers = max(maxPointers, touches.count)
             longPressTimer?.invalidate()
         }
+        if touches.count == 2 && maxPointers == 2 && twoDownCentroid == nil {
+            twoDownCentroid = centroid(touches.map { $0.location(in: self) })
+        }
     }
 
     private func longPressFired() {
         guard touches.count == 1, !moved, maxPointers == 1 else { return }
+        flushTwoTap()
         longPressed = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         if !mouseMode {
@@ -194,40 +203,15 @@ final class RemoteCanvasView: UIView, UIKeyInput {
     }
 
     override func touchesMoved(_ set: Set<UITouch>, with event: UIEvent?) {
-        let pts = touches.map { $0.location(in: self) }
         if touches.count >= 2 {
-            longPressTimer?.invalidate()
-            if dragging { dragEnd() }
-            let c = centroid(pts), s = span(pts, c)
-            if twoStartSpan == 0 {
-                twoStartCenter = c; twoStartSpan = s; prevCenter = c; prevSpan = s
-                return
-            }
-            if twoMode == 0 {
-                let ds = abs(s - twoStartSpan), dc = hypot(c.x - twoStartCenter.x, c.y - twoStartCenter.y)
-                if ds > slop * 1.5 && ds > dc * 0.8 { twoMode = 1 } else if dc > slop { twoMode = 2 }
-            }
-            switch twoMode {
-            case 1:
-                viewport = viewport.zoomed(prevSpan > 0 ? s / prevSpan : 1, fx: c.x, fy: c.y, dx: c.x - prevCenter.x, dy: c.y - prevCenter.y)
-                applyViewport()
-            case 2:
-                if !mouseMode && viewport.zoom > 1.01 {
-                    viewport = viewport.panned(c.x - prevCenter.x, c.y - prevCenter.y)
-                    applyViewport()
-                } else {
-                    scroll(dx: c.x - prevCenter.x, dy: c.y - prevCenter.y)
-                }
-            default: break
-            }
-            prevCenter = c
-            prevSpan = s
-            if twoMode != 0 { moved = true }
+            twoFingerMoved(touches.map { $0.location(in: self) })
             return
         }
+        // 双指手势结束后剩一根手指：忽略直到全部抬起
         guard maxPointers < 2, let t = touches.first else { return }
         let pos = t.location(in: self)
         if !moved, hypot(pos.x - downAt.x, pos.y - downAt.y) > slop {
+            flushTwoTap()
             moved = true
             dragging = true
             longPressTimer?.invalidate()
@@ -240,28 +224,81 @@ final class RemoteCanvasView: UIView, UIKeyInput {
         }
     }
 
-    override func touchesEnded(_ set: Set<UITouch>, with event: UIEvent?) { finish(set) }
-    override func touchesCancelled(_ set: Set<UITouch>, with event: UIEvent?) { finish(set) }
+    /// 双指：越过阈值时判定一次，间距变化为主 → 缩放（同时随质心平移），否则 → 滚动或平移
+    private func twoFingerMoved(_ pts: [CGPoint]) {
+        longPressTimer?.invalidate()
+        if dragging { dragEnd() }
+        let c = centroid(pts), s = span(pts, c)
+        if twoStartSpan == 0 {
+            twoStartCenter = c; twoStartSpan = s; prevCenter = c; prevSpan = s
+            return
+        }
+        if twoMode == 0 {
+            let ds = abs(s - twoStartSpan), dc = hypot(c.x - twoStartCenter.x, c.y - twoStartCenter.y)
+            if ds > slop * 1.5 && ds > dc * 0.8 { twoMode = 1 } else if dc > slop { twoMode = 2 }
+            if twoMode != 0 { flushTwoTap() }
+        }
+        switch twoMode {
+        case 1:
+            setViewport(viewport.pinched(prevSpan > 0 ? s / prevSpan : 1, from: prevCenter, to: c), .gesture)
+        case 2:
+            if !mouseMode && viewport.isZoomed {
+                setViewport(viewport.panned(c.x - prevCenter.x, c.y - prevCenter.y), .other)
+            } else {
+                scroll(dx: c.x - prevCenter.x, dy: c.y - prevCenter.y)
+            }
+        default: break
+        }
+        prevCenter = c
+        prevSpan = s
+        if twoMode != 0 { moved = true }
+    }
 
-    private func finish(_ set: Set<UITouch>) {
+    override func touchesEnded(_ set: Set<UITouch>, with event: UIEvent?) { finish(set, cancelled: false) }
+    override func touchesCancelled(_ set: Set<UITouch>, with event: UIEvent?) { finish(set, cancelled: true) }
+
+    private func finish(_ set: Set<UITouch>, cancelled: Bool) {
         touches.subtract(set)
         guard touches.isEmpty else { return }
         longPressTimer?.invalidate()
         if dragging {
+            flushTwoTap()
             dragEnd()
+        } else if cancelled {
+            // 被系统手势打断：不发点击
+            flushTwoTap()
         } else if maxPointers >= 2 && twoMode == 0 {
-            let (x, y) = cursor
-            emit(click(.right, x, y))
+            twoFingerTapped(at: twoDownCentroid ?? downAt)
         } else if maxPointers == 1 && !moved && !longPressed {
-            if mouseMode {
-                let (x, y) = cursor
-                emit(click(.left, x, y))
-            } else {
-                let (x, y) = remote(downAt)
-                emit(click(.left, x, y))
-            }
+            flushTwoTap()
+            let (x, y) = mouseMode ? cursor : remote(downAt)
+            emit(click(.left, x, y))
+        } else {
+            flushTwoTap()
         }
         dragging = false
+    }
+
+    private func twoFingerTapped(at p: CGPoint) {
+        switch twoTaps.tapped(at: p, time: downTime) {
+        case .doubleTap(let at):
+            twoTapTimer?.invalidate()
+            twoTapTimer = nil
+            setViewport(viewport.toggled(fx: at.x, fy: at.y), .gesture)
+        case .pending(let flushed):
+            if flushed {
+                let (x, y) = cursor
+                emit(click(.right, x, y))
+            }
+            twoTapTimer?.invalidate()
+            twoTapTimer = Timer.scheduledTimer(withTimeInterval: twoTaps.interval + 0.02, repeats: false) { [weak self] _ in
+                DispatchQueue.main.async {
+                    // 手指还按着（可能是第二次轻点）：等这次手势结束时再判定
+                    guard let self, self.touches.isEmpty else { return }
+                    self.flushTwoTap()
+                }
+            }
+        }
     }
 
     private func dragStart(afterLongPress: Bool) {
@@ -280,13 +317,13 @@ final class RemoteCanvasView: UIView, UIKeyInput {
 
     private func dragMove(to pos: CGPoint, delta: CGPoint) {
         if mouseMode {
-            // 触控板：相对移动，带一点加速
+            // 触控板：相对移动，带一点加速；放大后画面跟着光标走，光标始终看得见
             let k = viewport.remotePerViewPoint * 1.6
-            let nx = min(max(Int32((CGFloat(cursor.0) + delta.x * k).rounded()), 0), Int32(viewport.remoteW - 1))
-            let ny = min(max(Int32((CGFloat(cursor.1) + delta.y * k).rounded()), 0), Int32(viewport.remoteH - 1))
+            let maxX = Int32(max(viewport.remoteW - 1, 0)), maxY = Int32(max(viewport.remoteH - 1, 0))
+            let nx = min(max(Int32((CGFloat(cursor.0) + delta.x * k).rounded()), 0), maxX)
+            let ny = min(max(Int32((CGFloat(cursor.1) + delta.y * k).rounded()), 0), maxY)
             emit([.mouseMove(x: nx, y: ny)])
-            let followed = viewport.follow(nx, ny)
-            if followed != viewport { viewport = followed; applyViewport() }
+            setViewport(viewport.follow(nx, ny), .other)
         } else if dragButtonDown {
             let (x, y) = remote(pos)
             emit([.mouseMove(x: x, y: y)])

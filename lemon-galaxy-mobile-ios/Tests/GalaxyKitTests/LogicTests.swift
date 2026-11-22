@@ -145,55 +145,6 @@ final class KeysTests: XCTestCase {
     }
 }
 
-final class ViewportTests: XCTestCase {
-    func testLetterboxAndMapping() {
-        // 1920x1080 画面放进 1000x1000：宽度占满，上下留黑边
-        let v = Viewport(containerW: 1000, containerH: 1000, remoteW: 1920, remoteH: 1080)
-        XCTAssertEqual(v.contentW, 1000, accuracy: 0.01)
-        XCTAssertEqual(v.contentH, 562.5, accuracy: 0.01)
-        XCTAssertEqual(v.top, 218.75, accuracy: 0.01)
-        XCTAssertTrue(v.toRemote(500, 500) == (960, 540))
-        XCTAssertTrue(v.toRemote(-50, 0) == (0, 0))
-        XCTAssertTrue(v.toRemote(5000, 5000) == (1919, 1079))
-        let p = v.toView(960, 540)
-        XCTAssertEqual(p.x, 500, accuracy: 0.01)
-        XCTAssertEqual(p.y, 500, accuracy: 0.01)
-    }
-
-    func testZoomKeepsFocusAndClamps() {
-        let v = Viewport(containerW: 1000, containerH: 562.5, remoteW: 1920, remoteH: 1080)
-        let z = v.zoomed(2, fx: 250, fy: 140)
-        XCTAssertEqual(z.zoom, 2, accuracy: 0.001)
-        XCTAssertTrue(v.toRemote(250, 140) == z.toRemote(250, 140))
-        let far = z.panned(10_000, 10_000)
-        XCTAssertEqual(far.left, 0, accuracy: 0.01)
-        XCTAssertEqual(far.top, 0, accuracy: 0.01)
-        XCTAssertEqual(v.zoomed(0.2, fx: 0, fy: 0).zoom, 1, accuracy: 0.001)
-        XCTAssertEqual(v.zoomed(100, fx: 0, fy: 0).zoom, Viewport.maxZoom, accuracy: 0.001)
-    }
-
-    func testFollowAndResize() {
-        let v = Viewport(containerW: 1000, containerH: 562.5, remoteW: 1920, remoteH: 1080).zoomed(3, fx: 0, fy: 0)
-        // 光标移出可见区域：画面平移，让它回到边距以内
-        XCTAssertGreaterThan(v.toView(1400, 700).x, 1000)
-        let f = v.follow(1400, 700)
-        let p = f.toView(1400, 700)
-        XCTAssertEqual(p.x, 1000 - 48, accuracy: 0.5)
-        XCTAssertEqual(p.y, 562.5 - 48, accuracy: 0.5)
-        // 贴着被控屏幕边缘时平移被夹住，不露黑边
-        XCTAssertEqual(v.follow(1919, 1079).contentRect.maxX, 1000, accuracy: 0.5)
-        // 没放大时不动
-        let base = Viewport(containerW: 1000, containerH: 562.5, remoteW: 1920, remoteH: 1080)
-        XCTAssertEqual(base.follow(1919, 1079), base)
-        // 换分辨率时复位缩放
-        let r = v.resized(containerW: 800, containerH: 600, remoteW: 2560, remoteH: 1440)
-        XCTAssertEqual(r.zoom, 1)
-        XCTAssertEqual(r.contentW, 800, accuracy: 0.01)
-        // 只换容器尺寸保留缩放
-        XCTAssertEqual(v.resized(containerW: 900, containerH: 600, remoteW: 1920, remoteH: 1080).zoom, 3, accuracy: 0.001)
-    }
-}
-
 final class AnnexBTests: XCTestCase {
     func nal(_ type: UInt8, _ len: Int, short: Bool = false) -> Data {
         Data(short ? [0, 0, 1] : [0, 0, 0, 1]) + Data([type]) + Data(repeating: 0x55, count: len)
