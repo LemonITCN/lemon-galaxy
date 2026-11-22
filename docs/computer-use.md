@@ -26,7 +26,8 @@
 ## 2. 请求与应答（JSON）
 
 请求都带 `action`；除 `list_apps` 外都带 `app`（应用名、Bundle ID / 可执行文件名，或 `pid:1234`，大小写不敏感，
-先精确再前缀匹配）。可选 `window`（第几个窗口，默认最前面的那个）。
+先精确再前缀匹配）。可选 `window`（第几个窗口）。默认窗口是主窗口 > 焦点标准窗口 > 面积最大的标准窗口，
+不取第一个（浏览器的第一个窗口常是弹出气泡、对话框）；`get_app_state` 头部列出其他窗口供指定。
 
 | action | 参数 | 说明 |
 |---|---|---|
@@ -34,7 +35,7 @@
 | `get_app_state` | `app`, `window?`, `max_nodes?`（默认 400） | 窗口标题与位置 + 编号的控件树 + 窗口截图（见下） |
 | `click` | `app`, `element` 或 `x`,`y`；`count?`(1/2)；`button?`(left/right) | 优先按控件执行（AXPress / InvokePattern）；给坐标时按最近一次截图的像素 |
 | `set_value` | `app`, `element`, `value` | 直接设置输入框等控件的值 |
-| `type_text` | `app`, `text`, `element?` | 给了 element 先让它获得焦点；输入到应用当前焦点控件 |
+| `type_text` | `app`, `text`, `element?`, `replace?` | 给了 element 先让它获得焦点；输入到应用当前焦点控件。element 是单行输入框（地址栏、搜索框）时默认先清空再输入，`replace` 可覆盖 |
 | `press_key` | `app`, `key` | 如 `Return`、`Tab`、`Escape`、`cmd+s`、`ctrl+shift+t`；带 cmd/ctrl 的快捷键在 macOS 上优先找菜单项执行 |
 | `scroll` | `app`, `element?` 或 `x`,`y`；`direction`(up/down/left/right)；`pages?`(默认 1，可小数) | |
 | `perform_action` | `app`, `element`, `name` | 执行控件的其他动作（如 AXShowMenu、AXIncrement、ExpandCollapse） |
@@ -79,7 +80,14 @@
    - Chromium / Electron 系（按 Bundle ID 与包内 Frameworks 判断）在坐标点击、键盘输入前，先用 `SLPSPostEventRecordTo` 给**目标进程**发一条
      只对它生效的「激活」记录（键盘另加 yabai 的 make-key-window 两条记录），动作后撤销；不给真实前台应用发失活记录。
      鼠标事件同时经 `SLEventPostToPid` 与公开 `postToPid` 投递。缺任一私有符号就只走公开 `postToPid`。
-   - `type_text` 用 `AXSelectedText` 插入后会读回值确认真的变了，没变再退回 Unicode 键盘事件；含换行的文字直接走键盘事件（换行按 Return）。
+   - `type_text`：Chromium / Electron 一律先用 Unicode 键盘事件（AX 写进去的文字不经过它们的输入处理：地址栏回车不跳转、网页表单收不到 input 事件），
+     读回值确认变了，没变再试 AX；其他应用先用 `AXSelectedText` 插入并确认，没变再退回键盘事件。含换行的文字走键盘事件（换行按 Return）。
+     清空：先设 `AXSelectedTextRange` 为全文，不行再发 cmd+a。
+   - Chromium 打开辅助功能（`AXManualAccessibility`）后窗口列表要一两秒才有，选窗口时轮询最多约 3 秒。
+   - 窗口当前位置用 `CGWindowListCopyWindowInfo(.optionIncludingWindow, wid)`；`CGWindowListCreateDescriptionFromArray` 要原始窗口号数组，
+     传 NSNumber 永远查不到（曾因此每个动作都报「窗口已关闭」、不回截图）。
+   - 开发自测：`open -n LemonGalaxy.app --args --cu-exec 请求.json --out 目录`（JSON 数组，可含 `{"sleep": 毫秒}`），
+     日志与截图写到目录；必须经 `open` 启动，授权才算在应用自己头上。测浏览器用独立 `--user-data-dir` 的实例（Edge 会自动登录同步，用 Chrome）。
    - 没有「屏幕录制」授权时照样返回控件树，坐标系按「长边不超过 1280、不放大」虚拟一张截图换算。
    - 无人值守被控端：后台服务（root）经会话代理 IPC（`p.computerUse`）转发，由用户图形会话里的代理执行；登录界面不支持。
      代理平时不建 NSApplication，执行会动 AI 光标的动作时才接上 AppKit（与隐私屏同一机制，空闲时回收）。

@@ -6,6 +6,9 @@ let args = CommandLine.arguments
 if args.contains("--cu-selftest") {
     exit(ComputerUseSelfTest.run(args))
 }
+if args.contains("--cu-exec") {
+    exit(MainActor.assumeIsolated { ComputerUseExec.run(args) })
+}
 if args.contains("--core-smoke") {
     exit(CoreSmoke.run(args))
 }

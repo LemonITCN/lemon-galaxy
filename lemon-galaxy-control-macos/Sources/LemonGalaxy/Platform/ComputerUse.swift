@@ -236,6 +236,17 @@ final class ComputerUse: @unchecked Sendable {
         var header = "应用 \(app.localizedName ?? "?")（\(app.bundleIdentifier ?? app.executableURL?.lastPathComponent ?? "?")，pid \(pid)），"
         header += "窗口 \(index)/\(total)「\(title)」 位置 (\(Int(liveFrame.minX)),\(Int(liveFrame.minY))) 大小 \(Int(liveFrame.width))×\(Int(liveFrame.height))，"
         header += shot == nil ? "没有截图（未授权屏幕录制或窗口截不到），坐标系 \(sw)×\(sh)" : "截图 \(sw)×\(sh)"
+        if total > 1 {
+            // 列出其他窗口，模型需要时用 window 参数指定
+            let all = AX.elements(appEl, kAXWindowsAttribute)
+            let others = all.enumerated().filter { $0.offset != index }.prefix(8).map { (i, w) -> String in
+                let f = AX.frame(w) ?? .zero
+                let sub = AX.string(w, kAXSubroleAttribute) ?? ""
+                let kind = sub == kAXStandardWindowSubrole as String ? "" : sub == "AXDialog" ? " 对话框" : " 浮动/弹出"
+                return "  窗口 \(i)「\(Self.clip(AX.string(w, kAXTitleAttribute) ?? "", 40))」\(Int(f.width))×\(Int(f.height))\(kind)"
+            }
+            header += "\n其他窗口（用 window 参数指定）：\n" + others.joined(separator: "\n")
+        }
         if app.isHidden { header += "\n注意：应用处于隐藏状态，有些操作可能无效" }
         if AX.bool(win, kAXMinimizedAttribute) == true { header += "\n注意：窗口已最小化" }
         var text = header + "\n" + result.lines.joined(separator: "\n")
@@ -247,9 +258,11 @@ final class ComputerUse: @unchecked Sendable {
     /// 选窗口：给了编号就用它，否则用最前面的（跳过最小化的）
     private func pickWindow(_ appEl: AXUIElement, app: NSRunningApplication, index: Int?) throws -> (AXUIElement, Int, Int) {
         var windows = AX.elements(appEl, kAXWindowsAttribute)
-        if windows.isEmpty {
-            // 刚启动或懒加载的应用：稍等再取一次
-            Thread.sleep(forTimeInterval: 0.4)
+        // 刚启动的应用、刚打开辅助功能的 Chromium / Electron（第一次常常要一两秒才有窗口）：轮询最多约 3 秒
+        var waited = 0.0
+        while windows.isEmpty && waited < 3 {
+            Thread.sleep(forTimeInterval: 0.25)
+            waited += 0.25
             windows = AX.elements(appEl, kAXWindowsAttribute)
         }
         guard !windows.isEmpty else {
@@ -259,7 +272,19 @@ final class ComputerUse: @unchecked Sendable {
             guard i >= 0 && i < windows.count else { throw Failure(message: "窗口编号 \(i) 超出范围（共 \(windows.count) 个，从 0 开始）") }
             return (windows[i], i, windows.count)
         }
-        let i = windows.firstIndex { AX.bool($0, kAXMinimizedAttribute) != true } ?? 0
+        // 默认窗口：应用的主窗口（AXMain）> 焦点窗口 > 面积最大的标准窗口。不能简单取第一个：浏览器等应用的第一个
+        // 窗口常常是弹出气泡、对话框、下拉面板，随时会消失
+        let usable = windows.indices.filter { AX.bool(windows[$0], kAXMinimizedAttribute) != true }
+        if let i = usable.first(where: { AX.bool(windows[$0], kAXMainAttribute) == true }) { return (windows[i], i, windows.count) }
+        var fw: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &fw) == .success, let f = fw,
+           CFGetTypeID(f) == AXUIElementGetTypeID(), let i = usable.first(where: { CFEqual(windows[$0], f) }),
+           AX.string(windows[i], kAXSubroleAttribute) == kAXStandardWindowSubrole as String {
+            return (windows[i], i, windows.count)
+        }
+        func area(_ i: Int) -> CGFloat { AX.frame(windows[i]).map { $0.width * $0.height } ?? 0 }
+        let standard = usable.filter { AX.string(windows[$0], kAXSubroleAttribute) == kAXStandardWindowSubrole as String }
+        let i = (standard.isEmpty ? usable : standard).max(by: { area($0) < area($1) }) ?? 0
         return (windows[i], i, windows.count)
     }
 
@@ -354,8 +379,11 @@ final class ComputerUse: @unchecked Sendable {
 
     /// 窗口当前的位置大小（CG 全局坐标）；窗口已不存在返回 nil
     static func currentFrame(_ wid: CGWindowID) -> CGRect? {
-        guard wid != 0, let arr = CGWindowListCreateDescriptionFromArray([NSNumber(value: wid)] as CFArray) as? [[String: Any]],
-              let b = arr.first?[kCGWindowBounds as String] as? NSDictionary else { return nil }
+        // CGWindowListCreateDescriptionFromArray 要的是装着原始窗口号的 CFArray（不是 NSNumber），传 NSNumber 永远查不到；
+        // 用 optionIncludingWindow 只取这一个窗口
+        guard wid != 0, let arr = CGWindowListCopyWindowInfo(.optionIncludingWindow, wid) as? [[String: Any]],
+              let w = arr.first(where: { ($0[kCGWindowNumber as String] as? Int) == Int(wid) }),
+              let b = w[kCGWindowBounds as String] as? NSDictionary else { return nil }
         return CGRect(dictionaryRepresentation: b)
     }
 
@@ -544,41 +572,82 @@ final class ComputerUse: @unchecked Sendable {
         return afterAction(app, "已设置 \(label) 的值")
     }
 
+    /// 单行输入框：指定了控件时默认先清空再输入（与人点进地址栏、搜索框后整段重输一致）
+    private static let singleLineRoles: Set<String> = ["AXTextField", "AXComboBox", "AXSearchField"]
+
     private func typeText(_ app: NSRunningApplication, _ req: [String: Any]) throws -> ComputerUseReply {
         guard let text = Self.string(req["text"]) else { throw Failure(message: "缺少参数 text") }
         let pid = app.processIdentifier
         let appEl = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appEl, 2)
         var target = "当前焦点"
+        var replace = false
         if req["element"] != nil {
             let (el, label) = try element(app, req["element"])
             target = label
             moveCursor(app, to: Self.center(el), press: true)
             // 只在应用内部移动焦点，不激活应用
             AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            let role = AX.string(el, kAXRoleAttribute) ?? ""
+            replace = (req["replace"] as? Bool) ?? Self.singleLineRoles.contains(role)
+        } else {
+            replace = (req["replace"] as? Bool) ?? false
         }
-        var focused: CFTypeRef?
-        AXUIElementCopyAttributeValue(appEl, kAXFocusedUIElementAttribute as CFString, &focused)
-        if req["element"] == nil, let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID() {
-            moveCursor(app, to: Self.center(f as! AXUIElement), press: false)
+        var focusedRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(appEl, kAXFocusedUIElementAttribute as CFString, &focusedRef)
+        let focused: AXUIElement? = focusedRef.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
+        if req["element"] == nil, let f = focused { moveCursor(app, to: Self.center(f), press: false) }
+        let wid = lock.locked { snapshots[pid]?.windowId } ?? 0
+        let before = focused.flatMap { AX.rawValue($0) as? String }
+        let verb = replace ? "清空后输入" : "输入"
+
+        // 全选现有内容：先用 AX 选中范围，不行再发 cmd+a（会走菜单「全选」）
+        func selectAll() {
+            guard replace else { return }
+            if let f = focused, let v = AX.rawValue(f) as? String, !v.isEmpty, AX.settable(f, kAXSelectedTextRangeAttribute) {
+                var range = CFRange(location: 0, length: (v as NSString).length)
+                if let r = AXValueCreate(.cfRange, &range),
+                   AXUIElementSetAttributeValue(f, kAXSelectedTextRangeAttribute as CFString, r) == .success { return }
+            }
+            Self.postKey(CGKeyCode(kVK_ANSI_A), flags: .maskCommand, pid: pid)
         }
-        // 优先：直接插入到焦点控件的光标处（AXSelectedText），并确认值真的变了
-        if let f = focused, CFGetTypeID(f) == AXUIElementGetTypeID(), !text.contains("\n") {
-            let el = f as! AXUIElement
-            if AX.settable(el, kAXSelectedTextAttribute) {
-                let before = AX.rawValue(el) as? String
-                if AXUIElementSetAttributeValue(el, kAXSelectedTextAttribute as CFString, text as CFString) == .success {
-                    let after = AX.rawValue(el) as? String
-                    if before == nil || after != before || text.isEmpty {
-                        return afterAction(app, "已在 \(target) 输入 \(text.count) 个字")
-                    }
-                }
+        func changed() -> Bool {
+            guard let f = focused else { return true }   // 读不到焦点控件就无从确认，按成功算
+            let after = AX.rawValue(f) as? String
+            return after != before || text.isEmpty || (replace && after == text)
+        }
+
+        // Chromium / Electron：AX 直接塞进去的文字不经过它们的输入处理（地址栏回车不跳转、网页表单收不到 input 事件），
+        // 必须用键盘事件。其他应用：优先 AX 插入（快、不受输入法影响），确认值变了；否则退回键盘事件
+        if isChromium(app) {
+            try withKeyFocus(app, window: wid) {
+                selectAll()
+                Self.postText(text, pid: pid)
+            }
+            Thread.sleep(forTimeInterval: 0.15)
+            if changed() { return afterAction(app, "已在 \(target) \(verb) \(text.count) 个字") }
+            // 键盘事件没生效（个别窗口收不到）：再试 AX
+        }
+        if let f = focused, !text.contains("\n"), AX.settable(f, kAXSelectedTextAttribute) {
+            if replace, let v = AX.rawValue(f) as? String, !v.isEmpty, AX.settable(f, kAXSelectedTextRangeAttribute) {
+                var range = CFRange(location: 0, length: (v as NSString).length)
+                if let r = AXValueCreate(.cfRange, &range) { AXUIElementSetAttributeValue(f, kAXSelectedTextRangeAttribute as CFString, r) }
+            }
+            if AXUIElementSetAttributeValue(f, kAXSelectedTextAttribute as CFString, text as CFString) == .success, changed() {
+                var note = ""
+                if isChromium(app) { note = "（键盘输入没生效，改用辅助功能写入；如果回车没反应，请改用 set_value 或全屏键盘）" }
+                return afterAction(app, "已在 \(target) \(verb) \(text.count) 个字\(note)")
             }
         }
-        // 退路：Unicode 键盘事件直接投递给这个进程
-        let wid = lock.locked { snapshots[pid]?.windowId } ?? 0
-        try withKeyFocus(app, window: wid) { Self.postText(text, pid: pid) }
-        return afterAction(app, "已向 \(target) 键入 \(text.count) 个字")
+        if !isChromium(app) {
+            try withKeyFocus(app, window: wid) {
+                selectAll()
+                Self.postText(text, pid: pid)
+            }
+            Thread.sleep(forTimeInterval: 0.15)
+            if changed() { return afterAction(app, "已向 \(target) 键入 \(text.count) 个字") }
+        }
+        return afterAction(app, "已向 \(target) 发送 \(text.count) 个字的键盘输入，但读不到值变化，请看截图确认是否输入成功")
     }
 
     private func pressKey(_ app: NSRunningApplication, _ req: [String: Any]) throws -> ComputerUseReply {
@@ -1170,5 +1239,43 @@ enum ComputerUseSelfTest {
         if ComputerUse.forbiddenReason(bundleId: "com.apple.finder", pid: 1, executable: "Finder", name: nil) != nil { guardsOK = false }
         if !guardsOK { return 1 }
         return list.text.hasPrefix("错误") || state.text.hasPrefix("错误") ? 1 : 0
+    }
+}
+
+// MARK: - 开发自测：按顺序执行一串请求
+
+/// --cu-exec <请求.json> --out <目录>：开发自测用。请求文件是 JSON 数组，每项是一个 computer use 请求，
+/// 或 {"sleep": 毫秒}。结果逐条写到 <目录>/log.txt，截图存为 <目录>/<序号>.jpg。跑在完整的 AppKit 里（有 AI 光标），
+/// 要用 `open -n LemonGalaxy.app --args --cu-exec …` 启动，系统授权才算在应用自己头上。
+enum ComputerUseExec {
+    @MainActor static func run(_ args: [String]) -> Int32 {
+        guard let i = args.firstIndex(of: "--cu-exec"), i + 1 < args.count,
+              let o = args.firstIndex(of: "--out"), o + 1 < args.count else { return 2 }
+        let dir = URL(fileURLWithPath: args[o + 1])
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let data = FileManager.default.contents(atPath: args[i + 1]),
+              let reqs = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return 2 }
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        Thread.detachNewThread {
+            var log = "辅助功能：\(AXIsProcessTrusted()) 屏幕录制：\(SystemPermissions.screenRecordingGranted)\n"
+            for (n, r) in reqs.enumerated() {
+                if let ms = r["sleep"] as? Int {
+                    Thread.sleep(forTimeInterval: Double(ms) / 1000)
+                    continue
+                }
+                let body = String(decoding: try! JSONSerialization.data(withJSONObject: r), as: UTF8.self)
+                let t0 = Date()
+                let reply = ComputerUse.shared.handle(body)
+                log += "== [\(n)] \(body)（\(Int(Date().timeIntervalSince(t0) * 1000)) ms）\n\(reply.text)\n"
+                if let img = reply.image { try? img.data.write(to: dir.appendingPathComponent("\(n).jpg")) }
+                try? log.write(to: dir.appendingPathComponent("log.txt"), atomically: true, encoding: .utf8)
+            }
+            log += "== 完成\n"
+            try? log.write(to: dir.appendingPathComponent("log.txt"), atomically: true, encoding: .utf8)
+            DispatchQueue.main.async { exit(0) }
+        }
+        app.run()
+        return 0
     }
 }

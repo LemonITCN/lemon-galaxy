@@ -596,7 +596,7 @@ impl Agent {
                 "target_label": { "type": "string", "description": "被点击控件上的文字（用于风险判定）" }
             }), &["app", "target_label"]));
             v.push(t("app_set_value", "直接设置输入框等控件的值。", json!({ "app": app, "element": el, "value": { "type": "string" } }), &["app", "element", "value"]));
-            v.push(t("app_type", "向应用当前焦点（或指定控件）输入文字。", json!({ "app": app, "text": { "type": "string" }, "element": el }), &["app", "text"]));
+            v.push(t("app_type", "向应用当前焦点（或指定控件）输入文字。指定了单行输入框（地址栏、搜索框等）时默认先清空再输入，replace=false 改为在光标处插入；浏览器里打开网址：对地址栏 app_type 网址后 app_key Return。", json!({ "app": app, "text": { "type": "string" }, "element": el, "replace": { "type": "boolean", "description": "是否先清空原有内容" } }), &["app", "text"]));
             v.push(t("app_key", "向应用发送按键或快捷键，如 Return、Tab、Escape、cmd+s、ctrl+shift+t。", json!({ "app": app, "key": { "type": "string" } }), &["app", "key"]));
             v.push(t("app_scroll", "在应用里滚动（指定控件或坐标）。", json!({
                 "app": app, "element": el, "x": { "type": "integer" }, "y": { "type": "integer" },
@@ -1515,7 +1515,7 @@ impl Agent {
                 };
                 let mut req = serde_json::Map::new();
                 req.insert("action".into(), json!(action));
-                for k in ["app", "window", "max_nodes", "element", "x", "y", "count", "button", "value", "text", "key", "direction", "pages", "name"] {
+                for k in ["app", "window", "max_nodes", "element", "x", "y", "count", "button", "value", "text", "replace", "key", "direction", "pages", "name"] {
                     if !a[k].is_null() {
                         req.insert(k.into(), a[k].clone());
                     }
