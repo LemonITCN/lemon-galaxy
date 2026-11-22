@@ -8,7 +8,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
     MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_LWIN, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_PAUSE, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN};
+use std::collections::{HashMap, HashSet};
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{CloseHandle, HWND, POINT};
+use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetAncestor, GetForegroundWindow, GetSystemMetrics, GetWindowDisplayAffinity, GetWindowLongW, GetWindowThreadProcessId, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WDA_EXCLUDEFROMCAPTURE, WS_EX_TRANSPARENT,
+};
 
 /// HID 用法码（键盘页）→ (扫描码, 是否扩展键)。
 fn hid_to_scan(u: u32) -> Option<(u16, bool)> {
@@ -168,16 +175,161 @@ fn vk_key(vk: VIRTUAL_KEY, down: bool) -> INPUT {
     key_input(vk, 0, if down { KEYBD_EVENT_FLAGS(0) } else { KEYEVENTF_KEYUP })
 }
 
+/// LemonGalaxy 主控端与被控端的可执行文件名（小写）
+const OWN_EXES: [&str; 2] = ["lemongalaxy.exe", "lemon-galaxy-worker.exe"];
+
+/// 进程的可执行文件名（小写）
+fn process_name(pid: u32) -> Option<String> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let r = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(h);
+        r.ok()?;
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        Some(path.rsplit(['\\', '/']).next().unwrap_or("").to_lowercase())
+    }
+}
+
 pub struct Injector {
     mon: Option<Monitor>,
     mon_id: u32,
     last: (i32, i32),
     touch_down: bool,
+    /// 落在 LemonGalaxy 自己窗口上被拦掉的按下（对应的抬起也拦）
+    blocked_buttons: Vec<MouseButton>,
+    blocked_keys: HashSet<u32>,
+    blocked_touch: bool,
+    /// 进程 ID → 是不是 LemonGalaxy（主控端或被控端）
+    own_pids: HashMap<u32, bool>,
 }
 
 impl Injector {
     pub fn new() -> Self {
-        Self { mon: None, mon_id: u32::MAX, last: (0, 0), touch_down: false }
+        Self {
+            mon: None,
+            mon_id: u32::MAX,
+            last: (0, 0),
+            touch_down: false,
+            blocked_buttons: Vec::new(),
+            blocked_keys: HashSet::new(),
+            blocked_touch: false,
+            own_pids: HashMap::new(),
+        }
+    }
+
+    /// 被控屏幕像素 → 虚拟桌面坐标（不改光标记录）
+    fn global(&mut self, display: u32, x: i32, y: i32) -> (i32, i32) {
+        if self.mon_id != display || self.mon.is_none() {
+            self.mon = find_monitor(display);
+            self.mon_id = display;
+        }
+        let (ox, oy) = self.mon.as_ref().map(|m| (m.rect.left, m.rect.top)).unwrap_or((0, 0));
+        (x + ox, y + oy)
+    }
+
+    // ---- 远端不能操作 LemonGalaxy 自己的窗口（与 Mac 一致）----
+    //
+    // 主界面、被控提示条会出现在画面里，远端能看到，但点击、滚动、触控、键盘输入都不生效（像 UU 远程），
+    // 只能由本机用户操作（比如在这里结束远程）。按下被拦掉的键，对应的抬起也拦掉，不会留下按着不放的键。
+
+    /// 返回 true 表示这个事件被拦掉了
+    fn guard_own_windows(&mut self, display: u32, ev: &InputEvent) -> bool {
+        match *ev {
+            InputEvent::MouseButton { button, down, x, y } => {
+                if down {
+                    let (gx, gy) = self.global(display, x, y);
+                    if !self.own_window_at(gx, gy) {
+                        return false;
+                    }
+                    self.blocked_buttons.push(button);
+                    // 光标还是移过去，远端看得到点在了哪里
+                    self.inject_unguarded(display, InputEvent::MouseMove { x, y });
+                    return true;
+                }
+                if let Some(i) = self.blocked_buttons.iter().position(|b| *b == button) {
+                    self.blocked_buttons.remove(i);
+                    return true;
+                }
+                false
+            }
+            InputEvent::Wheel { .. } => {
+                let (gx, gy) = self.last;
+                self.blocked_buttons.is_empty() && self.own_window_at(gx, gy)
+            }
+            InputEvent::Touch { phase, x, y, .. } => match phase {
+                TouchPhase::Began => {
+                    let (gx, gy) = self.global(display, x, y);
+                    self.blocked_touch = self.own_window_at(gx, gy);
+                    if self.blocked_touch {
+                        self.inject_unguarded(display, InputEvent::MouseMove { x, y });
+                    }
+                    self.blocked_touch
+                }
+                TouchPhase::Moved => self.blocked_touch,
+                TouchPhase::Ended | TouchPhase::Cancelled => std::mem::take(&mut self.blocked_touch),
+            },
+            InputEvent::Key { hid_usage, down } => {
+                if down {
+                    // 修饰键放行：远端能用 Alt+Tab 之类切走
+                    if (0xE0..=0xE7).contains(&hid_usage) || !self.own_app_foreground() {
+                        return false;
+                    }
+                    self.blocked_keys.insert(hid_usage);
+                    return true;
+                }
+                self.blocked_keys.remove(&hid_usage)
+            }
+            InputEvent::Text { .. } => self.own_app_foreground(),
+            _ => false,
+        }
+    }
+
+    /// 这个虚拟桌面坐标下的顶层窗口是不是 LemonGalaxy 自己的（隐私屏黑窗口不算）
+    fn own_window_at(&mut self, gx: i32, gy: i32) -> bool {
+        unsafe {
+            let hit = WindowFromPoint(POINT { x: gx, y: gy });
+            if hit.is_invalid() {
+                return false;
+            }
+            let root = GetAncestor(hit, GA_ROOT);
+            let w = if root.is_invalid() { hit } else { root };
+            // 隐私屏：不进截屏、点击穿透
+            let mut aff = 0u32;
+            if GetWindowDisplayAffinity(w, &mut aff).is_ok() && aff == WDA_EXCLUDEFROMCAPTURE.0 {
+                return false;
+            }
+            if GetWindowLongW(w, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT.0 != 0 {
+                return false;
+            }
+            self.own_window(w)
+        }
+    }
+
+    fn own_app_foreground(&mut self) -> bool {
+        let w = unsafe { GetForegroundWindow() };
+        !w.is_invalid() && self.own_window(w)
+    }
+
+    fn own_window(&mut self, w: HWND) -> bool {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(w, Some(&mut pid)) };
+        if pid == 0 {
+            return false;
+        }
+        if pid == std::process::id() {
+            return true;
+        }
+        if let Some(v) = self.own_pids.get(&pid) {
+            return *v;
+        }
+        let v = process_name(pid).map(|n| OWN_EXES.contains(&n.as_str())).unwrap_or(false);
+        if self.own_pids.len() > 256 {
+            self.own_pids.clear();
+        }
+        self.own_pids.insert(pid, v);
+        v
     }
 
     fn abs(&mut self, display: u32, x: i32, y: i32) -> (i32, i32) {
@@ -196,6 +348,13 @@ impl Injector {
     }
 
     pub fn inject(&mut self, display: u32, ev: InputEvent) {
+        if self.guard_own_windows(display, &ev) {
+            return;
+        }
+        self.inject_unguarded(display, ev);
+    }
+
+    fn inject_unguarded(&mut self, display: u32, ev: InputEvent) {
         const ABS: MOUSE_EVENT_FLAGS = MOUSE_EVENT_FLAGS(MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0);
         match ev {
             InputEvent::MouseMove { x, y } => {
