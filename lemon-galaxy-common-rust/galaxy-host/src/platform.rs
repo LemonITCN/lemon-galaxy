@@ -9,6 +9,7 @@ pub trait FrameSink: Send + Sync {
     fn resized(&self, width: u32, height: u32);
 }
 
+#[derive(Clone, Debug)]
 pub struct CaptureStarted {
     pub width: u32,
     pub height: u32,

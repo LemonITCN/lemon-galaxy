@@ -326,6 +326,14 @@ impl MagicSock {
         }
     }
 
+    /// 只有当前登记的还是这个对端对象时才移除（延迟清理时别误删之后新建的连接）。
+    pub fn remove_peer_if_same(&self, device: &DeviceId, peer: &Arc<Peer>) {
+        let same = self.inner.peers_by_device.read().get(device).map(|p| Arc::ptr_eq(p, peer)).unwrap_or(false);
+        if same {
+            self.remove_peer(device);
+        }
+    }
+
     /// 加入对端候选地址。
     pub fn add_candidates(&self, peer: &Arc<Peer>, items: &[Candidate]) {
         let mut s = peer.state.lock();

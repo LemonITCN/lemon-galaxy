@@ -125,7 +125,18 @@ impl PeerSession {
         if let (Some(sig), Some(cid)) = (&self.signal, self.conn_id) {
             sig.send(WsMsg::ConnClose { conn_id: cid });
         }
-        self.ms.remove_peer(&self.device);
+        // 关闭包要经这条路径发出去，立刻拆掉的话对方只能等空闲超时（约 30 秒）才知道会话结束
+        let (ms, dev, conn, peer) = (self.ms.clone(), self.device, self.conn.clone(), self._peer.clone());
+        match tokio::runtime::Handle::try_current() {
+            Ok(h) => {
+                h.spawn(async move {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), conn.closed()).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    ms.remove_peer_if_same(&dev, &peer);
+                });
+            }
+            Err(_) => ms.remove_peer(&dev),
+        }
     }
 
     pub async fn closed(&self) -> String {

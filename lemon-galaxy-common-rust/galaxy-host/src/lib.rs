@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod audio;
+pub mod capture;
 pub mod exec;
 pub mod files;
 pub mod fio;

@@ -290,18 +290,22 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
             let (ctl_tx, mut ctl_rx) = mpsc::channel::<DisplayOut>(64);
             *sink.ctl.lock() = Some(ctl_tx);
             let platform = host.platform.read().clone();
-            let started = platform.start_capture(req.display_id, req.max_fps.clamp(1, 240), req.bitrate_kbps.clamp(200, 200_000), req.codecs.clone(), sink.clone());
-            match started {
-                Ok(s) => {
+            let started = host.captures.subscribe(&platform, req.display_id, req.max_fps.clamp(1, 240), req.bitrate_kbps.clamp(200, 200_000), req.codecs.clone(), sink.clone());
+            let sub_id = match started {
+                Ok((id, s)) => {
                     host.log(&sid, &sess.from_user_name, "display", &format!("查看屏幕 {}", req.display_id), false);
                     sess.used_display.store(true, Ordering::Relaxed);
-                    fio::write(&mut send, &DisplayOut::Started { width: s.width, height: s.height, codec: s.codec, channel }).await?;
+                    if let Err(e) = fio::write(&mut send, &DisplayOut::Started { width: s.width, height: s.height, codec: s.codec, channel }).await {
+                        host.captures.unsubscribe(&platform, req.display_id, id);
+                        return Err(e.into());
+                    }
+                    id
                 }
                 Err(e) => {
                     fio::write(&mut send, &DisplayOut::Error(PeerError::new("unsupported", e))).await?;
                     return Ok(());
                 }
-            }
+            };
             let can_control = p.control && !req.view_only;
             let writer = tokio::spawn(async move {
                 while let Some(m) = ctl_rx.recv().await {
@@ -313,7 +317,7 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
             // 码率自适应：每秒看一次连接的丢包与拥塞
             let rate = Arc::new(parking_lot::Mutex::new(crate::rate::RateCtl::new(req.bitrate_kbps.clamp(200, 200_000), std::time::Instant::now())));
             let adapt = {
-                let (rate, conn, platform, display) = (rate.clone(), conn.clone(), platform.clone(), req.display_id);
+                let (rate, conn, platform, display, hub) = (rate.clone(), conn.clone(), platform.clone(), req.display_id, host.captures.clone());
                 tokio::spawn(async move {
                     let mut max_free = conn.datagram_send_buffer_space().max(1);
                     loop {
@@ -330,8 +334,8 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
                         let next = rate.lock().on_sample(sample, std::time::Instant::now());
                         if let Some(k) = next {
                             tracing::debug!("画面码率自适应 → {k} kbps（丢包 {} / 发送 {}）", st.path.lost_packets, st.path.sent_packets);
-                            let p = platform.clone();
-                            let _ = tokio::task::spawn_blocking(move || p.set_bitrate(display, k)).await;
+                            let (p, hub) = (platform.clone(), hub.clone());
+                            let _ = tokio::task::spawn_blocking(move || hub.set_bitrate(&p, display, sub_id, k)).await;
                         }
                     }
                 })
@@ -343,13 +347,13 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
                     DisplayIn::RequestKeyframe => platform.request_keyframe(req.display_id),
                     DisplayIn::SetBitrate(k) => {
                         let k = rate.lock().set_ceiling(k.clamp(200, 200_000), std::time::Instant::now());
-                        platform.set_bitrate(req.display_id, k);
+                        host.captures.set_bitrate(&platform, req.display_id, sub_id, k);
                     }
                     DisplayIn::Stop => break,
                 }
             }
             adapt.abort();
-            platform.stop_capture(req.display_id);
+            host.captures.unsubscribe(&platform, req.display_id, sub_id);
             *sink.ctl.lock() = None;
             writer.abort();
         }

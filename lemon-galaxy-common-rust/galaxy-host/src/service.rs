@@ -116,6 +116,8 @@ pub struct HostService {
     pub platform: RwLock<Arc<dyn HostPlatform>>,
     /// 远端声音分发
     pub audio: Arc<crate::audio::AudioHub>,
+    /// 画面：同一块屏只采集一路，分给所有在看的会话
+    pub captures: Arc<crate::capture::CaptureHub>,
     /// 开着隐私屏的会话
     pub privacy_owner: parking_lot::Mutex<Option<String>>,
     /// 虚拟屏归属（见 vdisplay.rs）
@@ -165,6 +167,7 @@ impl HostService {
             terms: Arc::new(TermManager::default()),
             platform: RwLock::new(Arc::new(NoPlatform)),
             audio: crate::audio::AudioHub::new(),
+            captures: crate::capture::CaptureHub::new(),
             privacy_owner: parking_lot::Mutex::new(None),
             vdisplays: Default::default(),
             stopped: std::sync::atomic::AtomicBool::new(false),
