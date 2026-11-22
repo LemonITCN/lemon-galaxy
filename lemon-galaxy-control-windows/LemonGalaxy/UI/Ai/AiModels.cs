@@ -144,7 +144,8 @@ internal sealed class AiHub
     {
         if (Models == null) return;
         if (Model(DraftModel) == null) DraftModel = Models.Items.Select(Key).FirstOrDefault() ?? "";
-        DraftMode = Cap(DraftMode);
+        // 从设置重新取再封顶：上一次列表若是「没开通」（上限 Off）会把草稿压成 Off，开通后要能恢复
+        DraftMode = Cap(app.Settings.AiMode);
     }
 
     // ---------- 对话列表 ----------

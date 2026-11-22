@@ -874,17 +874,37 @@ struct FlowLayout: Layout {
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let width = proposal.width ?? 600
         let rs = rows(width, subviews)
-        let h = rs.reduce(CGFloat(0)) { $0 + ($1.map(\.1.height).max() ?? 0) } + spacing * CGFloat(max(rs.count - 1, 0))
-        let w = rs.map { r in r.reduce(CGFloat(0)) { $0 + $1.1.width } + spacing * CGFloat(max(r.count - 1, 0)) }.max() ?? 0
-        return CGSize(width: proposal.width == nil ? w : min(width, max(w, trailing ? w : width)), height: h)
+        var h: CGFloat = 0
+        var w: CGFloat = 0
+        for r in rs {
+            h += rowHeight(r)
+            w = max(w, rowWidth(r))
+        }
+        if rs.count > 1 { h += spacing * CGFloat(rs.count - 1) }
+        let outW: CGFloat
+        if proposal.width == nil { outW = w } else if trailing { outW = min(width, w) } else { outW = width }
+        return CGSize(width: outW, height: h)
+    }
+
+    private func rowWidth(_ r: [(Int, CGSize)]) -> CGFloat {
+        var x: CGFloat = 0
+        for item in r { x += item.1.width }
+        if r.count > 1 { x += spacing * CGFloat(r.count - 1) }
+        return x
+    }
+
+    private func rowHeight(_ r: [(Int, CGSize)]) -> CGFloat {
+        var y: CGFloat = 0
+        for item in r { y = max(y, item.1.height) }
+        return y
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         var y = bounds.minY
         for r in rows(bounds.width, subviews) {
-            let rowW = r.reduce(CGFloat(0)) { $0 + $1.1.width } + spacing * CGFloat(max(r.count - 1, 0))
+            let rowW = rowWidth(r)
             var x = trailing ? bounds.maxX - rowW : bounds.minX
-            let rowH = r.map(\.1.height).max() ?? 0
+            let rowH = rowHeight(r)
             for (i, sz) in r {
                 subviews[i].place(at: CGPoint(x: x, y: y + (rowH - sz.height) / 2), proposal: ProposedViewSize(sz))
                 x += sz.width + spacing
