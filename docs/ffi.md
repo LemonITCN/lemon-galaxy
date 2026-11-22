@@ -79,12 +79,15 @@ async list_terminals() -> [TerminalSessionInfo]
 async kill_terminal(session_id)
 files() -> FileClient
 async exec(ExecRequest{command, shell?, cwd?, timeout_ms, max_output}) -> ExecResult{code?, stdout, stderr, timed_out, truncated, duration_ms}
-async list_displays() -> [DisplayInfo]
+async list_displays() -> [DisplayInfo]                                   DisplayInfo{id, name, width, height, scale, primary, is_virtual}；被控端没有亮着的显示器时会先自动加无头兜底屏（is_virtual 为真）
 async open_display(DisplayOptions{display_id, max_fps, bitrate_kbps, codecs, view_only}, VideoSink) -> DisplayChannel
 async screenshot(display_id, max_width) -> ImageData
 async clipboard_get() -> ClipboardData? / clipboard_set(ClipboardData)      Text{text} | Image{image} | Files{paths}
 async forward_port(local_port, remote_host, remote_port) -> PortForward     local_port() / stop()
 async set_privacy(on)                                                     能力列表有 "privacy" 才支持（需要控制权限）
+virtual_display_max() -> UInt32                                           主控最多能加几块虚拟屏（能力 "virtual_display" + "virtual_display_max=N"）；不支持或没有控制权限时为 0
+async add_virtual_display(width, height, refresh) -> DisplayInfo          在被控端加一块虚拟屏（扩展桌面，refresh 为 0 用 60 Hz），返回的 id 直接用于 open_display；本会话断开时被控端自动删
+async remove_virtual_display(display_id)                                  删掉本会话加的虚拟屏
 async start_audio(volume) -> AudioPlayback                                能力列表有 "audio" 才支持
 clipboard_push_files(local_paths, TransferListener) -> ClipboardTransfer   复制粘贴文件（本机→远端）：传到被控端暂存区再设成远端剪贴板
 clipboard_pull_files(remote_paths, local_dir, TransferListener) -> ClipboardTransfer   远端剪贴板里的文件取回本机目录，完成后 paths() 是本机路径

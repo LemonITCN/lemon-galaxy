@@ -201,6 +201,7 @@ pub fn main(os: Arc<dyn WorkerOs>) -> ! {
             "update" => update_cmd(os.as_ref(), &dir, &a.rest).await,
             "auto-update" => auto_update_cmd(&dir, &a.rest),
             "lock-on-end" => lock_on_end_cmd(&dir, &a.rest),
+            "headless-display" => headless_display_cmd(&dir, &a.rest),
             "install-service" => os.install_service(&dir),
             "uninstall-service" => os.uninstall_service(),
             "version" | "--version" | "-V" => {
@@ -241,6 +242,8 @@ fn help(os: &dyn WorkerOs) {
         println!("  update [--check]    检查并安装新版本（发布签名校验通过才装）");
         println!("  auto-update on|off  服务模式下是否自动更新（默认开）");
         println!("  lock-on-end on|off  远程看过桌面的会话都结束后自动锁屏（默认关）");
+        println!("  headless-display off|宽x高[@刷新率]|default");
+        println!("                      本机没有亮着的显示器时自动加的虚拟屏（默认 1920x1080@60，需要虚拟屏驱动）");
         for (c, z, _) in os.extra_help() {
             println!("  {c:<19} {z}");
         }
@@ -261,6 +264,8 @@ fn help(os: &dyn WorkerOs) {
         println!("  update [--check]    Check for and install a new version (signature verified)");
         println!("  auto-update on|off  Auto-update when running as a service (default on)");
         println!("  lock-on-end on|off  Lock the screen after remote desktop sessions end (default off)");
+        println!("  headless-display off|WxH[@Hz]|default");
+        println!("                      Virtual display added when no monitor is on (default 1920x1080@60, needs the driver)");
         for (c, _, e) in os.extra_help() {
             println!("  {c:<19} {e}");
         }
@@ -850,6 +855,33 @@ fn lock_on_end_cmd(dir: &Path, rest: &[String]) -> i32 {
     }
     let _ = st.save(&path);
     println!("{}: {}", t!("远程结束后自动锁屏", "Lock when remote session ends"), onoff(st.lock_on_end));
+    0
+}
+
+fn headless_display_cmd(dir: &Path, rest: &[String]) -> i32 {
+    let path = dir.join("host.json");
+    let mut st = HostState::load(&path);
+    let show = |v: &str| match galaxy_host::accounts::parse_headless_display(v) {
+        Some((w, h, hz)) => format!("{w}x{h}@{hz}"),
+        None => t!("关", "off").to_string(),
+    };
+    match rest.first().map(|s| s.as_str()) {
+        None => {
+            println!("{}: {}", t!("无头兜底屏", "Headless display"), show(&st.headless_display));
+            return 0;
+        }
+        Some("default") => st.headless_display.clear(),
+        Some(v) => {
+            let off = matches!(v.to_ascii_lowercase().as_str(), "off" | "no" | "false" | "0");
+            if !off && galaxy_host::accounts::parse_headless_display(v).is_none() {
+                eprintln!("{} {v}（{}）", t!("写法不对：", "Invalid value:"), t!("off、default 或 宽x高[@刷新率]，如 2560x1440@60", "off, default or WxH[@Hz], e.g. 2560x1440@60"));
+                return 1;
+            }
+            st.headless_display = if off { "off".into() } else { v.to_string() };
+        }
+    }
+    let _ = st.save(&path);
+    println!("{}: {}", t!("无头兜底屏", "Headless display"), show(&st.headless_display));
     0
 }
 

@@ -411,7 +411,35 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             if !p.view {
                 return MgmtResp::Error(denied("没有查看画面的权限"));
             }
+            // 本机没有亮着的显示器时先加无头兜底屏
+            host.ensure_headless_display().await;
             MgmtResp::Displays(platform.list_displays())
+        }
+        MgmtReq::VirtualDisplayAdd { width, height, refresh } => {
+            if !p.control {
+                return MgmtResp::Error(denied("没有控制权限"));
+            }
+            let sid = sess.info.read().id.clone();
+            match host.add_virtual_display(&sid, width, height, refresh).await {
+                Ok(d) => {
+                    host.log(&sid, &sess.from_user_name, "virtual_display", &format!("加虚拟屏 {}（{}x{}）", d.name, d.width, d.height), false);
+                    MgmtResp::Display(d)
+                }
+                Err(e) => MgmtResp::Error(e),
+            }
+        }
+        MgmtReq::VirtualDisplayRemove { display_id } => {
+            if !p.control {
+                return MgmtResp::Error(denied("没有控制权限"));
+            }
+            let sid = sess.info.read().id.clone();
+            match host.remove_virtual_display(&sid, display_id).await {
+                Ok(()) => {
+                    host.log(&sid, &sess.from_user_name, "virtual_display", &format!("删虚拟屏 {display_id}"), false);
+                    MgmtResp::Ok
+                }
+                Err(e) => MgmtResp::Error(e),
+            }
         }
         MgmtReq::Screenshot { display, max_width, max_height } => {
             if !p.view {

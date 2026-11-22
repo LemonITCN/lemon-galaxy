@@ -20,6 +20,11 @@ pub enum ToAgent {
     Privacy { id: u64, on: bool },
     StartAudio { id: u64 },
     StopAudio,
+    /// 加虚拟屏并扩展进桌面
+    VirtualAdd { id: u64, width: u32, height: u32, refresh: u32 },
+    VirtualRemove { id: u64, display: u32 },
+    /// 查现有虚拟屏与是否需要无头兜底屏
+    VirtualState { id: u64 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,12 +43,15 @@ pub enum FromAgent {
     /// 交错排列的浮点样本
     Audio { pcm: Vec<f32>, rate: u32, channels: u16 },
     Log { error: bool, text: String },
+    VirtualAdded { id: u64, result: Result<DisplayInfo, String> },
+    VirtualRemoved { id: u64, result: Result<(), String> },
+    VirtualState { id: u64, ids: Vec<u32>, needs_headless: bool },
 }
 
 impl FromAgent {
     pub fn reply_id(&self) -> Option<u64> {
         match self {
-            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::PrivacyResult { id, .. } | Self::AudioStarted { id, .. } => Some(*id),
+            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::PrivacyResult { id, .. } | Self::AudioStarted { id, .. } | Self::VirtualAdded { id, .. } | Self::VirtualRemoved { id, .. } | Self::VirtualState { id, .. } => Some(*id),
             _ => None,
         }
     }

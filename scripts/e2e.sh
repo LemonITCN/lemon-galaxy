@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 端到端测试：本机起服务器 + 被控端 + 开发用主控端，验证登录、连接（直连 / UDP 中转 / TCP 中转）、
-# 命令执行、终端断线继承、远端声音（测试音）、文件传输、复制粘贴文件、远程开机。
+# 命令执行、能力列表（无虚拟屏）、终端断线继承、远端声音（测试音）、文件传输、复制粘贴文件、远程开机。
 # Linux / macOS：有免密 sudo 时再以 root 运行被控端，验证切换系统用户与降权文件操作。
 # Windows（Git Bash）：有管理员权限时再装成 SYSTEM 服务，验证命令与文件以指定账号身份执行。
 #   scripts/e2e.sh <二进制目录>
@@ -54,6 +54,12 @@ if [ "$WIN" = 1 ]; then
 else
   check "hello-e2e" timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" exec "" "echo hello-e2e && uname -sm && id -un"
 fi
+
+step "能力列表（Linux / macOS 被控端、没装虚拟屏驱动的 Windows 被控端都没有虚拟屏）"
+CAPS="$(timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" caps "" 2>&1 | grep -v -E 'INFO|DEBUG' || true)"
+echo "$CAPS" | grep -E "能力|虚拟屏" || fail "没有拿到能力列表：$CAPS"
+echo "$CAPS" | grep "^能力：" | grep -q "virtual_display" && fail "不该有虚拟屏能力：$CAPS"
+echo "$CAPS" | grep -q "^虚拟屏上限：0" || fail "虚拟屏上限应为 0：$CAPS"
 
 step "终端断线继承"
 check "接续后环境变量还在（断线继承）：true" timeout 60 "$BIN/galaxy-dev" --data "$WORK/ctl" term-test ""

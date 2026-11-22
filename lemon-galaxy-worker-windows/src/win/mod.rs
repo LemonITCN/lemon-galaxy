@@ -3,12 +3,14 @@ mod audio;
 mod capture;
 mod clipboard;
 mod compat;
+mod driver;
 mod encode;
 mod input;
 mod ipc;
 mod platform;
 mod privacy;
 mod service;
+mod vdisplay;
 
 use galaxy_host::platform::HostPlatform;
 use galaxy_proto::Platform;
@@ -129,12 +131,18 @@ impl WorkerOs for WindowsOs {
             "service" => Some(service::run_dispatcher(dir)),
             "__lg-session-agent" => Some(agent::main()),
             "selftest-capture" => Some(agent::selftest(_rest)),
+            "install-display-driver" => Some(driver::install_cmd(_rest)),
+            "uninstall-display-driver" => Some(driver::uninstall_cmd()),
             _ => None,
         }
     }
 
     fn extra_help(&self) -> Vec<(&'static str, &'static str, &'static str)> {
-        vec![("selftest-capture", "检查截屏与编码是否正常（--bench 测试本机每种编码器，--dump 目录 存下码流）", "Check screen capture and encoding (--bench: test every encoder, --dump DIR: save streams)")]
+        vec![
+            ("selftest-capture", "检查截屏与编码是否正常（--bench 测试本机每种编码器，--dump 目录 存下码流）", "Check screen capture and encoding (--bench: test every encoder, --dump DIR: save streams)"),
+            ("install-display-driver", "安装虚拟屏驱动 [--dev] [驱动包目录]（管理员；测试签名包要 --dev）", "Install the virtual display driver [--dev] [package dir] (admin; --dev for test-signed packages)"),
+            ("uninstall-display-driver", "卸载虚拟屏驱动（删设备、驱动包与测试证书）", "Remove the virtual display driver, its package and test certificate"),
+        ]
     }
 }
 

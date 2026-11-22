@@ -39,6 +39,10 @@ struct Inner {
     audio: Mutex<Option<Arc<dyn AudioSink>>>,
     /// (上次检查时间, 有没有声音输出设备)
     has_audio: Mutex<(Option<std::time::Instant>, bool)>,
+    /// (上次检查时间, 虚拟屏驱动在不在)
+    has_vd_driver: Mutex<(Option<std::time::Instant>, bool)>,
+    /// 现在这个画面代理里的虚拟屏 id（代理退出时驱动随句柄删屏，这里跟着清空）
+    virtual_ids: Mutex<std::collections::HashSet<u32>>,
 }
 
 pub struct WinPlatform {
@@ -56,6 +60,8 @@ impl WinPlatform {
                 captures: Mutex::new(HashMap::new()),
                 audio: Mutex::new(None),
                 has_audio: Mutex::new((None, false)),
+                has_vd_driver: Mutex::new((None, false)),
+                virtual_ids: Mutex::new(Default::default()),
             }),
         });
         // 会话切换监视
@@ -69,6 +75,10 @@ impl WinPlatform {
                 tracing::info!("控制台会话切换到 {active}，重启画面代理");
                 if let Some(a) = inner.agent.lock().take() {
                     a.child.kill();
+                }
+                if !inner.virtual_ids.lock().is_empty() {
+                    tracing::warn!("画面代理重启，虚拟屏随之删除");
+                    inner.virtual_ids.lock().clear();
                 }
                 let audio = inner.audio.lock().is_some();
                 if !inner.captures.lock().is_empty() || audio {
@@ -144,6 +154,7 @@ fn spawn_agent(inner: &Arc<Inner>) -> std::io::Result<Agent> {
             let mut g = inner.agent.lock();
             if g.as_ref().map(|a| a.generation == generation).unwrap_or(false) {
                 *g = None;
+                inner.virtual_ids.lock().clear();
                 tracing::warn!("画面代理已退出");
             }
         }
@@ -343,8 +354,65 @@ impl HostPlatform for WinPlatform {
         console_user()
     }
 
+    fn virtual_display_max(&self) -> u32 {
+        // 驱动在不在：最多 10 秒查一次（握手时都会问）
+        let mut g = self.inner.has_vd_driver.lock();
+        if g.0.map(|t| t.elapsed() > Duration::from_secs(10)).unwrap_or(true) {
+            *g = (Some(std::time::Instant::now()), super::vdisplay::driver_present());
+        }
+        if g.1 {
+            super::vdisplay::CONTROLLER_MAX
+        } else {
+            0
+        }
+    }
+
+    fn add_virtual_display(&self, width: u32, height: u32, refresh: u32) -> Result<DisplayInfo, String> {
+        match request(&self.inner, |id| ToAgent::VirtualAdd { id, width, height, refresh }, Duration::from_secs(20)) {
+            Some(FromAgent::VirtualAdded { result: Ok(d), .. }) => {
+                self.inner.virtual_ids.lock().insert(d.id);
+                Ok(d)
+            }
+            Some(FromAgent::VirtualAdded { result: Err(e), .. }) => Err(e),
+            _ => Err("画面代理没有响应".into()),
+        }
+    }
+
+    fn remove_virtual_display(&self, id: u32) -> Result<(), String> {
+        if !self.inner.virtual_ids.lock().remove(&id) {
+            return Ok(());
+        }
+        match request(&self.inner, |rid| ToAgent::VirtualRemove { id: rid, display: id }, Duration::from_secs(20)) {
+            Some(FromAgent::VirtualRemoved { result, .. }) => result,
+            _ => Err("画面代理没有响应".into()),
+        }
+    }
+
+    fn virtual_display_ids(&self) -> Vec<u32> {
+        self.inner.virtual_ids.lock().iter().copied().collect()
+    }
+
+    fn needs_headless_display(&self) -> bool {
+        // 测试用：当作本机没有亮着的显示器（验证无头兜底屏的加删，不用真合上笔记本）
+        if std::env::var("LEMON_GALAXY_TEST_HEADLESS").map(|v| v == "1").unwrap_or(false) {
+            return true;
+        }
+        match request(&self.inner, |id| ToAgent::VirtualState { id }, Duration::from_secs(10)) {
+            Some(FromAgent::VirtualState { ids, needs_headless, .. }) => {
+                // 顺便对账：代理里实际有的虚拟屏
+                let mut g = self.inner.virtual_ids.lock();
+                g.retain(|x| ids.contains(x));
+                needs_headless
+            }
+            _ => false,
+        }
+    }
+
     fn capabilities(&self) -> Vec<String> {
         let mut c: Vec<String> = vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into()];
+        if self.virtual_display_max() > 0 {
+            c.push("virtual_display".into());
+        }
         // 有没有声音输出设备：最多 30 秒查一次（服务器、虚拟机常常没有）
         let has = {
             let mut g = self.inner.has_audio.lock();

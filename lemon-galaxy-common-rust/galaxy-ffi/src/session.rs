@@ -165,6 +165,24 @@ impl PeerSession {
         .await
     }
 
+    /// 主控最多能在被控端加几块虚拟屏（能力列表 "virtual_display" + "virtual_display_max=N"）；不支持或没有控制权限时为 0。
+    pub fn virtual_display_max(&self) -> u32 {
+        self.inner.virtual_display_max()
+    }
+
+    /// 在被控端加一块虚拟屏（扩展桌面），返回它的屏幕信息（is_virtual 为真），之后用它的 id 调 open_display。
+    /// `refresh` 为 0 时用 60 Hz。虚拟屏属于本会话，断开时被控端自动删掉。需要控制权限。
+    pub async fn add_virtual_display(&self, width: u32, height: u32, refresh: u32) -> Result<DisplayInfo> {
+        let s = self.inner.clone();
+        run(async move { Ok(s.add_virtual_display(width, height, refresh).await?.into()) }).await
+    }
+
+    /// 删掉本会话加的虚拟屏。
+    pub async fn remove_virtual_display(&self, display_id: u32) -> Result<()> {
+        let s = self.inner.clone();
+        run(async move { s.remove_virtual_display(display_id).await.map_err(Into::into) }).await
+    }
+
     pub async fn screenshot(&self, display_id: u32, max_width: u32) -> Result<ImageData> {
         let s = self.inner.clone();
         run(async move { Ok(s.screenshot(display_id, max_width, max_width).await?.into()) }).await

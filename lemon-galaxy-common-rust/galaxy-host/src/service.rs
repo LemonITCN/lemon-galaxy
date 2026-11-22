@@ -118,6 +118,8 @@ pub struct HostService {
     pub audio: Arc<crate::audio::AudioHub>,
     /// 开着隐私屏的会话
     pub privacy_owner: parking_lot::Mutex<Option<String>>,
+    /// 虚拟屏归属（见 vdisplay.rs）
+    pub(crate) vdisplays: crate::vdisplay::VirtualDisplays,
     /// 已停止（换服务器等）：不再重连信令
     stopped: std::sync::atomic::AtomicBool,
     /// 通知局域网发现监听退出
@@ -164,6 +166,7 @@ impl HostService {
             platform: RwLock::new(Arc::new(NoPlatform)),
             audio: crate::audio::AudioHub::new(),
             privacy_owner: parking_lot::Mutex::new(None),
+            vdisplays: Default::default(),
             stopped: std::sync::atomic::AtomicBool::new(false),
             lan_stop,
             events: RwLock::new(Arc::new(NoEvents)),
@@ -366,6 +369,7 @@ impl HostService {
                 || cur.remote_enabled != disk.remote_enabled
                 || cur.assist_code != disk.assist_code
                 || cur.lock_on_end != disk.lock_on_end
+                || cur.headless_display != disk.headless_display
         };
         if !changed {
             return false;
@@ -377,6 +381,7 @@ impl HostService {
             st.remote_enabled = disk.remote_enabled;
             st.assist_code = disk.assist_code;
             st.lock_on_end = disk.lock_on_end;
+            st.headless_display = disk.headless_display;
         }
         self.refresh_lan_keys();
         let has_active = self.state.read().active().count() > 0;
@@ -410,6 +415,21 @@ impl HostService {
 
     pub fn lock_on_end(&self) -> bool {
         self.state.read().lock_on_end
+    }
+
+    /// 无头兜底屏的模式 (宽, 高, 刷新率)；关闭时为 None。
+    pub fn headless_display(&self) -> Option<(u32, u32, u32)> {
+        crate::accounts::parse_headless_display(&self.state.read().headless_display)
+    }
+
+    /// 修改无头兜底屏设置（空 = 默认 1920x1080@60，`off` = 关闭）。
+    pub fn set_headless_display(&self, v: &str) {
+        self.state.write().headless_display = v.trim().to_string();
+        self.save();
+    }
+
+    pub(crate) fn session_count(&self) -> usize {
+        self.sessions.lock().len()
     }
 
     /// 会话结束后：开着自动锁屏、这个会话看过桌面、10 秒内没有别的会话在看桌面（断线重连不算结束），就锁屏。
@@ -779,6 +799,14 @@ impl HostService {
         if perms.control && pc.iter().any(|x| x == "privacy") {
             c.push("privacy".into());
         }
+        // 虚拟屏：要有控制权限，平台层有驱动才有
+        if perms.control {
+            let max = self.platform.read().virtual_display_max();
+            if max > 0 {
+                c.push(galaxy_proto::peer::CAP_VIRTUAL_DISPLAY.into());
+                c.push(format!("{}={max}", galaxy_proto::peer::CAP_VIRTUAL_DISPLAY_MAX));
+            }
+        }
         if perms.clipboard && pc.iter().any(|x| x == "clipboard") {
             c.push("clipboard".into());
         }
@@ -942,6 +970,8 @@ impl HostService {
             *self.privacy_owner.lock() = None;
             self.platform.read().set_privacy(false);
         }
+        // 这个会话加的虚拟屏删掉；最后一个会话走了，无头兜底屏稍后也删掉
+        self.virtual_displays_session_ended(&id).await;
         if let Some(p) = pending {
             let _ = p.stop.send(true);
         }

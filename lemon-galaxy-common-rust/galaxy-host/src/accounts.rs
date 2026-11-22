@@ -77,6 +77,42 @@ pub struct HostState {
     /// 远程看过桌面的会话都结束后自动锁屏
     #[serde(default)]
     pub lock_on_end: bool,
+    /// 无头兜底屏：本机没有亮着的显示器时，主控打开屏幕列表就自动加一块虚拟屏，最后一个会话结束后删掉。
+    /// 空 = 默认 1920x1080@60，`off` = 不加，`宽x高[@刷新率]` = 自定义
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub headless_display: String,
+}
+
+/// 解析无头兜底屏设置，返回 (宽, 高, 刷新率)；关闭或写错时为 None。
+pub fn parse_headless_display(s: &str) -> Option<(u32, u32, u32)> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return Some((1920, 1080, 60));
+    }
+    if matches!(s.as_str(), "off" | "no" | "false" | "0") {
+        return None;
+    }
+    let (size, hz) = match s.split_once('@') {
+        Some((a, b)) => (a, b.trim().parse().ok()?),
+        None => (s.as_str(), 60),
+    };
+    let (w, h) = size.split_once(['x', '*'])?;
+    let (w, h) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    galaxy_proto::peer::virtual_display_mode_ok(w, h, hz).then_some((w, h, hz))
+}
+
+#[cfg(test)]
+mod headless_tests {
+    use super::parse_headless_display as p;
+    #[test]
+    fn parse() {
+        assert_eq!(p(""), Some((1920, 1080, 60)));
+        assert_eq!(p("off"), None);
+        assert_eq!(p("2560x1440"), Some((2560, 1440, 60)));
+        assert_eq!(p(" 3840X2160@30 "), Some((3840, 2160, 30)));
+        assert_eq!(p("100x100"), None);
+        assert_eq!(p("abc"), None);
+    }
 }
 
 impl HostState {

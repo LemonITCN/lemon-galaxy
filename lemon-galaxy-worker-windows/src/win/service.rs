@@ -103,6 +103,8 @@ pub fn install(dir: &Path) -> i32 {
         ]),
     });
     let _ = service.set_failure_actions_on_non_crash_failures(true);
+    // 程序旁边带了虚拟屏驱动包就顺带装上（测试签名包要开发标志，见 driver.rs）
+    super::driver::install_with_service(&target_dir);
     // 允许服务发送 Ctrl+Alt+Del（远程解锁、登录界面要用）
     let _ = std::process::Command::new("reg")
         .args(["add", "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "/v", "SoftwareSASGeneration", "/t", "REG_DWORD", "/d", "1", "/f"])

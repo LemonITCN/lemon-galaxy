@@ -23,6 +23,12 @@ struct CaptureCtl {
     reconfig: AtomicBool,
 }
 
+enum VdJob {
+    Add { id: u64, width: u32, height: u32, refresh: u32 },
+    Remove { id: u64, display: u32 },
+    State { id: u64 },
+}
+
 enum UiJob {
     Inject(u32, InputEvent),
     ClipboardGet(u64),
@@ -72,6 +78,41 @@ pub fn main() -> i32 {
             }
         });
     }
+    // 虚拟屏放在自己的线程里（加删一次要一秒左右，不挡住键鼠和其它请求）；驱动句柄归这个线程，代理退出时删屏
+    let vd_names: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let (vd_tx, vd_rx) = mpsc::channel::<VdJob>();
+    let vd_thread = {
+        let out = out_tx.clone();
+        let names = vd_names.clone();
+        std::thread::spawn(move || {
+            attach_input_desktop();
+            let logf = |text: String| {
+                let _ = out.send(FromAgent::Log { error: false, text });
+            };
+            let mut vd = super::vdisplay::VirtualDisplays::default();
+            while let Ok(j) = vd_rx.recv() {
+                if input_desktop_changed() {
+                    attach_input_desktop();
+                }
+                match j {
+                    VdJob::Add { id, width, height, refresh } => {
+                        let result = vd.add(width, height, refresh, &logf);
+                        *names.lock().unwrap() = vd.names();
+                        let _ = out.send(FromAgent::VirtualAdded { id, result });
+                    }
+                    VdJob::Remove { id, display } => {
+                        let result = vd.remove(display, &logf);
+                        *names.lock().unwrap() = vd.names();
+                        let _ = out.send(FromAgent::VirtualRemoved { id, result });
+                    }
+                    VdJob::State { id } => {
+                        let _ = out.send(FromAgent::VirtualState { id, ids: vd.ids(), needs_headless: vd.needs_headless() });
+                    }
+                }
+            }
+            vd.clear(&logf);
+        })
+    };
     let mut captures: HashMap<u32, Arc<CaptureCtl>> = HashMap::new();
     let mut privacy: Option<super::privacy::Privacy> = None;
     let mut audio_stop: Option<Arc<AtomicBool>> = None;
@@ -119,8 +160,25 @@ pub fn main() -> i32 {
                 }
             }
             ToAgent::ListDisplays { id } => {
-                let list = monitors().iter().map(|m| m.info()).collect();
+                let virt = vd_names.lock().unwrap().clone();
+                let list = monitors()
+                    .iter()
+                    .map(|m| {
+                        let mut i = m.info();
+                        i.is_virtual = virt.iter().any(|n| n.eq_ignore_ascii_case(&m.device));
+                        i
+                    })
+                    .collect();
                 let _ = out_tx.send(FromAgent::Displays { id, list });
+            }
+            ToAgent::VirtualAdd { id, width, height, refresh } => {
+                let _ = vd_tx.send(VdJob::Add { id, width, height, refresh });
+            }
+            ToAgent::VirtualRemove { id, display } => {
+                let _ = vd_tx.send(VdJob::Remove { id, display });
+            }
+            ToAgent::VirtualState { id } => {
+                let _ = vd_tx.send(VdJob::State { id });
             }
             ToAgent::StartCapture { id, display, max_fps, bitrate_kbps } => {
                 if let Some(old) = captures.remove(&display) {
@@ -169,6 +227,9 @@ pub fn main() -> i32 {
     for c in captures.values() {
         c.stop.store(true, Ordering::Relaxed);
     }
+    // 删掉虚拟屏、恢复显示配置后再退出（句柄关闭时驱动也会删屏，这里多做一步恢复配置）
+    drop(vd_tx);
+    let _ = vd_thread.join();
     drop(out_tx);
     let _ = writer.join();
     0

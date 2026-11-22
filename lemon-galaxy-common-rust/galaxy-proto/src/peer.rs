@@ -167,6 +167,11 @@ pub enum MgmtReq {
     Inject { display: u32, events: Vec<InputEvent>, origin: Origin },
     /// 隐私屏：被控端本地屏幕黑掉、本地键鼠失效，远端照常看到和操作。开启它的会话结束时自动关闭
     SetPrivacy { on: bool },
+    /// 加一块虚拟屏（需要控制权限，能力列表有 "virtual_display"）。应答 `MgmtResp::Display`，之后按它的 id 开画面。
+    /// 虚拟屏属于加它的会话，会话结束时自动删掉。`refresh` 为 0 时用 60 Hz
+    VirtualDisplayAdd { width: u32, height: u32, refresh: u32 },
+    /// 删掉本会话加的虚拟屏
+    VirtualDisplayRemove { display_id: u32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -178,6 +183,22 @@ pub enum MgmtResp {
     Clipboard(Option<ClipboardData>),
     Ok,
     Error(PeerError),
+    /// 新加的虚拟屏（应答 `VirtualDisplayAdd`）。放在最后，老版本的变体编号不变
+    Display(DisplayInfo),
+}
+
+/// 虚拟屏能力：能力列表里有 "virtual_display"，另有 "virtual_display_max=N" 给出主控最多能加几块。
+pub const CAP_VIRTUAL_DISPLAY: &str = "virtual_display";
+pub const CAP_VIRTUAL_DISPLAY_MAX: &str = "virtual_display_max";
+
+/// 能力列表里 `key=value` 形式的值（如 `virtual_display_max=3`）。
+pub fn capability_value<'a>(caps: &'a [String], key: &str) -> Option<&'a str> {
+    caps.iter().find_map(|c| c.strip_prefix(key).and_then(|r| r.strip_prefix('=')))
+}
+
+/// 虚拟屏分辨率与刷新率的合法范围（与 Windows 驱动的校验一致，再收紧到常用范围）。
+pub fn virtual_display_mode_ok(width: u32, height: u32, refresh: u32) -> bool {
+    (640..=7680).contains(&width) && (480..=4320).contains(&height) && (24..=240).contains(&refresh)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -492,6 +513,41 @@ mod tests {
         assert_eq!(d, h);
         assert_eq!(&v[pos..], b"opus");
         assert!(AudioPacketHeader::decode(&v[..4]).is_none());
+    }
+
+    #[test]
+    fn virtual_display_messages() {
+        // 新变体追加在最后：老变体的编码不变，新变体能来回编解码
+        let old = postcard::to_stdvec(&MgmtReq::SetPrivacy { on: true }).unwrap();
+        assert_eq!(old[0], 10);
+        let add = MgmtReq::VirtualDisplayAdd { width: 2560, height: 1440, refresh: 120 };
+        let b = postcard::to_stdvec(&add).unwrap();
+        assert_eq!(b[0], 11);
+        match postcard::from_bytes::<MgmtReq>(&b).unwrap() {
+            MgmtReq::VirtualDisplayAdd { width, height, refresh } => assert_eq!((width, height, refresh), (2560, 1440, 120)),
+            other => panic!("{other:?}"),
+        }
+        let b = postcard::to_stdvec(&MgmtReq::VirtualDisplayRemove { display_id: 7 }).unwrap();
+        assert_eq!(b[0], 12);
+        assert!(matches!(postcard::from_bytes::<MgmtReq>(&b).unwrap(), MgmtReq::VirtualDisplayRemove { display_id: 7 }));
+        assert_eq!(postcard::to_stdvec(&MgmtResp::Ok).unwrap()[0], 5);
+        let info = DisplayInfo { id: 7, name: "DISPLAY7".into(), width: 2560, height: 1440, scale: 1.0, primary: false, is_virtual: true };
+        let b = postcard::to_stdvec(&MgmtResp::Display(info)).unwrap();
+        assert_eq!(b[0], 7);
+        match postcard::from_bytes::<MgmtResp>(&b).unwrap() {
+            MgmtResp::Display(d) => assert!(d.is_virtual && d.id == 7 && d.width == 2560),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn capability_values() {
+        let caps: Vec<String> = ["display", "virtual_display", "virtual_display_max=3"].map(String::from).to_vec();
+        assert_eq!(capability_value(&caps, CAP_VIRTUAL_DISPLAY_MAX), Some("3"));
+        assert_eq!(capability_value(&caps, "display"), None);
+        assert!(virtual_display_mode_ok(1920, 1080, 60));
+        assert!(!virtual_display_mode_ok(1920, 1080, 0));
+        assert!(!virtual_display_mode_ok(16384, 1080, 60));
     }
 
     #[test]

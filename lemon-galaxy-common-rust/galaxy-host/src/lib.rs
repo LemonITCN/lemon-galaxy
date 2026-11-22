@@ -11,6 +11,7 @@ pub mod serve;
 pub mod service;
 pub mod sysuser;
 pub mod term;
+pub mod vdisplay;
 #[cfg(windows)]
 pub mod win;
 

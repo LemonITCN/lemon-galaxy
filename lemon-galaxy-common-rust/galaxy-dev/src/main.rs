@@ -12,6 +12,12 @@
 //! galaxy-dev --data <目录> wake <设备ID前缀>      远程开机：找同一网络里在线的设备代发唤醒包
 //! galaxy-dev --data <目录> clip-push <设备> <本机路径…>        复制粘贴文件：传到被控端暂存区并设成远端剪贴板，打印远端路径
 //! galaxy-dev --data <目录> clip-pull <设备> <本机目录> <远端路径…> 把远端文件（含文件夹）取回本机目录
+//! galaxy-dev --data <目录> caps <设备>          打印被控端的能力列表与权限
+//! galaxy-dev --data <目录> displays <设备>      列出屏幕（没有亮着的显示器时被控端会加无头兜底屏）
+//! galaxy-dev --data <目录> vd-test <设备> [宽 高 刷新率 [看画面秒数]]
+//!                                             虚拟屏：加一块、列屏、开画面数帧、删掉、再列屏（断开时被控端也会自动删）
+//! galaxy-dev --data <目录> view <设备> <屏幕 id> [秒数]    看画面（不解码），每秒打印收到的帧数与分辨率
+//! galaxy-dev --data <目录> vd-add <设备> <块数> [宽 高 刷新率]   连加几块（验证上限），列屏后直接断开（验证会话结束自动删屏）
 //! galaxy-dev --data <目录> assist <设备码> <验证码> <命令>
 //! galaxy-dev --data <目录> vault-test
 //! galaxy-dev release-sign <文件>            用环境变量 LEMONGALAXY_RELEASE_SIGNING_KEY（base64 私钥种子）签名，写出 <文件>.sig
@@ -235,6 +241,47 @@ async fn main() -> anyhow::Result<()> {
                     println!("\n下载完成");
                 }
                 "term-test" => term_test(&session).await?,
+                "caps" => {
+                    println!("能力：{}", session.ack.capabilities.join(" "));
+                    println!("权限：{:?}", session.ack.permissions);
+                    println!("虚拟屏上限：{}", session.virtual_display_max());
+                }
+                "displays" => {
+                    for d in session.list_displays().await? {
+                        println!("屏幕 {} {} {}x{} 缩放 {} 主屏 {} 虚拟 {}", d.id, d.name, d.width, d.height, d.scale, d.primary, d.is_virtual);
+                    }
+                }
+                "vd-test" => vd_test(&session, &args[2..]).await?,
+                "view" => {
+                    let display: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let secs: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
+                    let sink = Arc::new(FrameCount::default());
+                    let req = galaxy_proto::peer::DisplayRequest { display_id: display, codecs: vec![galaxy_proto::peer::VideoCodec::H264], max_fps: 30, bitrate_kbps: 4000, view_only: true };
+                    let ch = session.open_display(req, sink.clone()).await?;
+                    for i in 0..secs {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        if i % 2 == 1 {
+                            ch.request_keyframe().await;
+                        }
+                        let (w, h) = *sink.size.lock().unwrap();
+                        println!("第 {} 秒：累计 {} 帧，{w}x{h}", i + 1, sink.frames.load(std::sync::atomic::Ordering::Relaxed));
+                    }
+                    ch.stop().await;
+                }
+                "vd-add" => {
+                    let num = |i: usize, d: u32| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+                    let n = num(2, 1);
+                    for i in 0..n {
+                        match session.add_virtual_display(num(3, 1920), num(4, 1080), num(5, 60)).await {
+                            Ok(d) => println!("第 {} 块：id {} {} {}x{}", i + 1, d.id, d.name, d.width, d.height),
+                            Err(e) => println!("第 {} 块失败：{e}", i + 1),
+                        }
+                    }
+                    for d in session.list_displays().await? {
+                        println!("屏幕 {} {} {}x{} 虚拟 {}", d.id, d.name, d.width, d.height, d.is_virtual);
+                    }
+                    println!("不删，直接断开");
+                }
                 "clip-push" => {
                     struct P;
                     impl TransferProgress for P {
@@ -281,6 +328,73 @@ async fn main() -> anyhow::Result<()> {
             session.close();
         }
     }
+    Ok(())
+}
+
+#[derive(Default)]
+struct FrameCount {
+    frames: std::sync::atomic::AtomicU32,
+    size: std::sync::Mutex<(u32, u32)>,
+}
+
+impl galaxy_client::session::VideoSink for FrameCount {
+    fn on_config(&self, _c: galaxy_proto::peer::VideoCodec, w: u32, h: u32) {
+        *self.size.lock().unwrap() = (w, h);
+    }
+    fn on_frame(&self, _d: Vec<u8>, _p: u64, _kf: bool) {
+        self.frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn on_cursor(&self, _x: i32, _y: i32, _v: bool) {}
+}
+
+/// 虚拟屏：加、列、开画面数帧、删、再列。
+async fn vd_test(session: &Arc<PeerSession>, rest: &[String]) -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let num = |i: usize, d: u32| rest.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+    let (w, h, hz, secs) = (num(0, 1920), num(1, 1080), num(2, 60), num(3, 3));
+    println!("能力：{}", session.ack.capabilities.join(" "));
+    println!("虚拟屏上限：{}", session.virtual_display_max());
+    let show = |title: &str, list: &[galaxy_proto::peer::DisplayInfo]| {
+        println!("{title}：{} 块", list.len());
+        for d in list {
+            println!("  屏幕 {} {} {}x{} 主屏 {} 虚拟 {}", d.id, d.name, d.width, d.height, d.primary, d.is_virtual);
+        }
+    };
+    show("原有屏幕", &session.list_displays().await?);
+    let t = std::time::Instant::now();
+    let d = session.add_virtual_display(w, h, hz).await?;
+    println!("已加虚拟屏：id {} {} {}x{} 虚拟 {}（{} ms）", d.id, d.name, d.width, d.height, d.is_virtual, t.elapsed().as_millis());
+    show("加屏后", &session.list_displays().await?);
+    struct Count(AtomicU32, AtomicU32, std::sync::Mutex<(u32, u32)>);
+    impl galaxy_client::session::VideoSink for Count {
+        fn on_config(&self, _c: galaxy_proto::peer::VideoCodec, w: u32, h: u32) {
+            *self.2.lock().unwrap() = (w, h);
+        }
+        fn on_frame(&self, _d: Vec<u8>, _p: u64, kf: bool) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            if kf {
+                self.1.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn on_cursor(&self, _x: i32, _y: i32, _v: bool) {}
+    }
+    let sink = Arc::new(Count(AtomicU32::new(0), AtomicU32::new(0), std::sync::Mutex::new((0, 0))));
+    let req = galaxy_proto::peer::DisplayRequest { display_id: d.id, codecs: vec![galaxy_proto::peer::VideoCodec::H264], max_fps: 30, bitrate_kbps: 4000, view_only: true };
+    match session.open_display(req, sink.clone()).await {
+        Ok(ch) => {
+            tokio::time::sleep(Duration::from_secs(secs as u64)).await;
+            ch.stop().await;
+            let (fw, fh) = *sink.2.lock().unwrap();
+            println!("虚拟屏画面：{fw}x{fh}，{secs} 秒收到 {} 帧（关键帧 {}）", sink.0.load(Ordering::Relaxed), sink.1.load(Ordering::Relaxed));
+        }
+        Err(e) => println!("虚拟屏画面打开失败：{e}"),
+    }
+    let t = std::time::Instant::now();
+    session.remove_virtual_display(d.id).await?;
+    println!("已删虚拟屏 {}（{} ms）", d.id, t.elapsed().as_millis());
+    let after = session.list_displays().await?;
+    show("删屏后", &after);
+    println!("删后仍在列表里：{}", after.iter().any(|x| x.id == d.id && x.is_virtual));
     Ok(())
 }
 

@@ -288,6 +288,59 @@ jobs:
             dist/galaxy_ffi.dll
           if-no-files-found: error
 
+  windows-display-driver:
+    name: Windows 虚拟屏驱动（未签名包）
+    runs-on: windows-2025
+    # 先不挡发布、不进 Release：runner 上的 WDK 组件与 NuGet 版本还在摸索（docs/research/virtual-display.md 5.8）
+    continue-on-error: true
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: lemon-galaxy-worker-windows/driver
+    steps:
+      - uses: actions/checkout@v7
+      - name: 准备 WDK（VS 组件 + NuGet 包）
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          "Visual Studio: $vs"
+          $toolset = Get-ChildItem "$vs\MSBuild\Microsoft\VC" -Recurse -Directory -Filter WindowsUserModeDriver10.0 -ErrorAction SilentlyContinue | Select-Object -First 1
+          $spectre = Get-ChildItem "$vs\VC\Tools\MSVC\*\lib\spectre\x64" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+          $add = @()
+          if (-not $toolset) { $add += '--add', 'Component.Microsoft.Windows.DriverKit' }
+          if (-not $spectre) { $add += '--add', 'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre' }
+          if ($add) {
+            "安装 VS 组件：$add"
+            $p = Start-Process "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList (@('modify', '--installPath', "`"$vs`"") + $add + @('--quiet', '--norestart', '--nocache')) -Wait -PassThru
+            "vs_installer 退出码 $($p.ExitCode)"
+          }
+          # WDK 与 SDK 的 NuGet 包取同一版本（以 WDK 最新稳定版为准），生成 Directory.Build.props/targets 导入它们
+          nuget install Microsoft.Windows.WDK.x64 -OutputDirectory packages -NonInteractive | Out-Host
+          $wdk = Get-ChildItem packages -Directory -Filter 'Microsoft.Windows.WDK.x64.*' | Select-Object -First 1
+          $ver = $wdk.Name.Substring('Microsoft.Windows.WDK.x64.'.Length)
+          "WDK 版本 $ver"
+          foreach ($id in 'Microsoft.Windows.SDK.CPP', 'Microsoft.Windows.SDK.CPP.x64') { nuget install $id -Version $ver -OutputDirectory packages -NonInteractive | Out-Host }
+          $order = "Microsoft.Windows.SDK.CPP.$ver", "Microsoft.Windows.SDK.CPP.x64.$ver", "Microsoft.Windows.WDK.x64.$ver"
+          foreach ($kind in 'props', 'targets') {
+            $imports = foreach ($pkg in $order) {
+              Get-ChildItem "packages\$pkg\build" -Recurse -Filter "*.$kind" -ErrorAction SilentlyContinue | ForEach-Object { "  <Import Project=`"$($_.FullName)`" />" }
+            }
+            "<Project>`n$($imports -join "`n")`n</Project>" | Set-Content -Encoding utf8 "Directory.Build.$kind"
+            Get-Content "Directory.Build.$kind"
+          }
+      - name: 编译驱动与测试工具（x64 Release，不签名）
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          & "$vs\MSBuild\Current\Bin\MSBuild.exe" LemonGalaxyDriver.sln /nologo /v:minimal /m /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-ChildItem build\x64\Release -Recurse | Format-Table FullName, Length -AutoSize | Out-String -Width 300
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-display-driver-x64-unsigned
+          path: |
+            lemon-galaxy-worker-windows/driver/build/x64/Release/LemonGalaxyDisplay/
+            lemon-galaxy-worker-windows/driver/build/x64/Release/LemonGalaxyDisplayTest.exe
+          if-no-files-found: error
+
   macos:
     name: Mac 客户端
     runs-on: macos-26

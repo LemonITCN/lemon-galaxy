@@ -355,6 +355,36 @@
 
 **第二阶段要做的**（Windows 部分）：worker 服务安装驱动（导入签名证书到 TrustedPublisher、`DiInstallDriverW`、SetupAPI 建根设备、修复与卸载）；Rust 侧 IOCTL 客户端（照 `LemonGalaxyDisplayControl.h` 写 `#[repr(C)]`，`windows` crate 要加 `Win32_Devices_DeviceAndDriverInstallation`、`Win32_Devices_Display`、`Win32_Storage_FileSystem`、`Win32_System_IO` 等 feature）；会话 agent 做路径激活、改模式、按 GDI 名接入现有 DXGI 采集并处理 ACCESS_LOST 重建；无头兜底；协议与各端主控界面；SignPath 签名接入。
 
+### 5.9 第二阶段实施记录（2026-11-22）：协议与 Windows worker 接入
+
+**协议与内核**（详见 docs/protocol.md 8.6、docs/ffi.md）：
+- `MgmtReq::VirtualDisplayAdd{width,height,refresh}` 回 `MgmtResp::Display(DisplayInfo)`，`VirtualDisplayRemove{display_id}`；能力 `virtual_display` + `virtual_display_max=N`，要控制权限。都追加在枚举最后，老版本编码不变。
+  和 5.3 第 9 条设想的差异：没有单独的 `VirtualDisplayCaps`（用能力列表）、没有 `keep_after_disconnect`（一律随会话删除）。
+- 归属在内核（`galaxy-host/src/vdisplay.rs`）：屏属于加它的会话，会话结束删；只能删自己的；每次操作前和平台层对账（代理重启后屏会消失）。
+  无头兜底屏：`ListDisplays` 时平台层报“没有亮着的显示器（不算我们的虚拟屏）”就加一块（host.json `headless_display`，默认 1920x1080@60，`lemon-galaxy-worker headless-display` 可改或关），不占主控上限，最后一个会话结束 10 秒后删。
+- `HostPlatform` 新增 `virtual_display_max / add_virtual_display / remove_virtual_display / virtual_display_ids / needs_headless_display`，默认不支持；Linux、macOS 被控端因此不报能力（e2e 有检查）。
+- FFI：`PeerSession.virtual_display_max()`、`add_virtual_display(w,h,refresh)`、`remove_virtual_display(id)`，只加方法，没改记录。
+
+**Windows worker**：
+- 服务进程只用 `CM_Get_Device_Interface_List` 判断驱动在不在（10 秒缓存），决定能力与上限 3。
+- 画面代理（控制台会话，SYSTEM）里有一个专门的线程持有驱动句柄（`src/win/vdisplay.rs`，移植测试工具的 Activate / RestoreIfChanged）：按空闲槽位发 ADD（EDID 序列号按槽位固定，模式表 = 要求的模式 + 常见 47 种），等目标出现，`SetDisplayConfig` 只加这一条路径扩展桌面，模式不对再 `ChangeDisplaySettingsEx`，等 GDI 屏幕列表出现后回 `DisplayInfo`（id = `\\.\DISPLAYn` 的 n，现有采集直接按它找输出）。
+  删屏：REMOVE，等目标不再活动；最后一块删掉后，显示配置和第一块加之前不同就 `SetDisplayConfig` 恢复。代理退出前删掉全部并恢复；代理崩溃时驱动随句柄删屏（看门狗）。
+  代理随控制台会话切换重启时，服务把虚拟屏记录清空，主控要重新加。
+- 驱动安装：`lemon-galaxy-worker install-display-driver [--dev] [包目录]` / `uninstall-display-driver`（`src/win/driver.rs`，纯 SetupAPI，不依赖 devcon / pnputil）。
+  没有设备时按 devcon install 的做法建根设备 `Root\LemonGalaxyDisplay`，再 `UpdateDriverForPlugAndPlayDevices`（同时把包放进驱动库）；已有设备只更新；之后删掉驱动库里不在用的旧包（按 `%WINDIR%\INF\oem*.inf` 内容认）。
+  测试签名包（目录里有 `LemonGalaxyTest.cer`）只在加 `--dev` 或 `LEMON_GALAXY_DEV_DRIVER=1` 时装，先把证书放进本机受信任的根与受信任的发布者；正式包（SignPath 签名）直接装。
+  `install-service` 时程序旁边有 `driver\` 包就复制到安装目录并按同样规则装（失败只提示）。卸载删设备、驱动包和测试证书。
+- CI：`build.yml` 新增 `windows-display-driver` 作业（windows-2025，`continue-on-error`，不进 Release）：缺 WDK / Spectre 组件时用 vs_installer 补，WDK 与 SDK 的 NuGet 包取同一版本（以 WDK 最新稳定版为准）并生成 Directory.Build.props/targets 导入，msbuild 编 x64 Release，上传未签名包 `windows-display-driver-x64-unsigned`。还没在 runner 上实跑过，第一次跑完再按日志调。
+
+**实测（同一台 Windows 11 26200 笔记本，worker 前台跑在控制台会话，主控 galaxy-dev 在 Mac 上）**：
+- 能力 `virtual_display virtual_display_max=3`；1920x1080@60、2560x1440@60、3840x2160@144、1280x720@30 加屏 0.4–0.7 秒、删屏 0.13–0.8 秒，新屏画面直接能开（NVENC 显卡直通 / openh264 都行），删后列表里没有了。
+- 连加 4 块：前 3 块成功，第 4 块 `虚拟屏最多 3 块，已经用完`；不删直接断开，约 35 秒（QUIC 空闲超时）后被控端自动删掉 3 块。
+- 无头兜底（用测试开关 `LEMON_GALAXY_TEST_HEADLESS=1` 模拟没有亮着的显示器）：第一次列屏自动加 1920x1080，第二个会话复用同一块，会话都结束 10 秒后删掉。真实笔记本屏亮着时不加。
+- 主控 A 看主屏的同时主控 B 加删虚拟屏：主屏采集遇到 0x887A0001 / ACCESS_LOST 后自动重建，画面不断。
+- `install-display-driver`：测试包不加 `--dev` 拒绝；加 `--dev` 更新已有设备；`uninstall-display-driver` 删掉设备、oem 包和两处证书；再装从头建出 `ROOT\DISPLAY\0002`，驱动就绪，之后虚拟屏照常可用。
+
+**还没做的**：各端主控界面（加屏入口、分辨率 / 刷新率选择、标出虚拟屏）；macOS CGVirtualDisplay；`SET_RENDER_ADAPTER`（双显卡上让虚拟屏和编码器在同一块显卡）；断开后保留；隐私屏联动（只留虚拟路径）；SignPath 签名与正式包随 worker 发布；ARM64 驱动。
+
 ## 6. 来源（访问日期均为 2026-11-22）
 
 **Windows 驱动项目**

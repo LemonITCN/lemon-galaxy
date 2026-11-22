@@ -1,6 +1,16 @@
 # LemonGalaxy 虚拟屏驱动（Windows，IddCx）
 
-第一阶段：只有驱动和独立测试工具，还没接进 worker。调研与方案见 `docs/research/virtual-display.md`。
+驱动与独立测试工具；第二阶段已接进 worker（协议见 `docs/protocol.md` 8.6，实施记录见 `docs/research/virtual-display.md` 5.9）。
+
+worker 自己安装 / 卸载驱动（管理员）：
+
+```bat
+rem 测试签名包只在开发机上装（--dev 或 LEMON_GALAXY_DEV_DRIVER=1，会信任测试证书）
+lemon-galaxy-worker install-display-driver --dev D:\dev\lemon-galaxy-driver\build\x64\Release\LemonGalaxyDisplay
+lemon-galaxy-worker uninstall-display-driver
+```
+
+不写目录时用程序旁边的 `driver\`；`install-service` 时程序旁边有 `driver\` 包也会顺带装。
 
 ## 内容
 

@@ -229,6 +229,30 @@ impl PeerSession {
         }
     }
 
+    /// 主控最多能加几块虚拟屏；被控端不支持或没有控制权限时为 0。
+    pub fn virtual_display_max(&self) -> u32 {
+        if !self.ack.capabilities.iter().any(|c| c == CAP_VIRTUAL_DISPLAY) {
+            return 0;
+        }
+        capability_value(&self.ack.capabilities, CAP_VIRTUAL_DISPLAY_MAX).and_then(|v| v.parse().ok()).unwrap_or(1)
+    }
+
+    /// 在被控端加一块虚拟屏（扩展桌面），返回它的屏幕信息，之后按 id 开画面。会话结束时被控端自动删掉。
+    pub async fn add_virtual_display(&self, width: u32, height: u32, refresh: u32) -> Result<DisplayInfo> {
+        match self.mgmt(MgmtReq::VirtualDisplayAdd { width, height, refresh }).await? {
+            MgmtResp::Display(d) => Ok(d),
+            _ => Err(ClientError::Protocol("应答错误".into())),
+        }
+    }
+
+    /// 删掉本会话加的虚拟屏。
+    pub async fn remove_virtual_display(&self, display_id: u32) -> Result<()> {
+        match self.mgmt(MgmtReq::VirtualDisplayRemove { display_id }).await? {
+            MgmtResp::Ok => Ok(()),
+            _ => Err(ClientError::Protocol("应答错误".into())),
+        }
+    }
+
     pub async fn screenshot(&self, display: u32, max_width: u32, max_height: u32) -> Result<ImageData> {
         match self.mgmt(MgmtReq::Screenshot { display, max_width, max_height }).await? {
             MgmtResp::Image(i) => Ok(i),

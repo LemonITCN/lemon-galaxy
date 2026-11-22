@@ -160,6 +160,7 @@ HelloAck {
   account: Option<u64>,               // 以哪个账号的身份被控（协助模式为 None）
   permissions: Permissions { view, control, files, terminal, clipboard, audio, ai_cap },
   capabilities: Vec<String>,          // "terminal" "files" "exec" "display" "input" "clipboard" "port_forward" "screenshot" "ui_tree" "privacy" "audio"
+                                      // "virtual_display" + "virtual_display_max=N"（8.6）
 }
 ```
 之后控制流用于心跳、会话级事件（被控端本地用户断开、权限变化）。
@@ -171,7 +172,7 @@ HelloAck {
 | StreamOpen | 后续消息 |
 |---|---|
 | `Terminal { attach: Option<String>, shell: Option<String>, cols, rows, env }` | 被控端回 `TerminalOpened { session_id, title }`；之后 主控→被控 `Input(bytes)` / `Resize{cols,rows}` / `Detach` / `Kill`，被控→主控 `Output(bytes)` / `Exited{code}` |
-| `Mgmt` | 请求/应答：`ListTerminals`、`KillTerminal{id}`、`ListDisplays`、`Screenshot{display, max_width, max_height, format}`、`UiTree{display, max_nodes}`、`ClipboardGet`、`ClipboardSet`、`WakeOnLan{mac}`、`HostStatus` |
+| `Mgmt` | 请求/应答：`ListTerminals`、`KillTerminal{id}`、`ListDisplays`、`Screenshot{display, max_width, max_height, format}`、`UiTree{display, max_nodes}`、`ClipboardGet`、`ClipboardSet`、`WakeOnLan{mac}`、`HostStatus`、`Inject`、`SetPrivacy{on}`、`VirtualDisplayAdd{width, height, refresh}`（回 `Display(DisplayInfo)`）、`VirtualDisplayRemove{display_id}`（8.6） |
 | `Files(op)` | 一次文件操作一条流：`List{path}`、`Stat{path}`、`Read{path, offset, len}`（被控端回多个 `Chunk` + `End`）、`Write{path, offset, truncate, mode, expect_sha256}`（主控端发多个 `Chunk` + `End`，被控端回结果）、`Mkdir{path, parents}`、`Remove{path, recursive}`、`Rename{from, to, overwrite}`、`Chmod{path, mode}`、`Home`、`Realpath{path}`、`Search{root, pattern, max}` |
 | `Exec { command, shell, cwd, env, timeout_ms, origin, max_output }` | 被控端流式回 `Stdout(bytes)` / `Stderr(bytes)`，最后 `Done { code, signal, timed_out, truncated, duration_ms }`；主控端可发 `Stdin(bytes)` / `Cancel` |
 | `PortForward { host, port }` | 被控端回 `Ok` 后双向透传字节 |
@@ -224,3 +225,22 @@ channel u8 | seq u32 LE | 一个 Opus 包（48 kHz 立体声，20 毫秒）
   第一个会话开始听时才开始采集，最后一个停止时关掉。没有声音时平台层不给数据，也就不发包，`seq` 只在发包时递增。
 - 主控端按 `seq` 发现丢包，最多用解码器的丢包补偿补 3 包（60 毫秒），迟到的旧包丢弃。播放端先攒 40 毫秒再出声，积压超过 250 毫秒丢旧的，延迟不累积。
 - 权限：需要账号策略里的 `audio`；被控端没有声音输出设备（服务器、虚拟机）时能力列表里没有 `audio`。
+
+### 8.6 虚拟屏
+
+被控端用虚拟屏驱动加出“看不见的显示器”，扩展进桌面，主控像普通屏幕一样开画面（Windows：LemonGalaxy Display 驱动，见 `lemon-galaxy-worker-windows/driver/`；macOS 还没有）。
+
+- 能力：被控端装了驱动、主控有控制权限时，能力列表里有 `virtual_display` 和 `virtual_display_max=N`（主控最多能加的块数，Windows 为 3）。
+  取值用 `galaxy_proto::peer::capability_value`。Linux / macOS 被控端、没装驱动的 Windows 都没有这两项。
+- `MgmtReq::VirtualDisplayAdd { width, height, refresh }`：要控制权限。宽 640–7680、高 480–4320、刷新率 24–240（0 表示 60）。
+  成功回 `MgmtResp::Display(DisplayInfo)`（`is_virtual` 为真），主控拿它的 `id` 开 `Display` 流；之后 `ListDisplays` 里它也带 `is_virtual: true`。
+  失败：`permission_denied`、`unsupported`（没有驱动）、`bad_request`（分辨率不合法）、`limit`（已到上限）、`virtual_display`（驱动或系统报错，`message` 是原因）。
+  被控端给新屏的模式表里放了要求的模式（首选）和常见 16:9 / 16:10 分辨率 × 30/60/120/144 Hz。
+- `MgmtReq::VirtualDisplayRemove { display_id }`：只能删本会话加的（别的会话的回 `permission_denied`，没有这块回 `not_found`），成功回 `Ok`。
+- 归属：虚拟屏属于加它的会话，会话结束时被控端自动删掉（主控没发 QUIC 关闭时要等空闲超时，最多约 30 秒）。最后一块删掉后，显示配置和加屏前不同就恢复原样。
+- 无头兜底屏：被控端本机没有任何亮着的显示器（笔记本合盖、没接显示器；不算我们自己的虚拟屏）时，主控 `ListDisplays` 会先自动加一块虚拟屏
+  （默认 1920x1080@60，被控端 `lemon-galaxy-worker headless-display off|宽x高[@刷新率]|default` 可改，存在 host.json 的 `headless_display`），
+  不占主控的上限；它不属于任何会话，最后一个会话结束 10 秒后仍没有新会话就删掉。
+- 消息变体都追加在枚举最后（`MgmtReq` 第 11、12 号，`MgmtResp::Display` 第 7 号），老版本的编码不变；老被控端解不出新请求会直接关流。
+- Windows 实现要点：驱动句柄放在会话里的画面代理里，代理退出或崩溃（服务停止、控制台会话切换）时驱动随句柄删屏，不会留下幽灵屏；
+  控制台会话切换后代理换会话重启，原来的虚拟屏随之消失，主控要重新加（无头兜底屏在下次列屏时自动补）。
