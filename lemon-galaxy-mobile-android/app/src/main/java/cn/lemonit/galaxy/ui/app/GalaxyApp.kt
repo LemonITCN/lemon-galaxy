@@ -47,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -102,7 +103,23 @@ fun GalaxyApp(container: AppContainer, locked: Boolean, onUnlock: () -> Unit) {
 
 @Composable
 fun LockScreen(onUnlock: () -> Unit) {
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
+    // 返回键不能绕过锁屏：直接退到后台
+    val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+    androidx.activity.compose.BackHandler { activity?.moveTaskToBack(true) }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            // 有了触摸处理，锁屏才成为命中目标，下面的界面收不到点击和长按；这里把事件全部吃掉
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent().changes.forEach { it.consume() }
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(PlatformIcons.Galaxy, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(56.dp))
             Spacer(Modifier.height(16.dp))
@@ -115,7 +132,6 @@ fun LockScreen(onUnlock: () -> Unit) {
             }
         }
     }
-    LaunchedEffect(Unit) { onUnlock() }
 }
 
 /** 内核 SecretPrompt 弹框：密码 / 私钥口令 / 键盘交互问题，以及主机密钥确认。 */

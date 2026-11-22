@@ -221,6 +221,10 @@ struct LockView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(p.background.ignoresSafeArea())
+        // 整个锁屏都接住触摸，点击、长按都不会穿到下面的界面
+        .contentShape(Rectangle())
+        .onTapGesture {}
+        .onLongPressGesture {}
         .onAppear { if phase == .active { unlock() } }
         .onChange(of: phase) { if $0 == .active { unlock() } }
     }
