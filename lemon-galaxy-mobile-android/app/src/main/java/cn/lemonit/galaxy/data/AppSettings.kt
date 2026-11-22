@@ -52,6 +52,11 @@ data class Prefs(
     val aiTrustMinutes: Int = -1,
     /** 远程桌面操作方式：鼠标（触控板式，默认）或触控；菜单里切换后记住 */
     val remoteMouseMode: Boolean = true,
+    /** 鼠标模式下画面左侧的悬浮鼠标按键（左键 / 右键），工具里开关，记住选择 */
+    val remoteMouseKeys: Boolean = true,
+    /** 悬浮鼠标按键的位置（在画面可用区域里的比例） */
+    val mouseKeysX: Float = 0f,
+    val mouseKeysY: Float = 0.3f,
     /** 远程桌面播放被控端声音（默认开，记住用户的选择） */
     val remoteAudio: Boolean = true,
     val terminalInputBox: Boolean = false,
@@ -89,6 +94,9 @@ class AppSettings(private val sp: SharedPreferences?) {
                 "touch" -> false
                 else -> d.remoteMouseMode
             },
+            remoteMouseKeys = p.getBoolean("remote_mouse_keys", d.remoteMouseKeys),
+            mouseKeysX = p.getFloat("mouse_keys_x", d.mouseKeysX),
+            mouseKeysY = p.getFloat("mouse_keys_y", d.mouseKeysY),
             remoteAudio = p.getBoolean("remote_audio", d.remoteAudio),
             terminalInputBox = p.getBoolean("terminal_input_box", d.terminalInputBox),
             lastServer = p.getString("last_server", null) ?: "",
@@ -114,6 +122,9 @@ class AppSettings(private val sp: SharedPreferences?) {
             putInt("ai_trust_minutes", n.aiTrustMinutes)
             putString("remote_input_mode", if (n.remoteMouseMode) "mouse" else "touch")
             remove("remote_mouse_mode")
+            putBoolean("remote_mouse_keys", n.remoteMouseKeys)
+            putFloat("mouse_keys_x", n.mouseKeysX)
+            putFloat("mouse_keys_y", n.mouseKeysY)
             putBoolean("remote_audio", n.remoteAudio)
             putBoolean("terminal_input_box", n.terminalInputBox)
             putString("last_server", n.lastServer)

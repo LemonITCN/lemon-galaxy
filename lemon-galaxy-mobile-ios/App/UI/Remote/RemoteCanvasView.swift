@@ -16,6 +16,10 @@ final class RemoteCanvasView: UIView, UIKeyInput {
 
     let displayLayer = AVSampleBufferDisplayLayer()
     var send: (([InputEvent]) -> Void)?
+    /// 悬浮鼠标按键按着或锁定（正在拖拽）：画面轻点不再单击
+    var keysBusy: (() -> Bool)?
+    /// 鼠标模式下光标要移动了（悬浮鼠标按键刚按下还没定性时先按下）
+    var beforePointerMove: (() -> Void)?
     var onViewportChange: ((Viewport, ViewportChange) -> Void)?
     var mouseMode = false { didSet { updatePointerLayer() } }
     /// 被控端支持 "client_cursor"（鼠标模式下画面里不画光标，由这里画）
@@ -144,6 +148,12 @@ final class RemoteCanvasView: UIView, UIKeyInput {
 
     private func click(_ b: PointerButton, _ x: Int32, _ y: Int32) -> [InputEvent] {
         [.mouseMove(x: x, y: y), .mouseButton(button: b, down: true, x: x, y: y), .mouseButton(button: b, down: false, x: x, y: y)]
+    }
+
+    /// 悬浮鼠标按键：在当前光标位置按下 / 抬起
+    func mouseKeys(_ presses: [MouseKeysLogic.Press]) {
+        let (x, y) = cursor
+        emit(presses.map { .mouseButton(button: $0.button, down: $0.down, x: x, y: y) })
     }
 
     /// 本机先记下光标位置（不等被控端回报）并立即挪箭头，再发出去
@@ -311,6 +321,7 @@ final class RemoteCanvasView: UIView, UIKeyInput {
             twoFingerTapped(at: twoDownCentroid ?? downAt)
         } else if maxPointers == 1 && !moved && !longPressed {
             flushTwoTap()
+            if mouseMode && keysBusy?() == true { dragging = false; return }
             let (x, y) = mouseMode ? cursor : remote(downAt)
             emit(click(.left, x, y))
         } else {
@@ -357,6 +368,8 @@ final class RemoteCanvasView: UIView, UIKeyInput {
 
     private func dragMove(to pos: CGPoint, delta: CGPoint) {
         if mouseMode {
+            // 悬浮鼠标按键刚按下还没定性：先按下，拖拽从起点开始
+            beforePointerMove?()
             // 触控板：相对移动，带一点加速；放大后画面跟着光标走，光标始终看得见
             let k = viewport.remotePerViewPoint * 1.6
             let maxX = Int32(max(viewport.remoteW - 1, 0)), maxY = Int32(max(viewport.remoteH - 1, 0))
@@ -379,11 +392,12 @@ final class RemoteCanvasView: UIView, UIKeyInput {
         dragging = false
     }
 
-    /// 手指上推 = 内容上移 = 滚轮向下；按视图点数换算成被控像素
+    /// 像触控板「自然滚动」：手指上推 = 内容跟着上移。协议里 dy 为正是滚轮往上推（内容下移），
+    /// 所以手指位移直接作为滚动量（上推 dy<0 → 内容上移）；按视图点数换算成被控像素
     private func scroll(dx: CGFloat, dy: CGFloat) {
         let k = viewport.remotePerViewPoint
-        scrollRemainder.x += -dx * k
-        scrollRemainder.y += -dy * k
+        scrollRemainder.x += dx * k
+        scrollRemainder.y += dy * k
         let ix = Int32(scrollRemainder.x.rounded(.towardZero)), iy = Int32(scrollRemainder.y.rounded(.towardZero))
         guard ix != 0 || iy != 0 else { return }
         scrollRemainder.x -= CGFloat(ix)

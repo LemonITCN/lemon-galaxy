@@ -41,6 +41,11 @@ final class AppSettings: ObservableObject {
             d.removeObject(forKey: "remoteMouseMode")
         }
     }
+    /// 鼠标模式下画面左侧的悬浮鼠标按键（左键 / 右键），工具里开关，记住选择（与安卓一致）
+    @Published var remoteMouseKeys: Bool { didSet { d.set(remoteMouseKeys, forKey: "remoteMouseKeys") } }
+    /// 悬浮鼠标按键的位置（在画面可用区域里的比例）
+    @Published var mouseKeysX: Double { didSet { d.set(mouseKeysX, forKey: "mouseKeysX") } }
+    @Published var mouseKeysY: Double { didSet { d.set(mouseKeysY, forKey: "mouseKeysY") } }
     /// 远程桌面播放被控端声音（默认开，记住用户的选择）
     @Published var remoteAudio: Bool { didSet { d.set(remoteAudio, forKey: "remoteAudio") } }
     @Published var terminalInputBox: Bool { didSet { d.set(terminalInputBox, forKey: "terminalInputBox") } }
@@ -69,6 +74,9 @@ final class AppSettings: ObservableObject {
         aiTrustMinutes = d.object(forKey: "aiTrustMinutes") as? Int ?? 60
         // 新键（与安卓一致）：旧键 remoteMouseMode 默认是触控，沿用它就改不成默认鼠标
         remoteMouseMode = d.string(forKey: "remoteInputMode").map { $0 != "touch" } ?? true
+        remoteMouseKeys = d.object(forKey: "remoteMouseKeys") as? Bool ?? true
+        mouseKeysX = d.object(forKey: "mouseKeysX") as? Double ?? 0
+        mouseKeysY = d.object(forKey: "mouseKeysY") as? Double ?? 0.3
         remoteAudio = d.object(forKey: "remoteAudio") as? Bool ?? true
         terminalInputBox = d.bool(forKey: "terminalInputBox")
         showHiddenFiles = d.bool(forKey: "showHiddenFiles")

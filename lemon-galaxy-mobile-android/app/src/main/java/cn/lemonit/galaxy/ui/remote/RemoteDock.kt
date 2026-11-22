@@ -784,6 +784,14 @@ private fun ToolsPanel(ui: RemoteUi, elapsed: String?, actions: RemoteActions) {
                 description = stringResource(if (ui.recording) R.string.rd_record_stop else R.string.rd_record),
             ) { actions.onRecord() },
         )
+        add(
+            Tool(
+                Icons.Rounded.Mouse,
+                stringResource(R.string.rd_mouse_keys),
+                active = ui.mouseMode && ui.mouseKeys,
+                enabled = ui.mouseMode,
+            ) { actions.onMouseKeys(!ui.mouseKeys) },
+        )
         add(Tool(Icons.Rounded.ContentPaste, stringResource(R.string.rd_send_clipboard)) { actions.onClipboardSend() })
         add(Tool(Icons.Rounded.ContentCopy, stringResource(R.string.rd_get_clipboard)) { actions.onClipboardGet() })
         add(Tool(Icons.Rounded.FolderOpen, stringResource(R.string.rd_files)) { actions.onFiles() })

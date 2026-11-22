@@ -322,6 +322,7 @@ struct ToolsPanel: View {
         if session.supportsAudio { list.append(sound) }
         if session.supportsPrivacy { list.append(privacy) }
         list.append(record)
+        list.append(mouseKeys)
         list.append(ToolItem(id: "send", icon: "arrow.up.doc.on.clipboard", label: loc("remote.sendClipboard")) { session.sendClipboard() })
         list.append(ToolItem(id: "get", icon: "arrow.down.doc", label: loc("remote.getClipboard")) { session.fetchClipboard() })
         list.append(ToolItem(id: "files", icon: "folder", label: loc("remote.files"), action: actions.files))
@@ -329,6 +330,15 @@ struct ToolsPanel: View {
             list.append(ToolItem(id: "minimize", icon: "rectangle.bottomhalf.inset.filled", label: loc("remote.minimize"), action: minimize))
         }
         return list
+    }
+
+    private var mouseKeys: ToolItem {
+        let on = session.mouseMode && session.mouseKeysOn
+        return ToolItem(id: "mouseKeys", icon: "computermouse", label: loc("remote.mouseKeys"),
+                        active: on, enabled: session.mouseMode) {
+            session.mouseKeysOn.toggle()
+            session.app?.settings.remoteMouseKeys = session.mouseKeysOn
+        }
     }
 
     private var sound: ToolItem {

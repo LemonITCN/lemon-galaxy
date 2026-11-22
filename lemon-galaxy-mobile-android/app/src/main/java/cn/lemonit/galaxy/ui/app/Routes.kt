@@ -464,7 +464,11 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
                 }
             },
             onRecordingError = { msg -> container.toast(context.getString(R.string.rd_record_failed, msg)) },
-        ).also { it.start() }
+        ).also {
+            it.setMouseKeys(prefs.remoteMouseKeys)
+            it.setMouseKeysPos(prefs.mouseKeysX, prefs.mouseKeysY)
+            it.start()
+        }
     }
     val ui by controller.ui.collectAsState()
     val scope = rememberCoroutineScope()
@@ -508,6 +512,14 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
             override fun onInput(events: List<InputEvent>) = controller.sendAll(events)
             override fun onDisplay(id: UInt) = controller.switchDisplay(id)
             override fun onQuality(q: VideoQuality) = controller.setQuality(q)
+            override fun onMouseKeys(on: Boolean) {
+                container.settings.update { it.copy(remoteMouseKeys = on) }
+                controller.setMouseKeys(on)
+            }
+            override fun onMouseKeysMoved(x: Float, y: Float) {
+                container.settings.update { it.copy(mouseKeysX = x, mouseKeysY = y) }
+                controller.setMouseKeysPos(x, y)
+            }
             override fun onMouseMode(on: Boolean) {
                 // 记住选择，下次打开远程桌面沿用
                 container.settings.update { it.copy(remoteMouseMode = on) }

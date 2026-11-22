@@ -341,10 +341,12 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    /// 不把自己的窗口（被控提示条、隐私屏黑窗口）录进去
+    /// 只把隐私屏的黑窗口排除在画面外（主控端要透过它看到下面的内容）。
+    /// 主界面、被控提示条照常录进去：排除掉的话主控端看不见，点击却仍会落到这些窗口上
     static func filter(display: SCDisplay, content: SCShareableContent) -> SCContentFilter {
         let pid = ProcessInfo.processInfo.processIdentifier
-        let own = content.windows.filter { $0.owningApplication?.processID == pid }
+        let shield = Int(CGShieldingWindowLevel())
+        let own = content.windows.filter { $0.owningApplication?.processID == pid && $0.windowLayer >= shield }
         return SCContentFilter(display: display, excludingWindows: own)
     }
 
@@ -830,8 +832,88 @@ final class InputInjector {
 
     func inject(_ e: InputEvent, display: CGDirectDisplayID) {
         lock.lock(); defer { lock.unlock() }
+        if guardOwnWindows(e, display: display) { return }
         injectLocked(e, display: display)
     }
+
+    // MARK: 远端不能操作 LemonGalaxy 自己的窗口
+    //
+    // 主界面、被控提示条会出现在画面里，远端能看到，但点击、滚动、键盘输入都不生效（像 UU 远程），
+    // 只能由本机用户操作（比如在这里结束远程）。按下被拦掉的键，对应的抬起也拦掉，不会留下按着不放的键。
+
+    private var blockedButtons: Set<PointerButton> = []
+    private var blockedKeys: Set<UInt32> = []
+
+    /// 返回 true 表示这个事件被拦掉了
+    private func guardOwnWindows(_ e: InputEvent, display: CGDirectDisplayID) -> Bool {
+        switch e {
+        case .mouseButton(let b, let down, let x, let y):
+            if down {
+                let p = globalPoint(x, y, display: display)
+                guard Self.ownWindow(at: p) else { return false }
+                blockedButtons.insert(b)
+                // 光标还是移过去，远端看得到点在了哪里
+                injectLocked(.mouseMove(x: x, y: y), display: display)
+                return true
+            }
+            if blockedButtons.contains(b) {
+                blockedButtons.remove(b)
+                return true
+            }
+            return false
+        case .wheel:
+            return buttonsDown.isEmpty && Self.ownWindow(at: lastPoint)
+        case .touch(_, let phase, let x, let y):
+            switch phase {
+            case .began: return guardOwnWindows(.mouseButton(button: .left, down: true, x: x, y: y), display: display)
+            case .moved: return blockedButtons.contains(.left)
+            case .ended, .cancelled: return guardOwnWindows(.mouseButton(button: .left, down: false, x: x, y: y), display: display)
+            }
+        case .key(let usage, let down):
+            if down {
+                guard !Self.isModifier(usage), Self.ownAppFrontmost() else { return false }
+                blockedKeys.insert(usage)
+                return true
+            }
+            return blockedKeys.remove(usage) != nil
+        case .text:
+            return Self.ownAppFrontmost()
+        default:
+            return false
+        }
+    }
+
+    private static let ownBundlePrefix = "cn.lemonit.galaxy"
+
+    private static func ownPids() -> Set<pid_t> {
+        var out: Set<pid_t> = [ProcessInfo.processInfo.processIdentifier]
+        for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier?.hasPrefix(ownBundlePrefix) == true {
+            out.insert(app.processIdentifier)
+        }
+        return out
+    }
+
+    private static func ownAppFrontmost() -> Bool {
+        guard let front = NSWorkspace.shared.frontmostApplication else { return false }
+        return front.bundleIdentifier?.hasPrefix(ownBundlePrefix) == true
+    }
+
+    /// 这个全局坐标（点）下面最上层、接收鼠标的窗口是不是 LemonGalaxy 自己的（隐私屏黑窗口不接收鼠标，跳过）
+    static func ownWindow(at p: CGPoint) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
+        let shield = Int(CGShieldingWindowLevel())
+        for w in list {
+            guard let layer = w[kCGWindowLayer as String] as? Int, layer < shield,
+                  let alpha = w[kCGWindowAlpha as String] as? Double, alpha > 0,
+                  let b = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: b),
+                  r.contains(p) else { continue }
+            guard let pid = w[kCGWindowOwnerPID as String] as? pid_t else { return false }
+            return ownPids().contains(pid)
+        }
+        return false
+    }
+
+    private static func isModifier(_ usage: UInt32) -> Bool { (0xE0...0xE7).contains(usage) }
 
     private func injectLocked(_ e: InputEvent, display: CGDirectDisplayID) {
         switch e {

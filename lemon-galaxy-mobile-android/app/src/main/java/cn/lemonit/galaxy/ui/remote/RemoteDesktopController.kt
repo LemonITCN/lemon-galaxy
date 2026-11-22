@@ -40,6 +40,10 @@ data class RemoteUi(
     val displayId: UInt? = null,
     val quality: VideoQuality = VideoQuality.AUTO,
     val mouseMode: Boolean = true,
+    /** 画面左侧的悬浮鼠标按键（只在鼠标模式下显示） */
+    val mouseKeys: Boolean = true,
+    val mouseKeysX: Float = 0f,
+    val mouseKeysY: Float = 0.3f,
     /** 对端能力里有 "client_cursor"：鼠标模式下被控端画面里不画光标，由本机画（跟手） */
     val clientCursor: Boolean = false,
     /**
@@ -236,6 +240,10 @@ class RemoteDesktopController(
         _ui.update { it.copy(quality = q) }
         channel?.setBitrate(q.bitrateKbps)
     }
+
+    fun setMouseKeys(on: Boolean) = _ui.update { it.copy(mouseKeys = on) }
+
+    fun setMouseKeysPos(x: Float, y: Float) = _ui.update { it.copy(mouseKeysX = x, mouseKeysY = y) }
 
     fun setMouseMode(on: Boolean) {
         _ui.update { it.copy(mouseMode = on) }

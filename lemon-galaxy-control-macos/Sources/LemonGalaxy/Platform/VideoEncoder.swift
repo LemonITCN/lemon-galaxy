@@ -15,6 +15,12 @@ final class VideoEncoder {
     private var forceKeyframe = true
     private let output: Output
     private let lock = NSLock()
+    /// 截屏线程与补发关键帧的线程不能同时送帧（时间戳要有序）
+    private let encodeLock = NSLock()
+    private let repeatQueue = DispatchQueue(label: "galaxy.encoder.repeat")
+    private var lastBuffer: CVPixelBuffer?
+    private var lastPts: UInt64 = 0
+    private var lastAt = Date()
     private(set) var hardwareAccelerated = false
 
     init?(codec: VideoCodec, width: Int, height: Int, fps: Int, bitrateKbps: Int, output: @escaping Output) {
@@ -61,6 +67,7 @@ final class VideoEncoder {
             VTCompressionSessionInvalidate(s)
         }
         session = nil
+        lastBuffer = nil
     }
 
     func setBitrate(kbps: Int) {
@@ -77,15 +84,33 @@ final class VideoEncoder {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
     }
 
+    /// 要关键帧。画面静止时截屏不出新帧，等下一帧可能要很久（主控端解锁回来一直黑着），
+    /// 所以稍等一下还没有新帧就拿最后一帧重新编一个关键帧
     func requestKeyframe() {
         lock.lock(); forceKeyframe = true; lock.unlock()
+        repeatQueue.asyncAfter(deadline: .now() + .milliseconds(60)) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let pending = self.forceKeyframe
+            let buf = self.lastBuffer
+            let pts = self.lastPts + UInt64(max(0, Date().timeIntervalSince(self.lastAt)) * 1_000_000)
+            self.lock.unlock()
+            if pending, let buf { self.encode(buf, ptsUs: pts) }
+        }
     }
 
-    func encode(_ pixelBuffer: CVPixelBuffer, ptsUs: UInt64) {
+    func encode(_ pixelBuffer: CVPixelBuffer, ptsUs requested: UInt64) {
+        encodeLock.lock()
+        defer { encodeLock.unlock() }
         lock.lock()
         guard let s = session else { lock.unlock(); return }
         let key = forceKeyframe
         forceKeyframe = false
+        // 时间戳必须递增（补发的关键帧可能比截屏给的时间稍晚）
+        let ptsUs = max(requested, lastPts + (lastBuffer == nil ? 0 : 1))
+        lastBuffer = pixelBuffer
+        lastPts = ptsUs
+        lastAt = Date()
         lock.unlock()
         let pts = CMTime(value: CMTimeValue(ptsUs), timescale: 1_000_000)
         let props: CFDictionary? = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil

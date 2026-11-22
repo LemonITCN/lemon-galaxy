@@ -200,7 +200,7 @@ channel u8 | frame_id u32 LE | frag_idx u16 LE | frag_count u16 LE | flags u8 (b
 InputEvent =
   MouseMove { x, y }                     // 被控屏幕像素坐标
   MouseButton { button: Left|Right|Middle|Back|Forward, down: bool, x, y }
-  Wheel { dx, dy }                       // 像素
+  Wheel { dx, dy }                       // 像素；dy 为正 = 滚轮往上推（内容下移），dx 为正 = 往左（内容右移），与 macOS 关闭自然滚动时的滚轮一致
   Key { code: u32 /* USB HID 用法码 */, down: bool }
   Text { text }                          // 输入法提交的文字
   Touch { id, phase, x, y }              // 触控模式

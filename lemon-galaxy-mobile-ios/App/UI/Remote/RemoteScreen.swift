@@ -59,6 +59,13 @@ struct RemoteScreen: View {
             statusOverlay
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             recordingBadge
+            if session.mouseMode && session.mouseKeysOn && session.status == .streaming {
+                // 左侧留出刘海 / 圆角，右侧留出菜单把手
+                MouseKeysBar(keys: session.mouseKeys)
+                    .padding(.leading, 12)
+                    .padding(.trailing, 60)
+                    .padding(.vertical, 12)
+            }
             RemoteNoticeLayer(hud: session.hud)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .padding(.top, 16)

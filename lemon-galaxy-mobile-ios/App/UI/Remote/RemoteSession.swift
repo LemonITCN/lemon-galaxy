@@ -24,9 +24,15 @@ final class RemoteSession: ObservableObject, Identifiable {
     @Published var mouseMode: Bool {
         didSet {
             canvas.mouseMode = mouseMode
+            if !mouseMode { mouseKeys.cancel() }
             applyClientCursor()
         }
     }
+    /// 画面左侧的悬浮鼠标按键（只在鼠标模式下显示；开关记在设置里）
+    @Published var mouseKeysOn: Bool {
+        didSet { if !mouseKeysOn { mouseKeys.cancel() } }
+    }
+    let mouseKeys = MouseKeysModel()
     @Published private(set) var videoSize = CGSize.zero
     @Published private(set) var codec: VideoCodec = .h264
     @Published private(set) var peer: PeerConnection?
@@ -73,7 +79,12 @@ final class RemoteSession: ObservableObject, Identifiable {
         self.platform = platform
         quality = app.settings.defaultQuality
         mouseMode = app.settings.remoteMouseMode
+        mouseKeysOn = app.settings.remoteMouseKeys
         canvas.mouseMode = mouseMode
+        let keys = mouseKeys
+        keys.send = { [weak self] presses in self?.canvas.mouseKeys(presses) }
+        canvas.keysBusy = { [weak keys] in keys?.busy ?? false }
+        canvas.beforePointerMove = { [weak keys] in keys?.beforeMove() }
         canvas.platform = platform
         canvas.send = { [weak self] events in self?.send(events) }
         canvas.onViewportChange = { [weak self] v, reason in
@@ -442,6 +453,8 @@ final class RemoteSession: ObservableObject, Identifiable {
     }
 
     func stop() {
+        // 按着或锁定的鼠标键先抬起
+        mouseKeys.cancel()
         stopRecording(.closed)
         stopped = true
         stopAudio()

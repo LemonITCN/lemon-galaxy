@@ -43,6 +43,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -94,6 +95,12 @@ interface RemoteActions {
     fun onDisplay(id: UInt)
     fun onQuality(q: VideoQuality)
     fun onMouseMode(on: Boolean)
+
+    /** 悬浮鼠标按键显示 / 隐藏（调用方记住选择）。 */
+    fun onMouseKeys(on: Boolean) = Unit
+
+    /** 拖把手挪了悬浮鼠标按键的位置（比例），调用方记住。 */
+    fun onMouseKeysMoved(x: Float, y: Float) = Unit
     fun onClipboardSend()
     fun onClipboardGet()
     fun onDisconnect()
@@ -185,6 +192,19 @@ fun RemoteDesktopScreen(
             }
         }
 
+        val keys = remember { MouseKeysState() }
+        val keysShown = ui.mouseMode && ui.mouseKeys && ui.status == RemoteStatus.STREAMING
+        fun sendKeys(presses: List<MouseKeysLogic.Press>) {
+            if (presses.isEmpty()) return
+            val x = state.pointer.x
+            val y = state.pointer.y
+            currentActions.onInput(presses.map { InputEvent.MouseButton(it.button, it.down, x, y) })
+            state.pointer.moved(x, y, Clock.now())
+        }
+        // 按键条收起（切到触控、关掉按键、断开）：按着的键抬起
+        LaunchedEffect(keysShown) { if (!keysShown) sendKeys(keys.run { cancel() }) }
+        DisposableEffect(Unit) { onDispose { sendKeys(keys.run { cancel() }) } }
+
         val sink = remember {
             object : RemoteGestureSink {
                 var dragButtonDown = false
@@ -204,6 +224,8 @@ fun RemoteDesktopScreen(
                 }
 
                 override fun tap(at: Offset) {
+                    // 鼠标按键按着或锁定时（正在拖拽），画面轻点不再单击
+                    if (currentUi.mouseMode && keys.logic.busy) return
                     val (x, y) = if (currentUi.mouseMode) cursor() else remote(at)
                     send(click(PointerButton.LEFT, x, y))
                 }
@@ -241,6 +263,8 @@ fun RemoteDesktopScreen(
 
                 override fun dragMove(at: Offset, delta: Offset) {
                     if (currentUi.mouseMode) {
+                        // 鼠标按键刚按下还没定性：先按下，拖拽从起点开始
+                        sendKeys(keys.run { beforeMove() })
                         // 触控板：相对移动，带一点加速；放大后画面跟着光标走，光标始终看得见
                         val k = state.viewport.remotePerViewPx() * 1.6f
                         val (cx, cy) = cursor()
@@ -263,9 +287,10 @@ fun RemoteDesktopScreen(
                 }
 
                 override fun scroll(dx: Float, dy: Float) {
-                    // 手指向上推 = 内容向上 = 滚轮向下；按视图像素换算成被控像素
+                    // 像触控板「自然滚动」：手指上推 = 内容跟着上移。协议里 dy 为正是滚轮往上推（内容下移），
+                    // 所以手指位移直接作为滚动量；按视图像素换算成被控像素
                     val k = state.viewport.remotePerViewPx()
-                    send(listOf(InputEvent.Wheel((-dx * k).roundToInt(), (-dy * k).roundToInt())))
+                    send(listOf(InputEvent.Wheel((dx * k).roundToInt(), (dy * k).roundToInt())))
                 }
 
                 override fun pinch(factor: Float, from: Offset, to: Offset) {
@@ -313,6 +338,17 @@ fun RemoteDesktopScreen(
                     }
                 }
             }
+        }
+        // 悬浮鼠标按键放在画面之外（同层兄弟），按键上的手指不会进画面手势
+        if (keysShown) {
+            // 左侧留出刘海 / 圆角，右侧留出菜单把手
+            MouseKeysBar(
+                keys, ui.mouseKeysX, ui.mouseKeysY,
+                areaW = cw - with(density) { 72.dp.toPx() }, areaH = ch - with(density) { 24.dp.toPx() },
+                onPress = ::sendKeys,
+                onMoved = { x, y -> currentActions.onMouseKeysMoved(x, y) },
+                modifier = Modifier.windowInsetsPadding(WindowInsets.displayCutout).padding(start = 12.dp, top = 12.dp),
+            )
         }
         if (keyboardOpen) {
             RemoteKeyboard(ui.platform, actions, Modifier.align(Alignment.BottomCenter)) { keyboardOpen = false }
