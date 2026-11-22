@@ -31,6 +31,7 @@ pub fn routes() -> Router<St> {
         .route("/auth/totp/disable", post(totp_disable))
         .route("/auth/logout", post(logout))
         .route("/account", get(account))
+        .route("/account/activity", get(account_activity))
         .route("/account/revocations", get(get_revocations).put(put_revocations))
         .route("/devices", get(list_devices))
         .route("/devices/certificate", post(upload_cert))
@@ -433,6 +434,44 @@ async fn upload_cert(State(st): State<St>, User(s): User, Json(req): Json<CertUp
     }
     audit::log(&st, &s.actor(), "device.register", Target::new("device", s.device_id.to_hex(), ""), json!({ "kind": cert.kind.as_str() })).await;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct ActivityQuery {
+    limit: Option<u32>,
+}
+
+/// 本账号最近的活动：自己做的（登录、连接），以及别人对本账号设备的连接。
+async fn account_activity(State(st): State<St>, User(s): User, axum::extract::Query(q): axum::extract::Query<ActivityQuery>) -> AppResult<Json<ListResp<galaxy_proto::api::ActivityItem>>> {
+    let uid = s.user_id as i64;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200) as i64;
+    let items = st
+        .db
+        .call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT at, action, actor_name, target_type, target_id, target_name, ip, detail FROM audit
+                 WHERE (actor_type = 'user' AND actor_id = ?1)
+                    OR (target_type = 'device' AND target_id IN (SELECT lower(hex(device_id)) FROM device_accounts WHERE user_id = ?2 AND status = 'active'))
+                 ORDER BY id DESC LIMIT ?3",
+            )?;
+            let v = stmt
+                .query_map(params![uid.to_string(), uid, limit], |r| {
+                    Ok(galaxy_proto::api::ActivityItem {
+                        at: r.get(0)?,
+                        action: r.get(1)?,
+                        actor_name: r.get(2)?,
+                        target_type: r.get(3)?,
+                        target_id: r.get(4)?,
+                        target_name: r.get(5)?,
+                        ip: r.get(6)?,
+                        detail: r.get(7)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(v)
+        })
+        .await?;
+    Ok(Json(ListResp { items }))
 }
 
 async fn list_devices(State(st): State<St>, User(s): User) -> AppResult<Json<ListResp<ClientDevice>>> {

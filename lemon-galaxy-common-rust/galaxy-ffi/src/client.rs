@@ -795,6 +795,12 @@ impl GalaxyClient {
         run(async move { build_conversation(inner, config, listener, None).await }).await
     }
 
+    /// 账号最近的活动（登录、连接等），新的在前。
+    pub async fn account_activity(&self, limit: u32) -> Result<Vec<ActivityItem>> {
+        let inner = self.inner.clone();
+        run(async move { Ok(inner.activity(limit).await?.into_iter().map(Into::into).collect()) }).await
+    }
+
     pub fn list_conversations(&self) -> Vec<ConversationSummary> {
         ag::list_conversations(&self.inner.conv_key())
     }
@@ -986,38 +992,13 @@ impl GalaxyClient {
 
 async fn build_conversation(inner: Arc<Inner>, c: ConversationConfig, listener: Arc<dyn AgentListener>, restore: Option<ag::SavedConversation>) -> Result<Arc<AgentConversation>> {
     let api = inner.api()?;
-    let cached = inner.models.lock().clone();
-    let models = match cached {
-        Some(m) => m,
-        None => api.get::<galaxy_proto::api::AiModelsResp>("/ai/models").await?,
-    };
+    let models = inner.ai_models_cached().await?;
     if !models.enabled {
         return Err(GalaxyError::Permission { detail: "未开通 AI 功能".into() });
     }
     let m = models.items.iter().find(|m| m.provider_id == c.provider_id && m.id == c.model_id).cloned().ok_or_else(|| GalaxyError::Permission { detail: "未开通该模型".into() })?;
     let exec = galaxy_client::ai::SessionExecutor::new();
-    let mut names = vec![];
-    for t in &c.targets {
-        if t.kind == AgentTargetKind::SshHost {
-            // AI 对话里没法弹窗问密码：用加密库里保存的凭据与已确认的主机密钥
-            let (s, info) = inner.clone().connect_ssh_inner(t.id.clone(), Arc::new(NoPrompt), 0).await.map_err(|e| match e {
-                GalaxyError::Cancelled | GalaxyError::Permission { .. } => other("这台 SSH 主机需要输入密码或确认主机密钥，请先在主机列表里连接一次并保存密码"),
-                other => other,
-            })?;
-            let name = if info.label.is_empty() { format!("{}@{}", info.username, info.host) } else { info.label.clone() };
-            names.push(name.clone());
-            exec.add_ssh(t.id.clone(), s, name).await;
-            continue;
-        }
-        let d = parse_dev(&t.id)?;
-        let s = inner.session_for(d).await?;
-        let name = inner.device_name(&d);
-        names.push(name.clone());
-        exec.add(t.id.clone(), s, name);
-    }
-    if names.is_empty() {
-        return Err(other("请至少选择一台设备"));
-    }
+    let ws = Arc::new(ChatWorkspace { inner: Arc::downgrade(&inner), exec: exec.clone() });
     let id = restore.as_ref().map(|r| r.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
     let cfg = galaxy_agent::agent::AgentConfig {
         conversation_id: id,
@@ -1033,11 +1014,250 @@ async fn build_conversation(inner: Arc<Inner>, c: ConversationConfig, listener: 
         trust_minutes: c.trust_minutes,
     };
     let title = c.title.clone().or_else(|| restore.as_ref().map(|r| r.title.clone())).unwrap_or_default();
-    let conv = AgentConversation::build(cfg, Arc::new(galaxy_client::ai::GatewayLlm { api }), exec, listener, inner.conv_key(), title, names, c.clone());
+    let names: Vec<String> = c.targets.iter().map(|t| ws.name_of(&t.id)).collect();
+    let conv = AgentConversation::build(cfg, Arc::new(galaxy_client::ai::GatewayLlm { api }), exec, ws.clone(), listener, inner.conv_key(), title, names, c.clone());
     if let Some(r) = restore {
         conv.agent.restore(r.messages);
     }
+    // 建对话时选的目标（老界面）：视同用户引用过，用到时再连
+    conv.agent.authorize(c.targets.iter().map(|t| t.id.clone()).collect());
     Ok(conv)
+}
+
+impl Inner {
+    pub(crate) async fn ai_models_cached(&self) -> Result<galaxy_proto::api::AiModelsResp> {
+        let cached = self.models.lock().clone();
+        match cached {
+            Some(m) => Ok(m),
+            None => {
+                let r: galaxy_proto::api::AiModelsResp = self.api()?.get("/ai/models").await?;
+                *self.models.lock() = Some(r.clone());
+                Ok(r)
+            }
+        }
+    }
+
+    pub(crate) async fn activity(&self, limit: u32) -> Result<Vec<galaxy_proto::api::ActivityItem>> {
+        let r: galaxy_proto::api::ListResp<galaxy_proto::api::ActivityItem> = self.api()?.get(&format!("/account/activity?limit={}", limit.clamp(1, 200))).await?;
+        Ok(r.items)
+    }
+}
+
+fn fmt_time(ms: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_millis_opt(ms).single().map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default()
+}
+
+pub(crate) fn activity_text(items: &[galaxy_proto::api::ActivityItem]) -> String {
+    let mut out = String::new();
+    for a in items {
+        let what = match a.action.as_str() {
+            "connection.start" => "开始连接",
+            "connection.end" => "结束连接",
+            "user.login" => "登录",
+            "user.login_failed" => "登录失败",
+            "device.register" => "登记设备",
+            "user.password_change" => "修改密码",
+            x => x,
+        };
+        let detail = serde_json::from_str::<serde_json::Value>(&a.detail).ok().map(|v| {
+            let mut d = vec![];
+            if let Some(ms) = v["duration_ms"].as_i64() {
+                d.push(format!("时长 {} 秒", ms / 1000));
+            }
+            if let Some(p) = v["path"].as_str() {
+                d.push(format!("路径 {p}"));
+            }
+            if let Some(m) = v["mode"].as_str() {
+                d.push(format!("方式 {m}"));
+            }
+            d.join("，")
+        }).unwrap_or_default();
+        out.push_str(&format!(
+            "{}\t{}\t{}{}{}{}\n",
+            fmt_time(a.at),
+            a.actor_name,
+            what,
+            if a.target_name.is_empty() { String::new() } else { format!("\t{}", a.target_name) },
+            if a.ip.is_empty() { String::new() } else { format!("\tIP {}", a.ip) },
+            if detail.is_empty() { String::new() } else { format!("\t{detail}") }
+        ));
+    }
+    out
+}
+
+/// 聊天式对话用的账号资源：设备、SSH 主机、片段、端口映射、连接记录；用到设备时再连接。
+pub(crate) struct ChatWorkspace {
+    inner: std::sync::Weak<Inner>,
+    pub(crate) exec: Arc<galaxy_client::ai::SessionExecutor>,
+}
+
+impl ChatWorkspace {
+    fn inner(&self) -> anyhow::Result<Arc<Inner>> {
+        self.inner.upgrade().ok_or_else(|| anyhow::anyhow!("已退出登录"))
+    }
+
+    pub(crate) fn cached_models(&self) -> Option<galaxy_proto::api::AiModelsResp> {
+        self.inner.upgrade().and_then(|i| i.models.lock().clone())
+    }
+
+    pub(crate) fn name_of(&self, id: &str) -> String {
+        let Some(inner) = self.inner.upgrade() else { return id.to_string() };
+        if let Some(d) = DeviceId::from_hex(id) {
+            return inner.device_name(&d);
+        }
+        let v = inner.vault_snapshot.lock().clone();
+        v.iter().find(|e| e.id == id).map(|e| match &e.data {
+            VaultData::SshHost { label, host, username, .. } => if label.is_empty() { format!("{username}@{host}") } else { label.clone() },
+            VaultData::Snippet { label, .. } | VaultData::PortForward { label, .. } => label.clone(),
+            _ => id.to_string(),
+        }).unwrap_or_else(|| id.to_string())
+    }
+
+    fn catalog_now(&self) -> anyhow::Result<Vec<ag_core::CatalogItem>> {
+        let inner = self.inner()?;
+        let me = inner.identity.device_id;
+        let vault = inner.vault_snapshot.lock().clone();
+        let folder_name = |fid: &Option<String>| fid.as_ref().and_then(|f| vault.iter().find(|e| &e.id == f)).and_then(|e| match &e.data { VaultData::Folder { name, .. } => Some(name.clone()), _ => None });
+        let mut v = vec![];
+        for d in inner.devices.lock().iter() {
+            if d.id == me || d.kind == galaxy_proto::DeviceKind::Mobile {
+                continue;
+            }
+            let hex = d.id.to_hex();
+            let meta = vault.iter().find(|e| matches!(&e.data, VaultData::DeviceMeta { device_id, .. } if *device_id == hex));
+            let mut detail = vec![];
+            if !d.os_version.is_empty() {
+                detail.push(d.os_version.clone());
+            }
+            if !d.hostname.is_empty() {
+                detail.push(format!("主机名 {}", d.hostname));
+            }
+            if let Some(m) = meta {
+                if let Some(f) = folder_name(&m.folder_id) {
+                    detail.push(format!("分组 {f}"));
+                }
+                if let VaultData::DeviceMeta { tags, note, .. } = &m.data {
+                    if !tags.is_empty() {
+                        detail.push(format!("标签 {}", tags.join("、")));
+                    }
+                    if !note.is_empty() {
+                        detail.push(format!("备注 {note}"));
+                    }
+                }
+            }
+            if !d.last_ip.is_empty() {
+                detail.push(format!("最近 IP {}", d.last_ip));
+            }
+            if !d.online && d.last_seen_at > 0 {
+                detail.push(format!("最后在线 {}", fmt_time(d.last_seen_at)));
+            }
+            v.push(ag_core::CatalogItem { id: hex, name: inner.device_name(&d.id), kind: ag_core::TargetKind::Device, platform: d.platform, online: d.online, detail: detail.join("，") });
+        }
+        for e in &vault {
+            if let VaultData::SshHost { label, host, port, username, tags, note, .. } = &e.data {
+                let mut detail = vec![format!("{username}@{host}:{port}")];
+                if let Some(f) = folder_name(&e.folder_id) {
+                    detail.push(format!("分组 {f}"));
+                }
+                if !tags.is_empty() {
+                    detail.push(format!("标签 {}", tags.join("、")));
+                }
+                if !note.is_empty() {
+                    detail.push(format!("备注 {note}"));
+                }
+                let name = if label.is_empty() { format!("{username}@{host}") } else { label.clone() };
+                v.push(ag_core::CatalogItem { id: e.id.clone(), name, kind: ag_core::TargetKind::SshHost, platform: galaxy_proto::Platform::Linux, online: true, detail: detail.join("，") });
+            }
+        }
+        Ok(v)
+    }
+
+    pub(crate) fn snippets_text(&self, only: Option<&str>) -> String {
+        let Some(inner) = self.inner.upgrade() else { return String::new() };
+        let mut out = String::new();
+        for e in inner.vault_snapshot.lock().iter() {
+            if only.is_some_and(|o| o != e.id) {
+                continue;
+            }
+            if let VaultData::Snippet { label, command, tags } = &e.data {
+                out.push_str(&format!("## {label}{}\n```\n{command}\n```\n", if tags.is_empty() { String::new() } else { format!("（标签：{}）", tags.join("、")) }));
+            }
+        }
+        out
+    }
+
+    pub(crate) fn forwards_text(&self, only: Option<&str>) -> String {
+        let Some(inner) = self.inner.upgrade() else { return String::new() };
+        let mut out = String::new();
+        for e in inner.vault_snapshot.lock().clone().iter() {
+            if only.is_some_and(|o| o != e.id) {
+                continue;
+            }
+            if let VaultData::PortForward { label, via_device_id, via_ssh_host_id, local_port, remote_host, remote_port, auto_start, note } = &e.data {
+                let via = via_device_id.as_deref().or(via_ssh_host_id.as_deref()).map(|x| self.name_of(x)).unwrap_or_default();
+                out.push_str(&format!(
+                    "{label}\t本机端口 {}\t经由 {via}\t到 {remote_host}:{remote_port}{}{}\n",
+                    if *local_port == 0 { "自动".to_string() } else { local_port.to_string() },
+                    if *auto_start { "\t自动启动" } else { "" },
+                    if note.is_empty() { String::new() } else { format!("\t备注 {note}") }
+                ));
+            }
+        }
+        out
+    }
+}
+
+use galaxy_agent::agent as ag_core;
+
+impl ag_core::Workspace for ChatWorkspace {
+    fn catalog(&self) -> ag_core::BoxFut<'_, anyhow::Result<Vec<ag_core::CatalogItem>>> {
+        Box::pin(async move {
+            // 设备列表可能过时：先刷新一次（失败就用缓存）
+            if let Ok(inner) = self.inner() {
+                let _ = inner.refresh_devices().await;
+            }
+            self.catalog_now()
+        })
+    }
+
+    fn query(&self, kind: &str, limit: u32) -> ag_core::BoxFut<'_, anyhow::Result<String>> {
+        let kind = kind.to_string();
+        Box::pin(async move {
+            match kind.as_str() {
+                "snippets" => Ok(self.snippets_text(None)),
+                "port_forwards" => Ok(self.forwards_text(None)),
+                _ => {
+                    let inner = self.inner()?;
+                    let items = inner.activity(limit).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                    Ok(activity_text(&items))
+                }
+            }
+        })
+    }
+
+    fn connect(&self, target: &str) -> ag_core::BoxFut<'_, anyhow::Result<()>> {
+        let target = target.to_string();
+        Box::pin(async move {
+            if self.exec.sessions.lock().contains_key(&target) {
+                return Ok(());
+            }
+            let inner = self.inner()?;
+            if let Some(d) = DeviceId::from_hex(&target) {
+                let s = inner.session_for(d).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                self.exec.add(target.clone(), s, inner.device_name(&d));
+                return Ok(());
+            }
+            // AI 对话里没法弹窗问密码：用加密库里保存的凭据与已确认的主机密钥
+            let (s, info) = inner.clone().connect_ssh_inner(target.clone(), Arc::new(NoPrompt), 0).await.map_err(|e| match e {
+                GalaxyError::Cancelled | GalaxyError::Permission { .. } => anyhow::anyhow!("这台 SSH 主机需要输入密码或确认主机密钥，请先在主机列表里连接一次并保存密码"),
+                other => anyhow::anyhow!("{other}"),
+            })?;
+            let name = if info.label.is_empty() { format!("{}@{}", info.username, info.host) } else { info.label.clone() };
+            self.exec.add_ssh(target, s, name).await;
+            Ok(())
+        })
+    }
 }
 
 /// 不能询问用户时用：一律取消。

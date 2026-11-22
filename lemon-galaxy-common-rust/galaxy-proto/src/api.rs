@@ -258,3 +258,18 @@ pub struct UpdateLatestResp {
     #[serde(default)]
     pub notes: String,
 }
+
+/// 账号最近的活动（登录、连接等），`GET /account/activity?limit=`。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActivityItem {
+    pub at: i64,
+    /// 如 user.login、connection.start、connection.end、device.register
+    pub action: String,
+    pub actor_name: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub target_name: String,
+    pub ip: String,
+    /// 原始详情（JSON 文本）
+    pub detail: String,
+}

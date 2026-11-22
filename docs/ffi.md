@@ -50,7 +50,8 @@ async connect(device_id) -> PeerSession
 async connect_assist(device_code, verification_code) -> PeerSession   会等被控端本人点允许（最多约 2 分钟）
 
 async ai_models() -> AiModels
-async new_conversation(ConversationConfig, AgentListener) -> AgentConversation   会先连上所有目标设备
+async new_conversation(ConversationConfig, AgentListener) -> AgentConversation   targets 可以为空（聊天式）；选了的目标视同用户引用过，用到时才连接
+async account_activity(limit) -> [ActivityItem]                               最近的登录与连接记录（新的在前）
 list_conversations() -> [ConversationSummary]                                    本机保存（加密）
 async open_conversation(id, ConversationConfig, AgentListener) -> AgentConversation
 delete_conversation(id)
@@ -141,13 +142,17 @@ ConversationConfig { provider_id, model_id, targets: [AgentTarget{kind: Device|S
 AgentConversation:
   id() / title()
   send(text)                                 后台运行，进度经 AgentListener
+  send_with_refs(text, [ContextRef])         带引用发送：ContextRef{kind, target_id, id, label}，kind 为
+                                             Device | SshHost | File | Folder | Snippet | PortForward | Activity。
+                                             设备与主机：本对话内可直接使用；文件（最多 256 KB）、目录列表、片段、端口映射、连接记录：展开后随消息给模型
+  set_model(provider_id, model_id)           中途换模型（上下文保留）；model() -> ConversationModel
   decide(call_id, ApprovalDecision)          AllowOnce | AllowSimilar | Deny{reason?} | EditAndRun{command}
   answer(question_id, answer)
   provide_secret(request_id, secret)         内容直接送到被控端，不进模型上下文
   set_mode(mode, trust_minutes?)
   stop()
   set_foreground(Bool)                       移动端切后台时 false：停止当前任务
-  messages() -> [AgentMessage]               User{text} | Assistant{id, text, thinking} | Tool{call, result?}
+  messages() -> [AgentMessage]               User{text, refs} | Assistant{id, text, thinking} | Tool{call, result?}
 ```
 
 `AgentEvent`：`AssistantDelta`、`AssistantDone`、`Thinking`、`ToolProposed{call: ToolCallView, needs_approval}`、`ToolStarted`、`ToolOutput`、

@@ -838,7 +838,7 @@ impl From<galaxy_agent::agent::AgentEvent> for AgentEvent {
 
 #[derive(uniffi::Enum, Clone, Debug)]
 pub enum AgentMessage {
-    User { text: String },
+    User { text: String, refs: Vec<ContextRef> },
     Assistant { id: String, text: String, thinking: String },
     Tool { call: ToolCallView, result: Option<ToolResultView> },
 }
@@ -847,10 +847,92 @@ impl From<galaxy_agent::agent::AgentMessage> for AgentMessage {
     fn from(m: galaxy_agent::agent::AgentMessage) -> Self {
         use galaxy_agent::agent::AgentMessage as M;
         match m {
-            M::User { text } => Self::User { text },
+            M::User { text, refs } => Self::User { text, refs: refs.into_iter().map(Into::into).collect() },
             M::Assistant { id, text, thinking } => Self::Assistant { id, text, thinking },
             M::Tool { call, result } => Self::Tool { call: call.into(), result: result.map(Into::into) },
         }
+    }
+}
+
+/// 聊天时引用的资源。
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextRefKind {
+    Device,
+    SshHost,
+    /// 设备或 SSH 主机上的文件（内容随消息带给模型，最多 256 KB）
+    File,
+    /// 设备或 SSH 主机上的目录（列表随消息带给模型，模型可再读其中文件）
+    Folder,
+    Snippet,
+    PortForward,
+    /// 最近的连接与登录记录
+    Activity,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct ContextRef {
+    pub kind: ContextRefKind,
+    /// 文件、文件夹所在的设备 ID 或 SSH 主机条目 ID；其他种类留空
+    pub target_id: String,
+    /// 设备 ID / SSH 主机条目 ID / 片段条目 ID / 端口映射条目 ID；文件与文件夹是路径；连接记录留空
+    pub id: String,
+    /// 显示名（界面上的标签）
+    pub label: String,
+}
+
+impl ContextRefKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::SshHost => "ssh_host",
+            Self::File => "file",
+            Self::Folder => "folder",
+            Self::Snippet => "snippet",
+            Self::PortForward => "port_forward",
+            Self::Activity => "activity",
+        }
+    }
+    pub(crate) fn parse(s: &str) -> Self {
+        match s {
+            "ssh_host" => Self::SshHost,
+            "file" => Self::File,
+            "folder" => Self::Folder,
+            "snippet" => Self::Snippet,
+            "port_forward" => Self::PortForward,
+            "activity" => Self::Activity,
+            _ => Self::Device,
+        }
+    }
+}
+
+impl From<galaxy_agent::agent::RefView> for ContextRef {
+    fn from(r: galaxy_agent::agent::RefView) -> Self {
+        Self { kind: ContextRefKind::parse(&r.kind), target_id: r.target_id, id: r.id, label: r.label }
+    }
+}
+impl From<ContextRef> for galaxy_agent::agent::RefView {
+    fn from(r: ContextRef) -> Self {
+        Self { kind: r.kind.as_str().into(), target_id: r.target_id, id: r.id, label: r.label }
+    }
+}
+
+/// 账号最近的活动（登录、连接等）。
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct ActivityItem {
+    pub at: i64,
+    /// 如 user.login、connection.start、connection.end、device.register
+    pub action: String,
+    pub actor_name: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub target_name: String,
+    pub ip: String,
+    pub detail: String,
+}
+
+impl From<galaxy_proto::api::ActivityItem> for ActivityItem {
+    fn from(a: galaxy_proto::api::ActivityItem) -> Self {
+        Self { at: a.at, action: a.action, actor_name: a.actor_name, target_type: a.target_type, target_id: a.target_id, target_name: a.target_name, ip: a.ip, detail: a.detail }
     }
 }
 

@@ -578,7 +578,7 @@ async fn ai_run(dir: &Path, id: &Identity, session: Arc<PeerSession>, rest: &[St
         locale: "zh-CN".into(),
         trust_minutes: None,
     };
-    let agent = galaxy_agent::agent::Agent::new(cfg, Arc::new(galaxy_client::ai::GatewayLlm { api }), exec, ui.clone());
+    let agent = galaxy_agent::agent::Agent::new(cfg, Arc::new(galaxy_client::ai::GatewayLlm { api }), exec, None, ui.clone());
     *ui.agent.lock().unwrap() = Some(Arc::downgrade(&agent));
     agent.send(prompt).await;
     Ok(())
