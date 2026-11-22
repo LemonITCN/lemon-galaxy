@@ -2,7 +2,8 @@
 //!
 //! 一个端口号（默认 7443）：TCP 上是 HTTPS（管理后台、客户端接口、信令、TCP 中转），UDP 上是探测与中转。
 //! 数据全部在数据目录下：server.db（SQLite）与 keys/（密钥，权限 0600）。
-//! 前台运行时数据目录默认是当前目录下的 lemon-galaxy-data；install-service 装成系统服务（Windows / Linux），见 service 模块。
+//! 前台运行时数据目录默认是当前目录下的 lemon-galaxy-data；install-service 装成系统服务（Windows / Linux / macOS），见 service 模块。
+//! 在终端里不带任何参数运行时进交互菜单（menu 模块），脚本、systemd、Docker 里不带参数照常前台运行。
 
 mod admin;
 mod ai;
@@ -13,9 +14,11 @@ mod db;
 mod error;
 mod keys;
 mod logfile;
+mod menu;
 mod service;
 mod state;
 mod tls;
+mod tui;
 mod udp;
 mod update;
 mod web;
@@ -42,7 +45,8 @@ pub(crate) const LOCAL_DATA_DIR: &str = "./lemon-galaxy-data";
 #[command(name = "lemon-galaxy-server", version, about = "LemonGalaxy 服务器")]
 struct Cli {
     /// 数据目录（数据库与密钥）。前台运行默认为当前目录下的 lemon-galaxy-data；
-    /// 系统服务默认为 %ProgramData%\LemonGalaxy\server（Windows）或 /var/lib/lemon-galaxy-server（Linux）
+    /// 系统服务默认为 %ProgramData%\LemonGalaxy\server（Windows）、/var/lib/lemon-galaxy-server（Linux）
+    /// 或 /Library/Application Support/LemonGalaxy/server（macOS）
     #[arg(long, env = "LEMON_GALAXY_DATA", global = true)]
     data_dir: Option<PathBuf>,
     /// 端口（TCP 与 UDP 同号），默认 7443
@@ -68,15 +72,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 前台运行服务器（默认）
+    /// 前台运行服务器（默认；在终端里不带任何参数运行时进交互菜单）
     Run,
     /// 显示客户端地址与指纹
     Info,
-    /// 安装为系统服务：开机自启、出错自动重启（Windows 需管理员，Linux 需 root）。
+    /// 安装为系统服务：开机自启、出错自动重启（Windows 需管理员，Linux 与 macOS 需 root）。
     /// --port、--public-host、--bind、--tls-cert/--tls-key 写进服务；再次运行可修改，没写的沿用上次，写空值表示清除
     InstallService,
     /// 卸载系统服务（数据目录保留）
     UninstallService,
+    /// 启动系统服务
+    StartService,
+    /// 停止系统服务（开机时仍会自动启动）
+    StopService,
+    /// 重启系统服务
+    RestartService,
     /// 显示系统服务状态、客户端地址与初始化网址
     Status,
     /// 由 Windows 服务管理器启动（内部使用）
@@ -97,7 +107,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AiCmd,
     },
-    /// 升级服务器程序（从 GitHub 取最新发布，验发布签名；Linux 与 Windows）。装了系统服务会自动重启它
+    /// 升级服务器程序（从 GitHub 取最新发布，验发布签名；Linux、Windows 与 macOS）。装了系统服务会自动重启它
     SelfUpdate {
         /// 只检查，不升级
         #[arg(long)]
@@ -217,6 +227,15 @@ fn open_data(data_dir: &Path, public_host: Option<&str>) -> anyhow::Result<(db::
 /// 管理命令（admin / user / ai / info / status / self-update）用的数据目录与参数：
 /// 命令行给了就用命令行的；当前目录下有 lemon-galaxy-data 就用它（与以前一致）；否则装了系统服务就用服务的数据目录和参数。
 fn manage_ctx(cli: &Cli) -> ServeCtx {
+    let (ctx, from_service) = resolve_manage_ctx(cli);
+    if from_service && cli.data_dir.is_none() {
+        eprintln!("（使用系统服务的数据目录 {}）", ctx.data_dir.display());
+    }
+    ctx
+}
+
+/// 同 manage_ctx，不打印提示；第二项表示用的是系统服务的数据目录与参数。
+pub(crate) fn resolve_manage_ctx(cli: &Cli) -> (ServeCtx, bool) {
     let svc = service::load_config();
     let (data_dir, svc) = match &cli.data_dir {
         Some(d) => {
@@ -225,22 +244,21 @@ fn manage_ctx(cli: &Cli) -> ServeCtx {
         }
         None if Path::new(LOCAL_DATA_DIR).exists() => (PathBuf::from(LOCAL_DATA_DIR), None),
         None => match svc {
-            Some(c) => {
-                eprintln!("（使用系统服务的数据目录 {}）", c.data_dir.display());
-                (c.data_dir.clone(), Some(c))
-            }
+            Some(c) => (c.data_dir.clone(), Some(c)),
             None => (PathBuf::from(LOCAL_DATA_DIR), None),
         },
     };
+    let from_service = svc.is_some();
     let svc = svc.as_ref();
-    ServeCtx {
+    let ctx = ServeCtx {
         data_dir,
         port: cli.port.or(svc.map(|c| c.port)).unwrap_or(galaxy_proto::DEFAULT_PORT),
         bind: cli.bind.clone().or(svc.and_then(|c| c.bind.clone())).unwrap_or_else(|| "::".into()),
         public_host: cli.public_host.clone().or(svc.and_then(|c| c.public_host.clone())),
         tls_cert: cli.tls_cert.clone().or(svc.and_then(|c| c.tls_cert.clone())),
         tls_key: cli.tls_key.clone().or(svc.and_then(|c| c.tls_key.clone())),
-    }
+    };
+    (ctx, from_service)
 }
 
 /// 前台运行与服务运行用的参数：只看命令行（服务的参数写在启动命令里）。
@@ -261,6 +279,10 @@ fn real_main(double_click: bool) -> anyhow::Result<()> {
     #[cfg(windows)]
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(exe.with_extension("old"));
+    }
+    // 在终端里不带任何参数运行：交互菜单（Windows 双击打开的控制台也算终端）
+    if cli.cmd.is_none() && std::env::args_os().len() <= 1 && menu::available() {
+        return menu::run(&cli);
     }
 
     match &cli.cmd {
@@ -299,6 +321,9 @@ fn real_main(double_click: bool) -> anyhow::Result<()> {
             return service::install(&o);
         }
         Some(Cmd::UninstallService) => return service::uninstall(),
+        Some(Cmd::StartService) => return service::control(service::Ctl::Start),
+        Some(Cmd::StopService) => return service::control(service::Ctl::Stop),
+        Some(Cmd::RestartService) => return service::control(service::Ctl::Restart),
         _ => {}
     }
 
@@ -325,15 +350,7 @@ fn real_main(double_click: bool) -> anyhow::Result<()> {
             return Ok(());
         }
         Some(Cmd::Status) => {
-            let admins = if has_db { open_data(&ctx.data_dir, None).ok().and_then(|(db, _, _)| db.call_sync(|c| c.query_row("SELECT COUNT(*) FROM admins", [], |r| r.get::<_, i64>(0))).ok()) } else { None };
-            let fallback = match std::fs::metadata(ctx.data_dir.join("keys")) {
-                Ok(_) => open_data(&ctx.data_dir, ctx.public_host.as_deref())
-                    .and_then(|(_, _, s)| Ok(state::client_address(&s.public_host, ctx.port, &keys::Keys::load(&ctx.data_dir, &s.public_host, &ctx.tls_source())?.fingerprint)))
-                    .unwrap_or_else(|e| format!("（{e:#}）")),
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => "（没有权限读数据目录，请以管理员 / root 身份运行）".to_string(),
-                Err(_) => "（服务器还没有运行过）".to_string(),
-            };
-            service::print_status(&ctx.data_dir, &fallback, admins);
+            print_status(&ctx);
             return Ok(());
         }
         _ => {}
@@ -357,6 +374,30 @@ fn real_main(double_click: bool) -> anyhow::Result<()> {
         }
         _ => Ok(()),
     }
+}
+
+/// 管理员个数（数据库不存在或打不开时为 None，不会新建数据库）。
+pub(crate) fn admin_count(data_dir: &Path) -> Option<i64> {
+    if !data_dir.join("server.db").exists() {
+        return None;
+    }
+    open_data(data_dir, None).ok().and_then(|(db, _, _)| db.call_sync(|c| c.query_row("SELECT COUNT(*) FROM admins", [], |r| r.get::<_, i64>(0))).ok())
+}
+
+/// 服务器没运行过时用的客户端地址（从密钥算；密钥不存在时不生成）。
+pub(crate) fn fallback_address(ctx: &ServeCtx) -> String {
+    match std::fs::metadata(ctx.data_dir.join("keys")) {
+        Ok(_) => open_data(&ctx.data_dir, ctx.public_host.as_deref())
+            .and_then(|(_, _, s)| Ok(state::client_address(&s.public_host, ctx.port, &keys::Keys::load(&ctx.data_dir, &s.public_host, &ctx.tls_source())?.fingerprint)))
+            .unwrap_or_else(|e| format!("（{e:#}）")),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => "（没有权限读数据目录，请以管理员 / root 身份运行）".to_string(),
+        Err(_) => "（服务器还没有运行过）".to_string(),
+    }
+}
+
+/// status 命令。
+pub(crate) fn print_status(ctx: &ServeCtx) {
+    service::print_status(&ctx.data_dir, &fallback_address(ctx), admin_count(&ctx.data_dir));
 }
 
 /// 前台运行时的停止信号：Ctrl+C，Unix 上还有 SIGTERM（systemd stop、kill）。

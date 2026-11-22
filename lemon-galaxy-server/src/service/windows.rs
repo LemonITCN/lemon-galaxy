@@ -1,6 +1,6 @@
 //! Windows：LocalSystem 系统服务（开机自启、失败自动重启）、防火墙规则、服务入口、双击运行。
 
-use super::SvcConfig;
+use super::{SvcConfig, SvcState};
 use std::ffi::OsString;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -16,6 +16,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
 pub const SERVICE_NAME: &str = "LemonGalaxyServer";
+pub const FAILED_HINT: &str = "启动失败";
 const DISPLAY_NAME: &str = "LemonGalaxy Server";
 const DESCRIPTION: &str = "LemonGalaxy 服务器：账号、设备、信令、中转、Web 管理后台";
 /// 防火墙入站规则（名称, 协议）。
@@ -62,6 +63,11 @@ fn werr(e: windows_service::Error) -> anyhow::Error {
 pub fn require_admin() -> anyhow::Result<()> {
     ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE).map_err(werr)?;
     Ok(())
+}
+
+/// 能以「创建服务」权限打开服务管理器就是管理员（已提升）。
+pub fn is_admin() -> bool {
+    require_admin().is_ok()
 }
 
 /// 数据目录只给 SYSTEM 与管理员组（用 SID，与系统语言无关）。
@@ -222,15 +228,51 @@ fn query() -> Option<ServiceStatus> {
     manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS).ok()?.query_status().ok()
 }
 
-pub fn state() -> Option<String> {
+pub fn state() -> Option<SvcState> {
     let st = query()?;
     Some(match st.current_state {
-        ServiceState::Running => format!("运行中（进程 {}）", st.process_id.unwrap_or(0)),
-        ServiceState::StartPending => "正在启动".into(),
-        ServiceState::StopPending => "正在停止".into(),
-        ServiceState::Stopped => "已停止".into(),
-        _ => "已暂停".into(),
+        ServiceState::Running => SvcState::Running(st.process_id),
+        ServiceState::StartPending | ServiceState::ContinuePending => SvcState::Starting,
+        ServiceState::StopPending | ServiceState::PausePending => SvcState::Stopping,
+        ServiceState::Stopped => SvcState::Stopped,
+        _ => SvcState::Paused,
     })
+}
+
+pub fn autostart() -> Option<bool> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+    let s = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG).ok()?;
+    Some(s.query_config().ok()?.start_type == ServiceStartType::AutoStart)
+}
+
+pub fn firewall_added_msg(port: u16) -> String {
+    format!("已在 Windows 防火墙放行 TCP 与 UDP {port} 端口。")
+}
+
+fn open(access: ServiceAccess) -> anyhow::Result<Service> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(werr)?;
+    manager.open_service(SERVICE_NAME, access).map_err(werr)
+}
+
+pub fn start() -> anyhow::Result<()> {
+    let s = open(ServiceAccess::QUERY_STATUS | ServiceAccess::START)?;
+    if s.query_status().map(|st| st.current_state == ServiceState::Stopped).unwrap_or(true) {
+        s.start::<&str>(&[]).map_err(werr)?;
+    }
+    Ok(())
+}
+
+pub fn stop() -> anyhow::Result<()> {
+    let s = open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)?;
+    stop_service(&s);
+    Ok(())
+}
+
+pub fn restart() -> anyhow::Result<()> {
+    let s = open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START)?;
+    stop_service(&s);
+    s.start::<&str>(&[]).map_err(werr)?;
+    Ok(())
 }
 
 pub fn is_stopped() -> bool {
@@ -246,10 +288,7 @@ pub fn restart_if_installed() -> anyhow::Result<bool> {
     if query().is_none() {
         return Ok(false);
     }
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(werr)?;
-    let s = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START).map_err(werr)?;
-    stop_service(&s);
-    s.start::<&str>(&[]).map_err(werr)?;
+    restart()?;
     Ok(true)
 }
 

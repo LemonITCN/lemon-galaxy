@@ -1,10 +1,11 @@
 //! Linux：systemd 系统服务（root 运行，程序在 /usr/local/bin，数据在 /var/lib/lemon-galaxy-server）。
 
-use super::SvcConfig;
+use super::{SvcConfig, SvcState};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const SERVICE_NAME: &str = "lemon-galaxy-server";
+pub const FAILED_HINT: &str = "启动失败（journalctl -u lemon-galaxy-server 查看原因）";
 const UNIT_PATH: &str = "/etc/systemd/system/lemon-galaxy-server.service";
 const BIN: &str = "/usr/local/bin/lemon-galaxy-server";
 const DATA_DIR: &str = "/var/lib/lemon-galaxy-server";
@@ -14,12 +15,12 @@ extern "C" {
     fn geteuid() -> u32;
 }
 
-fn is_root() -> bool {
+pub fn is_admin() -> bool {
     unsafe { geteuid() == 0 }
 }
 
 pub fn require_admin() -> anyhow::Result<()> {
-    anyhow::ensure!(is_root(), "需要 root 权限，请用 sudo 运行");
+    anyhow::ensure!(is_admin(), "需要 root 权限，请用 sudo 运行");
     Ok(())
 }
 
@@ -123,21 +124,38 @@ fn systemctl_out(args: &[&str]) -> String {
     Command::new("systemctl").args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
 }
 
-pub fn state() -> Option<String> {
+pub fn state() -> Option<SvcState> {
     if !Path::new(UNIT_PATH).exists() {
         return None;
     }
     let active = systemctl_out(&["is-active", SERVICE_NAME]);
     Some(match active.as_str() {
-        "active" => {
-            let pid = systemctl_out(&["show", "-p", "MainPID", "--value", SERVICE_NAME]);
-            format!("运行中（进程 {pid}）")
-        }
-        "activating" | "reloading" => "正在启动".into(),
-        "deactivating" => "正在停止".into(),
-        "failed" => "启动失败（journalctl -u lemon-galaxy-server 查看原因）".into(),
-        _ => "已停止".into(),
+        "active" => SvcState::Running(systemctl_out(&["show", "-p", "MainPID", "--value", SERVICE_NAME]).parse().ok().filter(|p| *p != 0)),
+        "activating" | "reloading" => SvcState::Starting,
+        "deactivating" => SvcState::Stopping,
+        "failed" => SvcState::Failed,
+        _ => SvcState::Stopped,
     })
+}
+
+pub fn autostart() -> Option<bool> {
+    Path::new(UNIT_PATH).exists().then(|| systemctl_out(&["is-enabled", SERVICE_NAME]) == "enabled")
+}
+
+pub fn firewall_added_msg(port: u16) -> String {
+    format!("已在系统防火墙放行 TCP 与 UDP {port} 端口。")
+}
+
+pub fn start() -> anyhow::Result<()> {
+    systemctl(&["start", SERVICE_NAME])
+}
+
+pub fn stop() -> anyhow::Result<()> {
+    systemctl(&["stop", SERVICE_NAME])
+}
+
+pub fn restart() -> anyhow::Result<()> {
+    systemctl(&["restart", SERVICE_NAME])
 }
 
 /// 已停止，或启动失败正等着自动重启。
@@ -155,7 +173,7 @@ pub fn restart_if_installed() -> anyhow::Result<bool> {
         return Ok(false);
     }
     require_admin()?;
-    systemctl(&["restart", SERVICE_NAME])?;
+    restart()?;
     Ok(true)
 }
 

@@ -2,7 +2,8 @@
 # 发布：推送到 main 且全部通过后，自动发布 Release「LemonGalaxy <版本>.<构建序号>」并标为最新版；推送 v* 标签时按标签版本发布。
 #
 # 产物
-#   服务器         lemon-galaxy-server  Linux x86_64 / ARM64 静态单文件、Windows 10 / Server 2016 起 x64 / ARM64（内嵌 Web 管理后台，可装成系统服务）
+#   服务器         lemon-galaxy-server  Linux x86_64 / ARM64 静态单文件、Windows 10 / Server 2016 起 x64 / ARM64、
+#                  macOS 13 起 Apple 芯片 + Intel 通用单文件（内嵌 Web 管理后台，可装成系统服务；终端里不带参数运行进交互菜单）
 #   Linux 被控端   lemon-galaxy-worker  Linux x86_64 / ARM64 静态单文件
 #   Windows 被控端 lemon-galaxy-worker.exe  Windows 10 / Server 2016 起，x64 / ARM64 单文件（系统服务 + 画面代理）
 #   Mac 客户端     LemonGalaxy.dmg      macOS 13 起，Apple 芯片 + Intel 通用（主控 + 被控）
@@ -342,7 +343,8 @@ jobs:
           if-no-files-found: error
 
   macos:
-    name: Mac 客户端
+    name: Mac 客户端与 Mac 服务器
+    needs: web
     runs-on: macos-26
     env:
       MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
@@ -353,6 +355,10 @@ jobs:
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: lemon-galaxy-server/web/dist
       - name: 选用最新的正式版 Xcode
         run: |
           XCODE="$(ls -d /Applications/Xcode_[0-9]*.app | grep -v -i -E 'beta|rc' | sort -V | tail -1)"
@@ -423,12 +429,27 @@ jobs:
           ls selftest-worker | head
           mkdir -p out && cp lemon-galaxy-control-macos/build/dist.noindex/*.dmg out/LemonGalaxy-macOS.dmg
           cp lemon-galaxy-worker-macos/build/dist.noindex/*.dmg out/LemonGalaxyWorker-macOS.dmg
+      - name: 服务器（Apple 芯片 + Intel 通用单文件）
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+        run: |
+          for a in aarch64 x86_64; do cargo build --release --target "$a-apple-darwin" -p lemon-galaxy-server; done
+          mkdir -p out-server
+          lipo -create -output out-server/lemon-galaxy-server target/aarch64-apple-darwin/release/lemon-galaxy-server target/x86_64-apple-darwin/release/lemon-galaxy-server
+          # 先只做临时签名（命令行程序，curl / scp 拿到的没有隔离标记，不受门禁影响）
+          codesign --force --sign - out-server/lemon-galaxy-server
+          lipo -info out-server/lemon-galaxy-server
+          out-server/lemon-galaxy-server --version
+          cp out-server/lemon-galaxy-server out/lemon-galaxy-server
+      - name: 服务器装成 launchd 守护进程（安装、启停、改参数、卸载）
+        run: scripts/server-service-test.sh out-server
       - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: |
             out/LemonGalaxy-macOS.dmg
             out/LemonGalaxyWorker-macOS.dmg
+            out/lemon-galaxy-server
           if-no-files-found: error
 
   ios:
@@ -536,8 +557,14 @@ jobs:
           for a in x86_64 aarch64; do
             cp "art/linux-$a/lemon-galaxy-worker" "out/lemon-galaxy-worker-$V-linux-$a"
             chmod +x "out/lemon-galaxy-worker-$V-linux-$a"
+            # 构建产物传过来会丢可执行权限，打包前补上
+            chmod +x "art/linux-$a/lemon-galaxy-server"
             tar -C "art/linux-$a" -czf "out/lemon-galaxy-server-$V-linux-$a.tar.gz" lemon-galaxy-server
           done
+          if [ -f art/macos/lemon-galaxy-server ]; then
+            chmod +x art/macos/lemon-galaxy-server
+            tar -C art/macos -czf "out/lemon-galaxy-server-$V-macos-universal.tar.gz" lemon-galaxy-server
+          fi
           if [ -f art/windows-control/LemonGalaxy-Windows-x64.zip ]; then
             cp art/windows-control/LemonGalaxy-Windows-x64.zip "out/LemonGalaxy-$V-windows-x64.zip"
           fi
@@ -607,6 +634,7 @@ jobs:
             done
             echo "| 服务器（内嵌管理后台） | Linux x86_64 | [lemon-galaxy-server-$V-linux-x86_64.tar.gz]($DL/lemon-galaxy-server-$V-linux-x86_64.tar.gz) |"
             echo "| 服务器（内嵌管理后台） | Linux ARM64 | [lemon-galaxy-server-$V-linux-aarch64.tar.gz]($DL/lemon-galaxy-server-$V-linux-aarch64.tar.gz) |"
+            [ -f "out/lemon-galaxy-server-$V-macos-universal.tar.gz" ] && echo "| 服务器（内嵌管理后台） | macOS 13 及以上，Apple 芯片 / Intel 通用 | [lemon-galaxy-server-$V-macos-universal.tar.gz]($DL/lemon-galaxy-server-$V-macos-universal.tar.gz) |"
             echo
             if [ "$SIGNED" = true ]; then
               echo "校验：[SHA256SUMS.txt]($DL/SHA256SUMS.txt)，发布签名 [SHA256SUMS.txt.sig]($DL/SHA256SUMS.txt.sig)（客户端自动更新只装签名有效的版本）"
@@ -618,6 +646,8 @@ jobs:
             echo
             echo '1. 服务器（Linux）：解压后运行 `sudo ./lemon-galaxy-server install-service --public-host <你的域名或公网 IP>` 装成开机自启的服务，会打印初始化网址和「客户端填写的服务器地址」；也可以直接 `./lemon-galaxy-server --public-host <...>` 前台运行。放行 TCP 与 UDP 7443 端口。'
             echo '   服务器（Windows）：解压后以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-server.exe install-service --public-host <你的域名或公网 IP>`，会装成系统服务并在 Windows 防火墙放行端口。'
+            echo '   服务器（macOS）：解压后运行 `sudo ./lemon-galaxy-server install-service --public-host <你的域名或 IP>`，装成开机自启的 launchd 守护进程。用浏览器下载的先运行 `xattr -d com.apple.quarantine lemon-galaxy-server` 去掉隔离标记（程序暂未公证）。'
+            echo '   三个系统都可以在终端里不带参数运行 `lemon-galaxy-server`（Windows 上双击）进入交互菜单：装服务、启停、改参数、创建管理员、升级都能在菜单里选。'
             echo '2. 打开初始化网址创建管理员、绑定两步验证，在后台「用户」里创建账号。'
             echo '3. Linux 被控端：`chmod +x lemon-galaxy-worker && ./lemon-galaxy-worker login`，再 `sudo ./lemon-galaxy-worker install-service` 安装开机自启。'
             echo '   Windows 被控端：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service` 安装为系统服务。'

@@ -151,9 +151,11 @@
 |---|---|---|
 | Linux（x86_64 / ARM64，任意发行版） | 静态单文件 | `install-service` 装成 systemd 服务（root 运行，程序 `/usr/local/bin`，数据 `/var/lib/lemon-galaxy-server`） |
 | Windows 10 / 11 / Server 2016+（x64 / ARM64） | 单个 exe（zip） | `install-service` 装成 LocalSystem 服务（开机自启、失败自动重启，程序 `%ProgramFiles%\LemonGalaxy\Server`，数据 `%ProgramData%\LemonGalaxy\server` 只给 SYSTEM 与管理员），自动加 Windows 防火墙入站规则；日志写数据目录 `logs/server.log` |
-| macOS | 单文件 | 只用于开发试用，不装系统服务、不自动升级 |
+| macOS 13+（Apple 芯片 + Intel 通用） | 单文件（tar.gz，临时签名，暂未公证） | `install-service` 装成 launchd 守护进程（`/Library/LaunchDaemons/cn.lemonit.galaxy.server.plist`，root 运行，RunAtLoad + KeepAlive；程序 `/usr/local/lib/lemon-galaxy-server`，`/usr/local/bin` 下放同名链接；数据 `/Library/Application Support/LemonGalaxy/server`，0700）；应用程序防火墙打开时用 socketfilterfw 把程序加进允许列表，卸载时移除；日志写数据目录 `logs/server.log`。浏览器下载的要先 `xattr -d com.apple.quarantine` |
 
-两个平台用法相同：`install-service` 的端口、对外地址、监听地址、证书参数写进服务，再次运行可修改（没写的沿用上次）；`uninstall-service` 删服务、防火墙规则与程序，保留数据目录；`status` 显示服务状态、客户端地址与初始化网址；`self-update` 从 GitHub 取最新发布、验发布签名后替换程序并重启服务（Windows 上运行中的程序先改名为 `.old`，下次启动时删掉）。前台运行（含 Windows 双击）时数据目录默认为当前目录下的 `lemon-galaxy-data`。
+三个平台用法相同：`install-service` 的端口、对外地址、监听地址、证书参数写进服务，再次运行可修改（没写的沿用上次）；`start-service` / `stop-service` / `restart-service` 启停服务（停止后开机仍会自动启动）；`uninstall-service` 删服务、防火墙规则与程序，保留数据目录；`status` 显示服务状态、是否开机自启、客户端地址与初始化网址；`self-update` 从 GitHub 取最新发布（macOS 取通用包 `lemon-galaxy-server-<版本>-macos-universal.tar.gz`）、验发布签名后替换程序并重启服务（Windows 上运行中的程序先改名为 `.old`，下次启动时删掉）。前台运行时数据目录默认为当前目录下的 `lemon-galaxy-data`。
+
+交互菜单：标准输入输出都是终端且不带任何参数时（含 Windows 双击打开的控制台）不直接运行，而是进菜单（方向键 / 数字选择，Esc 返回，q 退出；终端不认 ANSI 控制码时退回输入编号）。顶部显示版本、服务是否安装 / 运行 / 开机自启、数据目录、端口、对外地址、客户端地址（带指纹，取自运行中服务器写的 `run-info.json`）、还没有管理员时的初始化网址、管理员与用户数。菜单项：系统服务（安装并开机自启 / 修改参数 / 启动 / 停止 / 重启 / 卸载）、前台运行、状态与最近日志、客户端地址与初始化网址、管理员（创建 / 重置密码）、用户（创建 / 列出）、检查更新与升级、退出。服务相关操作调用同名子命令，非 root 时经 sudo；读不了系统服务数据目录时可「用 sudo 重新打开菜单」，Windows 上为「以管理员身份重新打开」（ShellExecute runas）。停止、卸载、重置密码前要确认。菜单文字跟随系统语言（`LEMON_GALAXY_LANG=zh|en` 可覆盖），子命令输出仍为中文。非终端（脚本、systemd、launchd、Docker 里没有 TTY 或在容器内）不带参数时仍直接前台运行。
 
 ## 6. 发布
 

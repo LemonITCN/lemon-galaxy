@@ -1,7 +1,10 @@
-//! 系统服务：install-service / uninstall-service / status，Windows 与 Linux（systemd）同一套用法。
+//! 系统服务：install-service / uninstall-service / start-service / stop-service / restart-service / status，
+//! Windows（服务管理器）、Linux（systemd）、macOS（launchd 守护进程）同一套用法。
 //!
-//! - 程序复制到固定位置（Windows `%ProgramFiles%\LemonGalaxy\Server`，Linux `/usr/local/bin`），服务不依赖下载目录；
-//! - 数据目录默认 `%ProgramData%\LemonGalaxy\server` / `/var/lib/lemon-galaxy-server`，只有系统账号与管理员能访问；
+//! - 程序复制到固定位置（Windows `%ProgramFiles%\LemonGalaxy\Server`，Linux `/usr/local/bin`，
+//!   macOS `/usr/local/lib/lemon-galaxy-server`），服务不依赖下载目录；
+//! - 数据目录默认 `%ProgramData%\LemonGalaxy\server` / `/var/lib/lemon-galaxy-server` /
+//!   `/Library/Application Support/LemonGalaxy/server`，只有系统账号与管理员能访问；
 //! - 安装时给的端口、对外地址、监听地址、证书写进服务的启动参数，同时记在 service.json，
 //!   再次安装时没写的参数沿用上次（写空值表示清除）；卸载时删掉服务、防火墙规则、程序与 service.json，数据目录保留。
 //! - 服务启动后把客户端地址与初始化网址写进数据目录的 run-info.json，安装命令读它打印出来。
@@ -14,9 +17,13 @@ use linux as platform;
 pub mod windows;
 #[cfg(windows)]
 use self::windows as platform;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod other;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 use other as platform;
 
 use serde::{Deserialize, Serialize};
@@ -88,7 +95,7 @@ impl SvcConfig {
     }
 
     /// 服务的启动参数（不含子命令）。
-    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub fn args(&self) -> Vec<String> {
         let mut a = vec!["--data-dir".to_string(), self.data_dir.to_string_lossy().into_owned(), "--port".to_string(), self.port.to_string()];
         if let Some(h) = &self.public_host {
@@ -223,7 +230,7 @@ pub fn install(o: &Overrides) -> anyhow::Result<()> {
     println!("数据目录：{}", cfg.data_dir.display());
     println!("日志：{}", cfg.log_file().display());
     match fw {
-        Ok(true) => println!("已在系统防火墙放行 TCP 与 UDP {} 端口。", cfg.port),
+        Ok(true) => println!("{}", platform::firewall_added_msg(cfg.port)),
         Ok(false) => println!("如果有防火墙或云服务器安全组，请放行 TCP 与 UDP {} 端口。", cfg.port),
         Err(e) => println!("添加防火墙规则失败（{e}），请手动放行 TCP 与 UDP {} 端口。", cfg.port),
     }
@@ -241,7 +248,7 @@ pub fn install(o: &Overrides) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_addresses(info: &RunInfo) {
+pub fn print_addresses(info: &RunInfo) {
     println!("客户端填写的服务器地址：{}", info.address);
     if let Some(u) = &info.setup_url {
         println!("尚未创建管理员。请打开 {u} 完成初始化（浏览器会提示自签证书，确认地址里的指纹后继续）");
@@ -270,9 +277,94 @@ pub fn uninstall() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 服务的运行状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SvcState {
+    Running(Option<u32>),
+    Starting,
+    Stopping,
+    Stopped,
+    Failed,
+    #[allow(dead_code)]
+    Paused,
+}
+
+/// 服务名（Windows 服务名 / systemd 单元名 / launchd 标签）。
+pub fn service_name() -> &'static str {
+    platform::SERVICE_NAME
+}
+
 /// 服务状态（没安装为 None）。
-pub fn state() -> Option<String> {
+pub fn query() -> Option<SvcState> {
     platform::state()
+}
+
+/// 服务状态的文字说明（没安装为 None）。
+pub fn state() -> Option<String> {
+    Some(match query()? {
+        SvcState::Running(Some(pid)) => format!("运行中（进程 {pid}）"),
+        SvcState::Running(None) => "运行中".into(),
+        SvcState::Starting => "正在启动".into(),
+        SvcState::Stopping => "正在停止".into(),
+        SvcState::Stopped => "已停止".into(),
+        SvcState::Failed => platform::FAILED_HINT.into(),
+        SvcState::Paused => "已暂停".into(),
+    })
+}
+
+/// 是否开机自启（没安装为 None）。
+pub fn autostart() -> Option<bool> {
+    platform::autostart()
+}
+
+/// 当前进程有没有管理员 / root 权限（装服务、启停服务要用）。
+pub fn is_admin() -> bool {
+    platform::is_admin()
+}
+
+/// 装了服务时，服务用的数据目录。
+pub fn service_data_dir() -> Option<PathBuf> {
+    load_config().map(|c| c.data_dir).or_else(platform::default_data_dir)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Ctl {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// start-service / stop-service / restart-service。启动、重启后等服务写出运行信息再打印地址。
+pub fn control(c: Ctl) -> anyhow::Result<()> {
+    platform::require_admin()?;
+    anyhow::ensure!(query().is_some(), "没有安装系统服务（先运行 install-service）");
+    let name = platform::SERVICE_NAME;
+    let dir = service_data_dir().ok_or_else(|| anyhow::anyhow!("这个系统不支持系统服务"))?;
+    match c {
+        Ctl::Stop => {
+            platform::stop()?;
+            for _ in 0..100 {
+                if platform::is_stopped() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            println!("已停止服务 {name}。开机时仍会自动启动；不想让它启动请用 uninstall-service 卸载。");
+        }
+        Ctl::Start if !platform::is_stopped() => println!("服务 {name} 已在运行。"),
+        Ctl::Start | Ctl::Restart => {
+            let since = galaxy_proto::now_ms();
+            if matches!(c, Ctl::Start) {
+                platform::start()?;
+            } else {
+                platform::restart()?;
+            }
+            let info = wait_started(&dir, since, Duration::from_secs(40))?;
+            println!("{}服务 {name}。", if matches!(c, Ctl::Start) { "已启动" } else { "已重启" });
+            print_addresses(&info);
+        }
+    }
+    Ok(())
 }
 
 /// status 命令：服务状态、地址、初始化网址。`admins` 查当前管理员数（数据库打不开时为 None）。
@@ -280,6 +372,9 @@ pub fn print_status(data_dir: &Path, fallback_address: &str, admins: Option<i64>
     match state() {
         Some(s) => {
             println!("服务：{} {}", platform::SERVICE_NAME, s);
+            if let Some(a) = autostart() {
+                println!("开机自启：{}", if a { "是" } else { "否" });
+            }
             println!("程序：{}", platform::installed_exe().display());
         }
         None => println!("服务：没有安装（install-service 安装为系统服务）"),

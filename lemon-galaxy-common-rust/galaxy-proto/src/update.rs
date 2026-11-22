@@ -52,6 +52,10 @@ pub fn classify_asset(name: &str) -> Option<(&'static str, &'static str, String)
     if lower.starts_with("lemon-galaxy-server-") && lower.contains("-windows-") && lower.ends_with(".zip") {
         return Some(("server", "windows", arch_of(&lower)));
     }
+    // macOS 服务器只有一个 Apple 芯片与 Intel 通用的包
+    if lower.starts_with("lemon-galaxy-server-") && lower.contains("-macos-") && lower.ends_with(".tar.gz") {
+        return Some(("server", "macos", "universal".into()));
+    }
     None
 }
 
@@ -108,6 +112,7 @@ mod tests {
         assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-linux-aarch64.tar.gz"), Some(("server", "linux", "aarch64".into())));
         assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-windows-x86_64.zip"), Some(("server", "windows", "x86_64".into())));
         assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-windows-aarch64.zip"), Some(("server", "windows", "aarch64".into())));
+        assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-macos-universal.tar.gz"), Some(("server", "macos", "universal".into())));
         // 服务器的 Windows 包只认 zip
         assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-windows-x86_64.exe"), None);
         assert_eq!(classify_asset("SHA256SUMS.txt"), None);

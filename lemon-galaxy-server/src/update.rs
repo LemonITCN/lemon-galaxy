@@ -338,11 +338,12 @@ pub async fn upload(State(st): State<St>, crate::auth::Admin(s): crate::auth::Ad
     })))
 }
 
-/// 本机服务器的发布文件名，以及包里的程序名（只发布 Linux 与 Windows 版）。
+/// 本机服务器的发布文件名，以及包里的程序名（Linux、Windows 分架构；macOS 是 Apple 芯片与 Intel 通用的一个包）。
 pub fn server_asset(version: &str, os: &str, arch: &str) -> Option<(String, &'static str)> {
     match os {
         "linux" => Some((format!("lemon-galaxy-server-{version}-linux-{arch}.tar.gz"), "lemon-galaxy-server")),
         "windows" => Some((format!("lemon-galaxy-server-{version}-windows-{arch}.zip"), "lemon-galaxy-server.exe")),
+        "macos" => Some((format!("lemon-galaxy-server-{version}-macos-universal.tar.gz"), "lemon-galaxy-server")),
         _ => None,
     }
 }
@@ -365,7 +366,7 @@ pub async fn self_update(repo: &str, check_only: bool) -> anyhow::Result<Option<
     if check_only {
         return Ok(Some(SelfUpdated { version, path: PathBuf::new() }));
     }
-    let (name, program) = server_asset(&version, std::env::consts::OS, galaxy_proto::update::this_arch()).ok_or_else(|| anyhow::anyhow!("自动升级只支持 Linux 与 Windows 版服务器，其他系统请手动下载替换"))?;
+    let (name, program) = server_asset(&version, std::env::consts::OS, galaxy_proto::update::this_arch()).ok_or_else(|| anyhow::anyhow!("自动升级只支持 Linux、Windows 与 macOS 版服务器，其他系统请手动下载替换"))?;
     let url_of = |n: &str| rel.assets.iter().find(|a| a.name == n).map(|a| a.browser_download_url.clone());
     let asset = url_of(&name).ok_or_else(|| anyhow::anyhow!("发布 {version} 里没有 {name}"))?;
     let sums = http.get(url_of(SUMS_FILE).ok_or_else(|| anyhow::anyhow!("没有 {SUMS_FILE}"))?).send().await?.error_for_status()?.text().await?;
@@ -504,7 +505,15 @@ mod tests {
             assert_eq!(classify_asset(&name), Some(("server", os, arch.to_string())), "{name}");
             assert_eq!(version_in_name(&name).as_deref(), Some("0.1.0.42"));
         }
-        assert_eq!(server_asset("0.1.0", "macos", "aarch64"), None);
+        // macOS 只有通用包，不分架构
+        for arch in ["aarch64", "x86_64"] {
+            let (name, prog) = server_asset("0.1.0.42", "macos", arch).unwrap();
+            assert_eq!(name, "lemon-galaxy-server-0.1.0.42-macos-universal.tar.gz");
+            assert_eq!(prog, "lemon-galaxy-server");
+            assert_eq!(classify_asset(&name), Some(("server", "macos", "universal".to_string())));
+            assert_eq!(version_in_name(&name).as_deref(), Some("0.1.0.42"));
+        }
+        assert_eq!(server_asset("0.1.0", "freebsd", "x86_64"), None);
     }
 
     /// 写一个最简单的 zip（每项可选存储或 deflate），与 Info-ZIP 的布局一致。

@@ -49,5 +49,9 @@ clap = { version = "4.6.9", features = ["derive", "env"] }
 tower-http = { version = "0.7.1", features = ["set-header", "compression-gzip"] }
 socket2.workspace = true
 
+# 交互菜单切终端原始模式（termios）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
