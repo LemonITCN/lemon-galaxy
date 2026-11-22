@@ -407,6 +407,17 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
         return c
     }
 
+    override func accountActivity(limit: UInt32) async throws -> [ActivityItem] {
+        await delay(150)
+        let me = currentUser()?.displayName ?? ""
+        let items = [
+            ActivityItem(at: MockData.now - 600_000, action: "user.login", actorName: me, targetType: "", targetId: "", targetName: "", ip: "203.0.113.8", detail: ""),
+            ActivityItem(at: MockData.now - 1_800_000, action: "connection.start", actorName: me, targetType: "device", targetId: "dev-build", targetName: "build-server-01", ip: "203.0.113.8", detail: "terminal"),
+            ActivityItem(at: MockData.now - 40_000_000, action: "connection.start", actorName: me, targetType: "device", targetId: "dev-office", targetName: zh ? "办公室电脑" : "Office PC", ip: "203.0.113.8", detail: "display"),
+        ]
+        return Array(items.prefix(Int(limit)))
+    }
+
     override func host() -> HostService? { state() == .online ? hostService : nil }
     var mockHost: MockHostService { hostService }
     override func deviceId() -> String { "dev-self" }

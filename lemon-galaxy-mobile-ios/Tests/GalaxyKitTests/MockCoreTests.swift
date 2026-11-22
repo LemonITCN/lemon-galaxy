@@ -161,6 +161,40 @@ final class MockCoreTests: XCTestCase {
         XCTAssertTrue(hub.items.isEmpty)
     }
 
+    /// 聊天式：不选目标直接发，带引用；模型先查设备，再请用户同意连接（use_target 只有允许 / 拒绝）
+    func testChatWithoutTargetsAsksToConnect() async throws {
+        let a = makeAccount()
+        _ = try await a.login(server: server, username: "alice", password: "x", totp: nil)
+        let hub = AgentHub(client: { a.client }, hosts: { a.hosts })
+        await hub.loadModels()
+        let ms = try XCTUnwrap(hub.models?.items)
+        let c = try await hub.create(ConversationConfig(providerId: ms[0].providerId, modelId: ms[0].id, targets: [],
+                                                         mode: .confirmDangerous, planFirst: false, trustMinutes: nil, title: nil))
+        hub.refreshList()
+        XCTAssertTrue(hub.items.isEmpty, "还没发消息的新对话不进列表")
+        c.send("", refs: [.activity(label: "最近连接记录")])
+        XCTAssertEqual(c.state.title, "最近连接记录")
+        try await waitFor("连接确认卡片", timeout: 15) {
+            c.state.items.contains { if case .tool(let t) = $0 { return t.phase == .awaiting && t.call.tool == "use_target" }; return false }
+        }
+        let list = c.state.items.compactMap { item -> ToolEntry? in if case .tool(let t) = item, t.call.tool == "list_devices" { return t }; return nil }.first
+        XCTAssertEqual(list?.call.targetName, "", "账号查询没有目标设备")
+        XCTAssertEqual(list?.phase, .done)
+        let use = c.state.items.compactMap { item -> ToolEntry? in if case .tool(let t) = item, t.phase == .awaiting { return t }; return nil }.first!
+        c.decide(use.call.callId, .deny(reason: nil))
+        try await waitFor("对话结束", timeout: 10) { !c.state.running }
+        // 中途换模型
+        try c.setModel(ms[1])
+        XCTAssertEqual(c.conversation.model().modelId, ms[1].id)
+        XCTAssertEqual(c.state.modelName, ms[1].name)
+        // 历史里保留引用
+        guard case .user(_, let refs)? = c.conversation.messages().first else { return XCTFail() }
+        XCTAssertEqual(refs.first?.kind, .activity)
+        let activity = try await hub.activity(limit: 2)
+        XCTAssertEqual(activity.count, 2)
+        hub.delete(c.id)
+    }
+
     func testSshPromptsGoThroughPresenter() async throws {
         let a = makeAccount()
         _ = try await a.login(server: server, username: "alice", password: "x", totp: nil)

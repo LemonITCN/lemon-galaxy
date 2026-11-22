@@ -42,7 +42,7 @@ internal static class Shell
         var middle = new Region(() =>
         {
             if (!ListVisible()) return null;
-            var col = new Grid { Width = 284, Background = Th.List };
+            var col = new Grid { Width = app.Section == NavSection.Ai ? AiViews.ListWidth : 284, Background = Th.List };
             col.Children.Add(MiddleFor(app));
             // 用 DockPanel 让中间列撑满整个高度（Flex 横排会把内容短的列垂直居中）
             var dock = new DockPanel();

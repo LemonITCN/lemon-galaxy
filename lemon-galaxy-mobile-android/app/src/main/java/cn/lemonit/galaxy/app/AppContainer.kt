@@ -71,18 +71,7 @@ class AppContainer(
     val updates = UpdateController(client, scope, appContext, currentVersion = {
         appContext?.let { c -> runCatching { c.packageManager.getPackageInfo(c.packageName, 0).versionName }.getOrNull() } ?: "0.0.0"
     }, toast = ::toast)
-    val agents = AgentController(
-        client, scope,
-        configs = appContext?.let { cn.lemonit.galaxy.data.PrefsConversationConfigStore.create(it) } ?: MemoryConversationConfigStore(),
-        resolveTargets = { names ->
-            val d = hosts.data.value
-            names.mapNotNull { n ->
-                d.devices.firstOrNull { d.deviceName(it.id) == n || it.hostname == n }
-                    ?.let { cn.lemonit.galaxy.core.bridge.AgentTarget(cn.lemonit.galaxy.core.bridge.AgentTargetKind.DEVICE, it.id) }
-            }
-        },
-        defaultMode = { settings.prefs.value.defaultAiMode },
-    )
+    val agents = AgentController(client, scope, defaultMode = { settings.prefs.value.defaultAiMode })
 
     init {
         cn.lemonit.galaxy.core.platform.LanDiscovery.onDiscoveryChanged = { active -> runCatching { client.setLanDiscovery(active) } }

@@ -110,8 +110,6 @@ internal sealed class Field : Border
     public event Action<string>? Changed;
     public event Action? Submitted;
     public event Action? Escaped;
-    /// <summary>多行时 Ctrl+Enter 触发 Submitted（AI 对话框）</summary>
-    public bool CtrlEnterSubmits;
 
     public Field(string placeholderText = "", string text = "", bool password = false, bool mono = false, bool multiline = false, double fontSize = 13)
     {
@@ -157,7 +155,7 @@ internal sealed class Field : Border
         if (input is PasswordBox pb) { pb.CaretBrush = Th.Text; pb.SelectionBrush = Th.Accent; }
         input.PreviewKeyDown += (_, e) =>
         {
-            if (e.Key == Key.Enter && (!multiline || CtrlEnterSubmits && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)))
+            if (e.Key == Key.Enter && !multiline)
             {
                 if (Submitted != null) { Submitted(); e.Handled = true; }
             }

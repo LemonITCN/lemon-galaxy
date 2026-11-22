@@ -50,12 +50,17 @@ import cn.lemonit.galaxy.data.AppLanguage
 import cn.lemonit.galaxy.data.AppSettings
 import cn.lemonit.galaxy.data.Prefs
 import cn.lemonit.galaxy.data.VideoQuality
-import cn.lemonit.galaxy.ui.ai.ConversationActions
 import cn.lemonit.galaxy.ui.ai.ConversationListScreen
-import cn.lemonit.galaxy.ui.ai.ConversationScreen
-import cn.lemonit.galaxy.ui.ai.NewConversationDraft
-import cn.lemonit.galaxy.ui.ai.NewConversationScreen
-import cn.lemonit.galaxy.ui.ai.key
+import cn.lemonit.galaxy.ui.ai.ChatActions
+import cn.lemonit.galaxy.ui.ai.ChatScreen
+import cn.lemonit.galaxy.ui.ai.ChatSettings
+import cn.lemonit.galaxy.ui.ai.ComposerSheet
+import cn.lemonit.galaxy.ui.ai.ComposerState
+import cn.lemonit.galaxy.ui.ai.RefSources
+import cn.lemonit.galaxy.app.AiAvailability
+import cn.lemonit.galaxy.app.MentionCandidate
+import cn.lemonit.galaxy.app.Refs
+import cn.lemonit.galaxy.app.mentionCandidates
 import cn.lemonit.galaxy.ui.app.MainRoute
 import cn.lemonit.galaxy.ui.components.Clock
 import cn.lemonit.galaxy.ui.files.FileBrowserActions
@@ -591,21 +596,36 @@ class ScreenshotTest {
 
     // ---------------- AI ----------------
 
-    private val noConversationActions = object : ConversationActions {
+    private val noChatActions = object : ChatActions {
         override fun onBack() = Unit
-        override fun onSend(text: String) = Unit
+        override fun onNewChat() = Unit
+        override fun onDelete() = Unit
+        override fun onRetry() = Unit
+        override fun onSend() = Unit
         override fun onStop() = Unit
+        override fun onModel(model: cn.lemonit.galaxy.core.bridge.AiModel) = Unit
+        override fun onMode(mode: AiMode, trustMinutes: UInt?) = Unit
+        override fun onPlanFirst(on: Boolean) = Unit
         override fun onDecide(callId: String, decision: ApprovalDecision) = Unit
         override fun onAnswer(questionId: String, answer: String) = Unit
         override fun onSecret(requestId: String, secret: CharArray) = Unit
-        override fun onMode(mode: AiMode, trustMinutes: UInt?) = Unit
-        override fun onDelete() = Unit
     }
+
+    private val chatSettings get() = ChatSettings(Fixtures.models.items, Fixtures.models.items[0], AiMode.CONFIRM_DANGEROUS, AiMode.FULL_TRUST, false)
+
+    private fun chatSources() = RefSources(
+        targets = mentionCandidates(Fixtures.hosts),
+        snippets = Fixtures.hosts.snippets.map { e -> (e.data as VaultData.Snippet).let { MentionCandidate(Refs.snippet(e.id, it.label), null, true, it.command) } },
+        placeName = { Refs.placeName(Fixtures.hosts, it) },
+    )
 
     private fun conversation(dark: Boolean, later: Boolean) {
         val ui = if (later) Fixtures.conversationLater(zh) else Fixtures.conversation(zh, Fixtures.preview(context))
         shot(if (later) "ai_conversation_later" else "ai_conversation", dark) {
-            ConversationScreen(ui, noConversationActions)
+            ChatScreen(
+                ui.id, ui.title, AiAvailability.READY, null, chatSettings, ui.items, ui.running,
+                remember { ComposerState() }, chatSources(), noChatActions,
+            )
         }
     }
 
@@ -621,7 +641,7 @@ class ScreenshotTest {
     fun aiConversationLaterEnDark() = conversation(true, true)
 
     private fun aiList(dark: Boolean) = shot("ai_list", dark) {
-        ConversationListScreen(Fixtures.summaries(zh), enabled = true, onOpen = {}, onNew = {}, onDelete = {})
+        ConversationListScreen(Fixtures.summaries(zh), onOpen = {}, onNew = {}, onDelete = {})
     }
 
     @Test fun aiListZhDark() = aiList(true)
@@ -629,23 +649,42 @@ class ScreenshotTest {
     @Test @Config(qualifiers = PHONE_EN)
     fun aiListEnLight() = aiList(false)
 
-    private fun aiNew(dark: Boolean) = shot("ai_new", dark) {
-        val targets = HostTree.items(Fixtures.hosts).filter { (it is HostItem.Device && (it.device.online || it.device.lanSeen)) || it is HostItem.Ssh }
-        val draft = NewConversationDraft(
-            modelKey = Fixtures.models.items[1].key(),
-            targets = setOf("device:${MockData.DEV_WEB_01}", "ssh:${MockData.SSH_GITLAB}"),
-            mode = AiMode.FULL_TRUST,
-            trustMinutes = 60u,
-            planFirst = true,
-        )
-        NewConversationScreen(Fixtures.models, null, targets, draft, onDraft = {}, onStart = {}, onBack = {})
+    /** 新对话：问候语居中、输入框在下方；带引用标签与 @ 候选。 */
+    private fun aiNew(dark: Boolean, name: String, availability: AiAvailability = AiAvailability.READY, mention: Boolean = false) = shot(name, dark) {
+        val composer = remember {
+            ComposerState(
+                text = if (mention) (if (zh) "看看 @we" else "Check @we") else "",
+                refs = if (mention) listOf(Refs.device(MockData.DEV_BUILD_MAC, "Build Mac"), Refs.activity(context.getString(cn.lemonit.galaxy.R.string.ai_ref_activity))) else emptyList(),
+            )
+        }
+        ChatScreen(null, "", availability, null, chatSettings, emptyList(), false, composer, chatSources(), noChatActions)
     }
 
-    @Test @Config(qualifiers = PHONE_LONG_ZH)
-    fun aiNewZhLight() = aiNew(false)
+    @Test fun aiNewZhLight() = aiNew(false, "ai_new")
 
     @Test @Config(qualifiers = PHONE_EN)
-    fun aiNewEnDark() = aiNew(true)
+    fun aiNewEnDark() = aiNew(true, "ai_new")
+
+    @Test fun aiNewMentionZhLight() = aiNew(false, "ai_new_mention", mention = true)
+
+    @Test fun aiNoModelsZhLight() = aiNew(false, "ai_no_models", AiAvailability.NO_MODELS)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun aiDisabledEnLight() = aiNew(false, "ai_disabled", AiAvailability.DISABLED)
+
+    /** 输入框的底部弹层（截整个屏幕，弹层在单独窗口里）。 */
+    private fun aiSheet(dark: Boolean, name: String, sheet: ComposerSheet) = shotScreen(name, dark) {
+        ChatScreen(null, "", AiAvailability.READY, null, chatSettings, emptyList(), false, remember { ComposerState() }, chatSources(), noChatActions, initialSheet = sheet)
+    }
+
+    @Test fun aiSheetPlusZhLight() = aiSheet(false, "ai_sheet_plus", ComposerSheet.PLUS)
+
+    @Test fun aiSheetModelZhDark() = aiSheet(true, "ai_sheet_model", ComposerSheet.MODEL)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun aiSheetModeEnLight() = aiSheet(false, "ai_sheet_mode", ComposerSheet.MODE)
+
+    @Test fun aiSheetTargetsZhLight() = aiSheet(false, "ai_sheet_targets", ComposerSheet.TARGETS)
 
     // ---------------- 设置 ----------------
 
@@ -737,12 +776,9 @@ class ScreenshotTest {
         val c = appContainer(false)
         val m = MockData.models().first()
         val conv = runBlocking {
-            c.agents.create(
-                ConversationConfig(m.providerId, m.id, listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_WEB_01)), AiMode.CONFIRM_DANGEROUS, false, null, null),
-                m.name, m.vision, listOf("web-01 (nginx)"),
-            )
+            c.agents.create(ConversationConfig(m.providerId, m.id, emptyList(), AiMode.CONFIRM_DANGEROUS, false, null, null))
         }
-        conv.send("web-01 is almost out of disk, please clean up")
+        conv.send("It is almost out of disk, please clean up", listOf(Refs.device(MockData.DEV_WEB_01, "web-01 (nginx)")))
         pump(15_000) { conv.ui.value.items.any { it is ChatItem.Tool && it.phase == cn.lemonit.galaxy.app.ToolPhase.AWAITING } }
         c.agents.refreshList()
         val nav = Navigator(Tab.AI).apply { push(Route.Conversation(conv.ui.value.id)) }

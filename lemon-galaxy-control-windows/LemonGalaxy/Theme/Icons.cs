@@ -42,6 +42,7 @@ internal static class Icons
         ["pencil"] = "M17,3 a2.83,2.83 0 0 1 4,4 L7.5,20.5 L2,22 L3.5,16.5 Z M15,5 L19,9",
         ["trash"] = "M3,6 h18 M8,6 V4 h8 v2 M19,6 l-1,14 a2,2 0 0 1 -2,2 h-8 a2,2 0 0 1 -2,-2 L5,6 M10,11 v6 M14,11 v6",
         ["arrowUp"] = "M12,19 V5 M5,12 L12,5 L19,12",
+        ["arrowDown"] = "M12,5 v14 M5,12 L12,19 L19,12",
         ["arrowLeft"] = "M19,12 H5 M12,19 L5,12 L12,5",
         ["arrowRight"] = "M5,12 h14 M12,5 l7,7 l-7,7",
         ["upCircle"] = Circle9 + "M12,16 V8 M8,12 L12,8 L16,12",

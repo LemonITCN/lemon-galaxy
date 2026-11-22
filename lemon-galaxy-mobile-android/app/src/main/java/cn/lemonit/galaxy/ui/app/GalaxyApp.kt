@@ -192,6 +192,9 @@ fun MainRoute(container: AppContainer, navigator: Navigator = remember { Navigat
                 Box(Modifier.weight(1f).fillMaxHeight()) {
                     if (top != null) {
                         RouteContent(top, container, nav, showBack = nav.stack.size > 1 || top is Route.EditEntry || top is Route.FileEditor || top is Route.Licenses, openUrl = openUrl)
+                    } else if (nav.tab == Tab.AI) {
+                        // AI 页右侧没有打开的对话时就是一个新对话
+                        ChatRoute(null, null, container, nav, showBack = false)
                     } else {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Text(stringResource(R.string.select_item), color = MaterialTheme.colorScheme.onSurfaceVariant)

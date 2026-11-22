@@ -51,7 +51,10 @@ internal interface ICoreClient
     void DownloadUpdate(UpdateInfo info, string dest, TransferListener listener);
 
     Task<AiModels> AiModels();
+    /// <summary>新建对话：targets 可以为空（聊天式），引用过的设备用到时才连接</summary>
     Task<ICoreConversation> NewConversation(ConversationConfig config, AgentListener listener);
+    /// <summary>最近的登录与连接记录（新的在前）</summary>
+    Task<ActivityItem[]> AccountActivity(uint limit);
     ConversationSummary[] ListConversations();
     Task<ICoreConversation> OpenConversation(string id, ConversationConfig? config, AgentListener listener);
     void DeleteConversation(string id);
@@ -184,6 +187,11 @@ internal interface ICoreConversation
     string Id();
     string Title();
     void Send(string text);
+    /// <summary>带引用发送：设备与主机本对话内可直接使用；文件、目录、片段、端口映射、连接记录展开后随消息给模型</summary>
+    void SendWithRefs(string text, ContextRef[] refs);
+    /// <summary>中途换模型（上下文保留）；模型列表还没加载或未开通该模型时抛错</summary>
+    void SetModel(ulong providerId, string modelId);
+    ConversationModel Model();
     void Decide(string callId, ApprovalDecision decision);
     void Answer(string questionId, string answer);
     void ProvideSecret(string requestId, string secret);

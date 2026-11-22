@@ -38,8 +38,7 @@ internal abstract class TabModel : Observable
     {
         TabKind.Terminal => "terminal",
         TabKind.Sftp => "folder",
-        TabKind.Remote => "display",
-        _ => "sparkles",
+        _ => "display",
     };
 
     public FrameworkElement View => view ??= CreateView();

@@ -278,15 +278,19 @@ fun HostsTab(container: AppContainer, nav: Navigator) {
 @Composable
 fun AiTab(container: AppContainer, nav: Navigator) {
     val items by container.agents.items.collectAsState()
-    val models by container.agents.models.collectAsState()
     val selected = (nav.top as? Route.Conversation)?.id
+    val wide = isWideLayout()
+    LaunchedEffect(Unit) {
+        container.agents.loadModels()
+        container.agents.refreshList()
+    }
     ConversationListScreen(
         items = items,
-        enabled = models?.enabled != false && container.account.user.value?.aiEnabled != false,
         onOpen = { id ->
-            if (nav.top is Route.Conversation) nav.replace(Route.Conversation(id)) else nav.push(Route.Conversation(id))
+            if (nav.top is Route.Conversation || nav.top is Route.NewConversation) nav.replace(Route.Conversation(id)) else nav.push(Route.Conversation(id))
         },
-        onNew = { nav.push(Route.NewConversation(null)) },
+        // 平板双栏：右侧没有打开的对话时就是新对话
+        onNew = { if (wide) nav.selectTab(Tab.AI) else nav.push(Route.NewConversation(null)) },
         onDelete = { id ->
             container.agents.delete(id)
             if (selected == id) nav.pop()

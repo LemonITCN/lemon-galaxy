@@ -65,7 +65,10 @@ internal sealed class AppSettings : Observable
     // AI
     public string AiDefaultMode { get => S("aiDefaultMode", "confirmDangerous"); set => Set("aiDefaultMode", value); }
     public bool AiPlanFirst { get => B("aiPlanFirst", false); set => Set("aiPlanFirst", value); }
+    /// <summary>上次选的模型："provider_id:model_id"</summary>
     public string AiLastModel { get => S("aiLastModel", ""); set => Set("aiLastModel", value); }
+    /// <summary>完全信任的时限（分钟），0 表示「本对话」（不限时）</summary>
+    public int AiTrustMinutes { get => I("aiTrustMinutes", 0); set => Set("aiTrustMinutes", value); }
 
     // 登录与窗口
     public string LastServer { get => S("lastServer", ""); set => Set("lastServer", value); }

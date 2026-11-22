@@ -439,6 +439,7 @@ final class AppModel: ObservableObject {
     }
 
     func closeAllTabs() {
+        ai.closeAll()
         for t in tabs { t.close() }
         tabs.removeAll()
         activeTabId = nil
@@ -496,10 +497,11 @@ final class AppModel: ObservableObject {
         tab.start()
     }
 
+    /// 从主机页的「AI」入口进来：新对话，输入框里先带上这台设备的引用
     func openAI(targets: [AgentTarget]) {
-        ai.draftTargets = targets
         section = .ai
         activeTabId = nil
+        ai.newChat(refs: targets.map { ai.ref(for: $0) })
     }
 
     /// RDP 主机：内核准备好地址（设了经由设备时在本机开端口转发），再交给系统里的远程桌面应用（微软 Windows App）。

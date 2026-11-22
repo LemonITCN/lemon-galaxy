@@ -165,4 +165,12 @@ object MockData {
     )
 
     val maxAiMode = AiMode.FULL_TRUST
+
+    /** 账号最近的登录与连接记录（新的在前）。 */
+    fun activity(): List<cn.lemonit.galaxy.core.bridge.ActivityItem> = listOf(
+        cn.lemonit.galaxy.core.bridge.ActivityItem(NOW - 5 * MIN, "connection.start", "alice", "device", DEV_WEB_01, "web-01", "203.0.113.24", ""),
+        cn.lemonit.galaxy.core.bridge.ActivityItem(NOW - 6 * MIN, "user.login", "alice", "user", "", "", "203.0.113.24", "Pixel 9"),
+        cn.lemonit.galaxy.core.bridge.ActivityItem(NOW - 11 * HOUR, "connection.end", "alice", "device", DEV_BUILD_MAC, "build-mac", "198.51.100.7", ""),
+        cn.lemonit.galaxy.core.bridge.ActivityItem(NOW - 12 * HOUR, "connection.start", "alice", "device", DEV_BUILD_MAC, "build-mac", "198.51.100.7", ""),
+    )
 }

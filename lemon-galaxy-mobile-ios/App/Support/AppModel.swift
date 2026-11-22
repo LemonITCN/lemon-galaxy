@@ -32,8 +32,8 @@ final class AppModel: ObservableObject {
     @Published var toast: Toast?
     /// SSH 认证要用户回答的问题（排队，一次弹一个）
     @Published private(set) var secretQueue: [SecretRequest] = []
-    /// 新建 AI 对话（预选的目标）
-    @Published var newConversationTargets: [AgentTarget]?
+    /// 新建 AI 对话（预先放进输入框的引用，如从主机页点「AI」）
+    @Published var newChatRefs: [ContextRef]?
     /// AI 页要打开的对话
     @Published var openConversationId: String?
     /// 文件页要打开的目标
@@ -227,7 +227,8 @@ final class AppModel: ObservableObject {
         sessionsShown = false
         // 全屏层收起的动画结束后再弹新建对话，否则弹不出来
         DispatchQueue.main.asyncAfter(deadline: .now() + (wasCovered ? 0.6 : 0.05)) { [weak self] in
-            self?.newConversationTargets = targets
+            guard let self else { return }
+            self.newChatRefs = targets.map { ContextRef.agentTarget($0, label: self.account.hosts.targetName($0)) }
         }
     }
 

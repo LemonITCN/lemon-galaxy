@@ -1,11 +1,15 @@
 import Foundation
 
 /// 模拟 AI 智能体：按脚本流式吐文字、提出工具调用、按权限档位决定是否要确认、等用户回应确认卡片 / 提问 / 密码。
+/// 聊天式：消息里引用的设备直接用；没引用设备时先 list_devices 再用 use_target 请用户同意连接。
 /// 事件全部走 AgentListener.on_event，和真内核一致。
 final class MockAgentConversation: AgentConversation, @unchecked Sendable {
     required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     private let client: MockGalaxyClient
-    private let config: ConversationConfig
+    private var config: ConversationConfig
+    /// 本对话正在用的设备（引用过或用户同意连接过）
+    private var target: AgentTarget?
+    private var authorized: Set<String> = []
     var listener: AgentListener?
     private let convId: String
     private let lock = NSLock()
@@ -32,6 +36,8 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
         self.trustUntil = config.trustMinutes.map { Date().addingTimeInterval(TimeInterval($0) * 60) }
         self.titleText = config.title ?? ""
         self.convId = "conv-" + UUID().uuidString.prefix(8).lowercased()
+        self.target = config.targets.first
+        self.authorized = Set(config.targets.map(\.id))
         super.init(noHandle: NoHandle())
     }
 
@@ -45,7 +51,7 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
     func summary() -> ConversationSummary {
         lock.lock(); defer { lock.unlock() }
         return ConversationSummary(id: convId, title: titleText.isEmpty ? (zh ? "新对话" : "New conversation") : titleText,
-                                   modelId: config.modelId, targetNames: config.targets.map { client.targetName($0) }, updatedAt: updatedAt, config: config)
+                                   modelId: config.modelId, targetNames: target.map { [client.targetName($0)] } ?? [], updatedAt: updatedAt, config: config)
     }
 
     private func emit(_ e: AgentEvent) {
@@ -59,13 +65,27 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
 
     private func pause(_ ms: Int) async { await client.delay(ms) }
 
-    override func send(text: String) {
-        lock.locked { if titleText.isEmpty { titleText = String(text.prefix(28)) } }
-        record(.user(text: text))
+    override func send(text: String) { sendWithRefs(text: text, refs: []) }
+
+    override func sendWithRefs(text: String, refs: [ContextRef]) {
+        lock.locked { if titleText.isEmpty { titleText = String((text.isEmpty ? refs.map(\.label).joined(separator: ", ") : text).prefix(40)) } }
+        record(.user(text: text, refs: refs))
         task?.cancel()
         task = Task { [weak self] in
             guard let self else { return }
-            await self.runScript(userText: text)
+            await self.runScript(userText: text, refs: refs)
+        }
+    }
+
+    override func model() -> ConversationModel {
+        lock.locked { ConversationModel(providerId: config.providerId, modelId: config.modelId) }
+    }
+
+    override func setModel(providerId: UInt64, modelId: String) throws {
+        guard !modelId.isEmpty else { throw GalaxyError.NotFound(detail: zh ? "模型不存在" : "Model not found") }
+        lock.locked {
+            config.providerId = providerId
+            config.modelId = modelId
         }
     }
 
@@ -82,7 +102,7 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
     override func provideSecret(requestId: String, secret: String) {
         let c = lock.locked { secrets.removeValue(forKey: requestId) }
         // 密码只交给被控端，不进模型上下文、不进历史
-        c?.resume(returning: secret)
+        c?.resume(returning: secret.isEmpty ? nil : secret)
     }
 
     override func setMode(mode: AiMode, trustMinutes: UInt32?) {
@@ -110,9 +130,9 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
 
     // MARK: 脚本
 
-    private var target: AgentTarget { config.targets.first ?? AgentTarget(kind: .device, id: "dev-build") }
-    private var targetName: String { client.targetName(target) }
-    private var isGui: Bool { [.windows, .macos].contains(client.targetPlatform(target)) }
+    private var current: AgentTarget { target ?? AgentTarget(kind: .device, id: "dev-build") }
+    private var targetName: String { client.targetName(current) }
+    private var isGui: Bool { [.windows, .macos].contains(client.targetPlatform(current)) }
 
     private func say(_ text: String) async {
         let id = "a-" + UUID().uuidString.prefix(6)
@@ -152,11 +172,11 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
 
     /// 返回 nil 表示被拒绝
     private func tool(_ tool: String, summary: String, detail: String = "", risk: RiskLevel, reasons: [String] = [], why: String,
-                      output: String, resultSummary: String, image: ImageData? = nil, resultImage: ImageData? = nil) async -> String? {
+                      output: String, resultSummary: String, image: ImageData? = nil, resultImage: ImageData? = nil, accountLevel: Bool = false) async -> String? {
         step += 1
         emit(.status(running: true, step: step))
         let callId = "call-" + UUID().uuidString.prefix(6)
-        let call = ToolCallView(callId: callId, tool: tool, targetId: target.id, targetName: targetName, summary: summary,
+        let call = ToolCallView(callId: callId, tool: tool, targetId: accountLevel ? "" : current.id, targetName: accountLevel ? "" : targetName, summary: summary,
                                 detail: detail.isEmpty ? summary : detail, risk: risk, riskReasons: reasons, modelReason: why, image: image)
         let approval = needsApproval(risk, tool: tool)
         emit(.toolProposed(call: call, needsApproval: approval == true))
@@ -211,16 +231,101 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
 
     private func secret(_ prompt: String) async -> String? {
         let rid = "s-" + UUID().uuidString.prefix(6)
-        emit(.secretRequested(requestId: rid, prompt: prompt, targetId: target.id))
+        emit(.secretRequested(requestId: rid, prompt: prompt, targetId: current.id))
         return await withCheckedContinuation { c in lock.locked { secrets[rid] = c } }
     }
 
-    private func runScript(userText: String) async {
+    /// 没引用过的设备：先请用户同意连接（完全信任档除外），然后连接
+    private func useTarget(_ t: AgentTarget, why: String) async -> Bool {
+        step += 1
+        let callId = "call-" + UUID().uuidString.prefix(6) + "-use"
+        let name = client.targetName(t)
+        let (m, known) = lock.locked { (mode, authorized.contains(t.id)) }
+        let needs = !known && m != .fullTrust
+        let d = client.device(t.id)
+        let detail = d.map { "\($0.platform) · \($0.osVersion)" } ?? "SSH"
+        let call = ToolCallView(callId: callId, tool: "use_target", targetId: t.id, targetName: name, summary: (zh ? "连接 " : "Connect to ") + name,
+                                detail: detail, risk: .read, riskReasons: needs ? [zh ? "对话里没有引用这台设备" : "This device was not referenced in the conversation"] : [],
+                                modelReason: why, image: nil)
+        emit(.toolProposed(call: call, needsApproval: needs))
+        if needs {
+            let decision = await withCheckedContinuation { (c: CheckedContinuation<ApprovalDecision, Never>) in
+                lock.locked { approvals[callId] = c }
+            }
+            if case .deny(let reason) = decision {
+                let r = ToolResultView(ok: false, summary: zh ? "用户拒绝" : "Denied by user", output: reason ?? "", image: nil, denied: true)
+                emit(.toolFinished(callId: callId, result: r))
+                record(.tool(call: call, result: r))
+                return false
+            }
+        }
+        if Task.isCancelled { return false }
+        emit(.toolStarted(callId: callId))
+        await pause(300)
+        let r = ToolResultView(ok: true, summary: zh ? "已连接" : "Connected", output: "", image: nil, denied: false)
+        emit(.toolFinished(callId: callId, result: r))
+        record(.tool(call: call, result: r))
+        lock.locked {
+            authorized.insert(t.id)
+            target = t
+        }
+        return true
+    }
+
+    private func listDevices() async {
+        let list = client.devices().filter { !$0.isSelf && $0.kind != .mobile }
+        let out = list.map { "\($0.id)\t\(client.targetName(AgentTarget(kind: .device, id: $0.id)))\t\($0.platform)\t\($0.online ? "online" : "offline")" }
+            .joined(separator: "\n")
+        _ = await tool("list_devices", summary: zh ? "查看账号里的设备与主机" : "List devices and hosts", risk: .read, why: zh ? "找到要操作的机器" : "Find the machine to work on",
+                       output: out, resultSummary: zh ? "\(list.count) 台设备" : "\(list.count) devices", accountLevel: true)
+    }
+
+    private func recentActivity() async {
+        let out = zh ? "11-21 09:30\t登录\t北京 · 203.0.113.8\n11-21 09:12\t连接 build-server-01\t终端\n11-20 22:47\t连接 办公室电脑\t远程桌面"
+                     : "11-21 09:30\tSign-in\tBeijing · 203.0.113.8\n11-21 09:12\tConnect build-server-01\tTerminal\n11-20 22:47\tConnect Office PC\tRemote desktop"
+        _ = await tool("recent_activity", summary: zh ? "最近的登录与连接记录" : "Recent sign-ins and connections", risk: .read, why: zh ? "查看账号最近的活动" : "Check recent account activity",
+                       output: out, resultSummary: zh ? "3 条记录" : "3 entries", accountLevel: true)
+    }
+
+    private func runScript(userText: String, refs: [ContextRef]) async {
         step = 0
         emit(.status(running: true, step: 0))
         let thinkingId = "th-" + UUID().uuidString.prefix(6)
         emit(.thinking(messageId: thinkingId, text: zh ? "先确认目标机器的状态，再决定下一步。" : "Check the target first, then decide what to do."))
         await pause(300)
+        // 引用过的设备、主机，以及文件、目录所在的设备，本对话内可直接使用
+        var picked: AgentTarget?
+        for r in refs {
+            switch r.kind {
+            case .device: picked = picked ?? AgentTarget(kind: .device, id: r.id)
+            case .sshHost: picked = picked ?? AgentTarget(kind: .sshHost, id: r.id)
+            case .file, .folder:
+                let t = AgentTarget(kind: client.device(r.targetId) != nil ? .device : .sshHost, id: r.targetId)
+                picked = picked ?? t
+            default: break
+            }
+            if let p = picked { lock.locked { _ = authorized.insert(p.id) } }
+        }
+        if let picked { lock.locked { target = picked } }
+        if refs.contains(where: { $0.kind == .activity }) {
+            await recentActivity()
+            guard !Task.isCancelled else { return }
+            await say(zh ? "最近 24 小时只有你自己的登录与连接，没有陌生地址。" : "In the last 24 hours there were only your own sign-ins and connections, from known addresses.")
+            if picked == nil { emit(.status(running: false, step: step)); return }
+        }
+        if lock.locked({ target }) == nil {
+            await listDevices()
+            guard !Task.isCancelled else { return }
+            let t = AgentTarget(kind: .device, id: userText.contains(zh ? "记事本" : "Notepad") ? "dev-office" : "dev-build")
+            guard await useTarget(t, why: zh ? "这台机器最符合你的描述" : "This machine matches your description") else {
+                await say(zh ? "好的，不连接这台设备。你可以用 @ 指定要用的设备。" : "OK, I will not connect to it. Use @ to tell me which device to use.")
+                emit(.status(running: false, step: step))
+                return
+            }
+        } else if let t = lock.locked({ target }), !lock.locked({ authorized.contains(t.id) }) {
+            guard await useTarget(t, why: "") else { emit(.status(running: false, step: step)); return }
+        }
+        guard !Task.isCancelled else { return }
         if config.planFirst {
             await say(zh ? "计划：\n1. 查看磁盘与目录占用\n2. 找出可清理的旧文件\n3. 经你确认后清理\n4. 复查结果\n\n同意后我开始执行。"
                          : "Plan:\n1. Check disk and directory usage\n2. Find old files that can be removed\n3. Clean up after your approval\n4. Verify the result\n\nI will start once you agree.")
@@ -276,7 +381,7 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
     }
 
     private func guiScript() async {
-        guard let d = client.device(target.id) else { return }
+        guard let d = client.device(current.id) else { return }
         let display = MockData.displays(for: d).first!
         let renderer = MockDesktopRenderer(device: d, display: display, zh: zh, size: CGSize(width: 1280, height: Int(1280 * Double(display.height) / Double(display.width))))
         await say(zh ? "我先截个图看看 \(targetName) 现在的屏幕。" : "Let me take a screenshot of \(targetName) first.")

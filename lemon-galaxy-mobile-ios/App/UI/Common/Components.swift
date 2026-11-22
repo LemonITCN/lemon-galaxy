@@ -89,6 +89,11 @@ enum Icons {
         case "mouse": return "cursorarrow.click"
         case "keyboard": return "keyboard"
         case "wait": return "hourglass"
+        case "use_target": return "link"
+        case "list_devices": return "desktopcomputer"
+        case "list_snippets": return "chevron.left.forwardslash.chevron.right"
+        case "list_port_forwards": return "arrow.left.arrow.right"
+        case "recent_activity": return "clock.arrow.circlepath"
         default: return "wrench.and.screwdriver"
         }
     }

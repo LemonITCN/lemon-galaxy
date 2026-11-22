@@ -6,8 +6,12 @@ import cn.lemonit.galaxy.core.bridge.AgentListener
 import cn.lemonit.galaxy.core.bridge.AgentMessage
 import cn.lemonit.galaxy.core.bridge.AiMode
 import cn.lemonit.galaxy.core.bridge.ApprovalDecision
+import cn.lemonit.galaxy.core.bridge.ContextRef
+import cn.lemonit.galaxy.core.bridge.ContextRefKind
 import cn.lemonit.galaxy.core.bridge.ConversationConfig
+import cn.lemonit.galaxy.core.bridge.ConversationModel
 import cn.lemonit.galaxy.core.bridge.ConversationSummary
+import cn.lemonit.galaxy.core.bridge.GalaxyException
 import cn.lemonit.galaxy.core.bridge.ImageData
 import cn.lemonit.galaxy.core.bridge.Platform
 import cn.lemonit.galaxy.core.bridge.RiskLevel
@@ -22,22 +26,30 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /** 模拟对话的目标信息。 */
-internal data class MockTarget(val id: String, val name: String, val platform: Platform)
+internal data class MockTarget(val id: String, val name: String, val platform: Platform, val online: Boolean = true)
 
 /**
- * 脚本化的模拟智能体：按目标是命令行还是图形界面走两套剧本，
+ * 脚本化的模拟智能体（聊天式）：
+ * - 引用了设备 / 主机（或文件、目录所在的设备）时直接在那台上干活，按命令行还是图形界面走两套剧本；
+ * - 没有引用设备时先调账号查询 list_devices，再弹「AI 想连接 某设备」的确认（完全信任档除外）；
+ * - 只引用了片段、端口映射、连接记录时直接回答。
  * 覆盖流式文字、思考、只读工具自动执行、危险操作确认、ask_user、request_secret、用量与停止。
  */
 internal class MockConversation(
     private val id: String,
     var config: ConversationConfig,
-    private val modelName: String,
     private val targets: List<MockTarget>,
     @Volatile var listener: AgentListener,
     private val scope: CoroutineScope,
     private val zh: Boolean,
     private val screenshot: () -> ImageData?,
+    /** 目标 ID → 目标（引用里的设备、主机）。 */
+    private val resolve: (String) -> MockTarget? = { null },
+    /** 账号里的全部设备与主机（list_devices 用）。 */
+    private val catalog: () -> List<MockTarget> = { emptyList() },
 ) : AgentConversationInterface {
+    /** 本对话里用户引用过或同意连接过的目标。 */
+    private val usable = java.util.concurrent.CopyOnWriteArrayList(targets)
     private val history = mutableListOf<AgentMessage>()
     private val decisions = ConcurrentHashMap<String, CompletableDeferred<ApprovalDecision>>()
     private val answers = ConcurrentHashMap<String, CompletableDeferred<String>>()
@@ -59,8 +71,9 @@ internal class MockConversation(
         id = id,
         title = title.ifEmpty { tr("新对话", "New conversation") },
         modelId = config.modelId,
-        targetNames = targets.map { it.name },
+        targetNames = usable.map { it.name },
         updatedAt = updatedAt,
+        config = config,
     )
 
     fun seed(messages: List<AgentMessage>, title: String, at: Long) {
@@ -73,12 +86,33 @@ internal class MockConversation(
 
     override fun title(): String = title
 
-    override fun send(text: String) {
-        if (title.isEmpty()) title = text.take(40)
-        record(AgentMessage.User(text))
+    override fun send(text: String) = sendWithRefs(text, emptyList())
+
+    override fun sendWithRefs(text: String, refs: List<ContextRef>) {
+        if (title.isEmpty()) {
+            val t = text.split(Regex("\\s+")).filter { it.isNotEmpty() }.joinToString(" ")
+            title = if (t.isEmpty()) refs.firstOrNull()?.label.orEmpty() else t.take(40)
+        }
+        record(AgentMessage.User(text, refs))
+        refs.forEach { r ->
+            val tid = when (r.kind) {
+                ContextRefKind.DEVICE, ContextRefKind.SSH_HOST -> r.id
+                ContextRefKind.FILE, ContextRefKind.FOLDER -> r.targetId
+                else -> null
+            }
+            tid?.let(resolve)?.let { t -> if (usable.none { it.id == t.id }) usable.add(t) }
+        }
         job?.cancel()
-        job = scope.launch { runScript(text) }
+        job = scope.launch { runScript(text, refs) }
     }
+
+    override fun setModel(providerId: ULong, modelId: String) {
+        val m = MockData.models().firstOrNull { it.providerId == providerId && it.id == modelId }
+            ?: throw GalaxyException.Permission(tr("未开通该模型", "This model is not enabled for you"))
+        config = config.copy(providerId = m.providerId, modelId = m.id)
+    }
+
+    override fun model(): ConversationModel = ConversationModel(config.providerId, config.modelId)
 
     /** 与真内核一致：切到后台停止当前任务。 */
     override fun setForeground(foreground: Boolean) {
@@ -170,14 +204,21 @@ internal class MockConversation(
     ): ToolResultView? {
         pauseIfBackground()
         val callId = newId()
-        val call = ToolCallView(callId, tool, target.id, target.name, summary, detail, risk, reasons, modelReason, if (tool == "mouse") image else null)
+        // 与真内核一致：run_command 的 detail 就是完整命令
+        val call = ToolCallView(callId, tool, target.id, target.name, summary, if (tool == "run_command") summary else detail, risk, reasons, modelReason, if (tool == "mouse") image else null)
         val changes = risk != RiskLevel.READ
         val key = "$tool:${risk.name}"
-        val denyReadOnly = mode == AiMode.READ_ONLY && changes
-        val needsApproval = !denyReadOnly && risk != RiskLevel.FORBIDDEN && !similarAllowed.contains(key) && when (mode) {
-            AiMode.CONFIRM_ALL -> changes
-            AiMode.CONFIRM_DANGEROUS -> risk == RiskLevel.DANGEROUS || risk == RiskLevel.UNKNOWN
-            else -> false
+        val connect = tool == "use_target"
+        val denyReadOnly = mode == AiMode.READ_ONLY && changes && !connect
+        val needsApproval = if (connect) {
+            // 连接没引用过的设备：除完全信任外都要用户同意
+            mode != AiMode.FULL_TRUST
+        } else {
+            !denyReadOnly && risk != RiskLevel.FORBIDDEN && !similarAllowed.contains(key) && when (mode) {
+                AiMode.CONFIRM_ALL -> changes
+                AiMode.CONFIRM_DANGEROUS -> risk == RiskLevel.DANGEROUS || risk == RiskLevel.UNKNOWN
+                else -> false
+            }
         }
         // 先登记等待，再发事件：界面立刻回应也不会丢
         val pending = if (needsApproval) CompletableDeferred<ApprovalDecision>().also { decisions[callId] = it } else null
@@ -229,7 +270,11 @@ internal class MockConversation(
             emit(AgentEvent.ToolOutput(callId, l + "\n"))
             delay(90)
         }
-        val r = ToolResultView(true, tr("完成，退出码 0", "Done, exit code 0"), lines.joinToString("\n"), if (tool == "screenshot") image else null, false)
+        val r = ToolResultView(
+            true,
+            if (connect) tr("已连接", "Connected") else tr("完成，退出码 0", "Done, exit code 0"),
+            lines.joinToString("\n"), if (tool == "screenshot") image else null, false,
+        )
         emit(AgentEvent.ToolFinished(callId, r))
         record(AgentMessage.Tool(call, r))
         return r
@@ -248,10 +293,25 @@ internal class MockConversation(
         return a
     }
 
-    private suspend fun runScript(userText: String) {
+    private suspend fun runScript(userText: String, refs: List<ContextRef>) {
         running = true
         try {
-            val target = targets.firstOrNull() ?: MockTarget("", "?", Platform.LINUX)
+            emit(AgentEvent.Status(true, step))
+            val referenced = refs.mapNotNull { r ->
+                when (r.kind) {
+                    ContextRefKind.DEVICE, ContextRefKind.SSH_HOST -> r.id
+                    ContextRefKind.FILE, ContextRefKind.FOLDER -> r.targetId
+                    else -> null
+                }
+            }.firstNotNullOfOrNull { id -> usable.firstOrNull { it.id == id } }
+            if (referenced == null && refs.isNotEmpty()) {
+                // 只引用了片段、端口映射、连接记录：内容已随消息给模型，直接回答
+                nextStep()
+                say(refsAnswer(refs), thinking = tr("引用的内容已经附在消息里，直接据此回答。", "The referenced content is attached to the message; answer from it."))
+                usage(2400, 90)
+                return
+            }
+            val target = referenced ?: usable.lastOrNull() ?: pickTarget() ?: return
             if (config.planFirst) {
                 nextStep()
                 say(
@@ -273,6 +333,66 @@ internal class MockConversation(
             waiting = false
             emit(AgentEvent.Status(false, step))
         }
+    }
+
+    private fun refsAnswer(refs: List<ContextRef>): String {
+        val kinds = refs.map { it.kind }.toSet()
+        return when {
+            ContextRefKind.ACTIVITY in kinds -> tr(
+                "最近的记录里：\n\n| 时间 | 事件 | 对象 |\n|---|---|---|\n| 今天 09:12 | 登录 | 本机 |\n| 今天 09:13 | 连接 | web-01 (nginx) |\n| 昨天 22:40 | 连接 | Build Mac |\n\n没有看到陌生 IP 的登录。",
+                "From the recent records:\n\n| Time | Event | Target |\n|---|---|---|\n| Today 09:12 | Sign-in | This phone |\n| Today 09:13 | Connect | web-01 (nginx) |\n| Yesterday 22:40 | Connect | Build Mac |\n\nNo sign-ins from unfamiliar IP addresses.",
+            )
+            ContextRefKind.SNIPPET in kinds -> tr(
+                "这个片段的作用：\n\n```bash\ndf -h\n```\n\n列出各分区的总量、已用、可用和挂载点，只读，不会改动任何东西。",
+                "What this snippet does:\n\n```bash\ndf -h\n```\n\nIt lists size, used, available and mount point for each filesystem. It is read-only.",
+            )
+            else -> tr(
+                "这条端口映射把本机 `15432` 经 **web-01** 转发到 `10.0.3.21:5432`，适合连内网的 PostgreSQL。",
+                "This rule forwards local port `15432` through **web-01** to `10.0.3.21:5432`, handy for reaching the internal PostgreSQL.",
+            )
+        }
+    }
+
+    /** 没引用设备：先查账号里的设备，再请用户同意连接其中一台。返回 null 表示被拒绝。 */
+    private suspend fun pickTarget(): MockTarget? {
+        nextStep()
+        say(
+            tr("我先看看你的账号里有哪些设备。", "Let me see which devices are in your account."),
+            thinking = tr("用户没有指定设备，先列出账号里的设备与主机。", "No device was specified; list the account's devices and hosts first."),
+        )
+        usage(1800, 40)
+        val all = catalog()
+        accountTool(
+            "list_devices", tr("列出设备与 SSH 主机", "List devices and SSH hosts"),
+            all.joinToString("\n") { "${it.name}\t${it.platform.name.lowercase()}\t${if (it.online) "online" else "offline"}" },
+        )
+        val t = all.firstOrNull { it.online && it.platform == Platform.LINUX } ?: all.firstOrNull { it.online } ?: run {
+            say(tr("账号里没有在线的设备。", "There are no online devices in your account."))
+            return null
+        }
+        nextStep()
+        val ok = tool(
+            "use_target", t, tr("连接 ${t.name}", "Connect to ${t.name}"), "${t.platform.name.lowercase()}  ·  ${if (t.online) "online" else "offline"}", RiskLevel.READ,
+            listOf(tr("对话里没有引用这台设备", "This device was not referenced in the conversation")), tr("需要在 ${t.name} 上查看磁盘使用情况", "Need to check disk usage on ${t.name}"), emptyList(),
+        )
+        if (ok == null) {
+            say(tr("好的，不连接 ${t.name}。", "OK, I will not connect to ${t.name}."))
+            return null
+        }
+        usable.add(t)
+        return t
+    }
+
+    /** 账号级只读查询：不需要确认、没有目标设备。 */
+    private suspend fun accountTool(tool: String, summary: String, output: String) {
+        val callId = newId()
+        val call = ToolCallView(callId, tool, "", "", summary, "{}", RiskLevel.READ, emptyList(), "", null)
+        emit(AgentEvent.ToolProposed(call, false))
+        emit(AgentEvent.ToolStarted(callId))
+        delay(300)
+        val r = ToolResultView(true, tr("完成", "Done"), output, null, false)
+        emit(AgentEvent.ToolFinished(callId, r))
+        record(AgentMessage.Tool(call, r))
     }
 
     private suspend fun shellScript(t: MockTarget) {

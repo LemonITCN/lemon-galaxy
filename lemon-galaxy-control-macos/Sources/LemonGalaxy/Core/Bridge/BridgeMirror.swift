@@ -16,6 +16,44 @@ public func coreLogPath() -> String { "" }
 
 // MARK: - 记录与枚举
 
+public struct ActivityItem: Equatable, Hashable {
+    public var at: Int64
+    /**
+     * 如 user.login、connection.start、connection.end、device.register
+     */
+    public var action: String
+    public var actorName: String
+    public var targetType: String
+    public var targetId: String
+    public var targetName: String
+    public var ip: String
+    public var detail: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(at: Int64, 
+        /**
+         * 如 user.login、connection.start、connection.end、device.register
+         */action: String, actorName: String, targetType: String, targetId: String, targetName: String, ip: String, detail: String) {
+        self.at = at
+        self.action = action
+        self.actorName = actorName
+        self.targetType = targetType
+        self.targetId = targetId
+        self.targetName = targetName
+        self.ip = ip
+        self.detail = detail
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ActivityItem: Sendable {}
+#endif
+
 public struct AgentTarget: Equatable, Hashable {
     public var kind: AgentTargetKind
     public var id: String
@@ -152,6 +190,48 @@ public struct CaptureStarted: Equatable, Hashable {
 extension CaptureStarted: Sendable {}
 #endif
 
+public struct ContextRef: Equatable, Hashable {
+    public var kind: ContextRefKind
+    /**
+     * 文件、文件夹所在的设备 ID 或 SSH 主机条目 ID；其他种类留空
+     */
+    public var targetId: String
+    /**
+     * 设备 ID / SSH 主机条目 ID / 片段条目 ID / 端口映射条目 ID；文件与文件夹是路径；连接记录留空
+     */
+    public var id: String
+    /**
+     * 显示名（界面上的标签）
+     */
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: ContextRefKind, 
+        /**
+         * 文件、文件夹所在的设备 ID 或 SSH 主机条目 ID；其他种类留空
+         */targetId: String, 
+        /**
+         * 设备 ID / SSH 主机条目 ID / 片段条目 ID / 端口映射条目 ID；文件与文件夹是路径；连接记录留空
+         */id: String, 
+        /**
+         * 显示名（界面上的标签）
+         */label: String) {
+        self.kind = kind
+        self.targetId = targetId
+        self.id = id
+        self.label = label
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ContextRef: Sendable {}
+#endif
+
 public struct ConversationConfig: Equatable, Hashable {
     public var providerId: UInt64
     public var modelId: String
@@ -186,6 +266,26 @@ public struct ConversationConfig: Equatable, Hashable {
 
 #if compiler(>=6)
 extension ConversationConfig: Sendable {}
+#endif
+
+public struct ConversationModel: Equatable, Hashable {
+    public var providerId: UInt64
+    public var modelId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(providerId: UInt64, modelId: String) {
+        self.providerId = providerId
+        self.modelId = modelId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ConversationModel: Sendable {}
 #endif
 
 public struct ConversationSummary: Equatable, Hashable {
@@ -1298,7 +1398,7 @@ extension AgentEvent: Sendable {}
 
 public enum AgentMessage: Equatable, Hashable {
     
-    case user(text: String
+    case user(text: String, refs: [ContextRef]
     )
     case assistant(id: String, text: String, thinking: String
     )
@@ -1435,6 +1535,35 @@ public enum ConnMode: Equatable, Hashable {
 
 #if compiler(>=6)
 extension ConnMode: Sendable {}
+#endif
+
+public enum ContextRefKind: Equatable, Hashable {
+    
+    case device
+    case sshHost
+    /**
+     * 设备或 SSH 主机上的文件（内容随消息带给模型，最多 256 KB）
+     */
+    case file
+    /**
+     * 设备或 SSH 主机上的目录（列表随消息带给模型，模型可再读其中文件）
+     */
+    case folder
+    case snippet
+    case portForward
+    /**
+     * 最近的连接与登录记录
+     */
+    case activity
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ContextRefKind: Sendable {}
 #endif
 
 public enum DeviceKind: Equatable, Hashable {
@@ -1777,6 +1906,11 @@ public protocol AgentConversationProtocol: AnyObject, Sendable {
     func messages()  -> [AgentMessage]
     
     /**
+     * 当前使用的模型（provider_id, model_id）。
+     */
+    func model()  -> ConversationModel
+    
+    /**
      * 回应 request_secret：内容直接送到被控端，不进模型上下文。
      */
     func provideSecret(requestId: String, secret: String) 
@@ -1787,11 +1921,22 @@ public protocol AgentConversationProtocol: AnyObject, Sendable {
     func send(text: String) 
     
     /**
+     * 发送一条带引用的消息：引用的设备与主机可直接使用；文件内容、目录列表、片段、端口映射、连接记录展开后随消息给模型。
+     * 展开在后台进行（可能要先连上设备），失败的引用以说明文字代替，不影响发送。
+     */
+    func sendWithRefs(text: String, refs: [ContextRef]) 
+    
+    /**
      * 移动端切到后台时调用 false：正在进行的任务停止，回到前台后可继续发送。
      */
     func setForeground(foreground: Bool) 
     
     func setMode(mode: AiMode, trustMinutes: UInt32?) 
+    
+    /**
+     * 对话中途换模型（上下文保留）。
+     */
+    func setModel(providerId: UInt64, modelId: String) throws 
     
     func stop() 
     
@@ -1933,6 +2078,11 @@ public protocol FileClientProtocol: AnyObject, Sendable {
 }
 
 public protocol GalaxyClientProtocol: AnyObject, Sendable {
+    
+    /**
+     * 账号最近的活动（登录、连接等），新的在前。
+     */
+    func accountActivity(limit: UInt32) async throws  -> [ActivityItem]
     
     func aiModels() async throws  -> AiModels
     
@@ -2405,7 +2555,7 @@ public protocol VideoSink: AnyObject, Sendable {
     func onFrame(data: Data, ptsUs: UInt64, keyframe: Bool) 
     
     /**
-     * 光标位置，被控屏幕像素
+     * 光标位置（编码画面像素，光标热点）
      */
     func onCursor(x: Int32, y: Int32, visible: Bool) 
     
@@ -2466,10 +2616,13 @@ open class AgentConversation: AgentConversationProtocol, @unchecked Sendable {
     open func decide(callId: String, decision: ApprovalDecision) { bridgeUnimplemented() }
     open func id()  -> String { bridgeUnimplemented() }
     open func messages()  -> [AgentMessage] { bridgeUnimplemented() }
+    open func model()  -> ConversationModel { bridgeUnimplemented() }
     open func provideSecret(requestId: String, secret: String) { bridgeUnimplemented() }
     open func send(text: String) { bridgeUnimplemented() }
+    open func sendWithRefs(text: String, refs: [ContextRef]) { bridgeUnimplemented() }
     open func setForeground(foreground: Bool) { bridgeUnimplemented() }
     open func setMode(mode: AiMode, trustMinutes: UInt32?) { bridgeUnimplemented() }
+    open func setModel(providerId: UInt64, modelId: String) throws { bridgeUnimplemented() }
     open func stop() { bridgeUnimplemented() }
     open func title()  -> String { bridgeUnimplemented() }
 }
@@ -2545,6 +2698,7 @@ open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
     public struct NoHandle { public init() {} }
     public init(noHandle: NoHandle) {}
     required public init(unsafeFromHandle handle: UInt64) {}
+    open func accountActivity(limit: UInt32) async throws  -> [ActivityItem] { bridgeUnimplemented() }
     open func aiModels() async throws  -> AiModels { bridgeUnimplemented() }
     open func canWake(deviceId: String)  -> Bool { bridgeUnimplemented() }
     open func changePassword(oldPassword: String, newPassword: String, totp: String?) async throws { bridgeUnimplemented() }

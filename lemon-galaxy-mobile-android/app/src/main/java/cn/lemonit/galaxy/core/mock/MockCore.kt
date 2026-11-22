@@ -1,6 +1,9 @@
 package cn.lemonit.galaxy.core.mock
 
+import cn.lemonit.galaxy.core.bridge.ActivityItem
 import cn.lemonit.galaxy.core.bridge.AgentConversationInterface
+import cn.lemonit.galaxy.core.bridge.ContextRef
+import cn.lemonit.galaxy.core.bridge.ContextRefKind
 import cn.lemonit.galaxy.core.bridge.AgentListener
 import cn.lemonit.galaxy.core.bridge.AgentMessage
 import cn.lemonit.galaxy.core.bridge.AgentTargetKind
@@ -135,7 +138,7 @@ internal class MockClient(
             totpEnabled = true
         }
         this.server = ServerInfo(server, "LemonGalaxy", "0.1.0")
-        this.user = UserInfo(3u, name, displayName(name), aiEnabled = true, totpEnabled = totpEnabled)
+        this.user = UserInfo(3u, name, displayName(name), aiEnabled = !aiOffUser(name), totpEnabled = totpEnabled)
         if (name.startsWith("new")) {
             pendingFirstLogin = true
             setState(ClientState.LOGGED_OUT)
@@ -188,7 +191,7 @@ internal class MockClient(
         val lines = saved.split('\n')
         if (lines.size < 2) return false
         server = ServerInfo(lines[0], "LemonGalaxy", "0.1.0")
-        user = UserInfo(3u, lines[1], displayName(lines[1]), aiEnabled = true, totpEnabled = totpEnabled)
+        user = UserInfo(3u, lines[1], displayName(lines[1]), aiEnabled = !aiOffUser(lines[1]), totpEnabled = totpEnabled)
         setState(ClientState.ONLINE)
         return true
     }
@@ -341,28 +344,56 @@ internal class MockClient(
         }
     }
 
+    /**
+     * 模拟账号：用户名以 noai 开头 = 账号没开通 AI；以 nomodel 开头 = 开通了 AI 但没有可用模型
+     * （用来看 ai-chat-ui.md 第 5 节的提示）。
+     */
+    private fun aiOffUser(name: String) = name.trim().lowercase().startsWith("noai")
+
     override suspend fun aiModels(): AiModels {
         delay(300)
-        return AiModels(enabled = true, maxMode = MockData.maxAiMode, items = MockData.models())
+        val name = user?.username.orEmpty()
+        return when {
+            aiOffUser(name) -> AiModels(enabled = false, maxMode = AiMode.OFF, items = emptyList())
+            name.startsWith("nomodel") -> AiModels(enabled = true, maxMode = MockData.maxAiMode, items = emptyList())
+            else -> AiModels(enabled = true, maxMode = MockData.maxAiMode, items = MockData.models())
+        }
     }
 
-    private fun targetOf(t: AgentTarget): MockTarget = when (t.kind) {
-        AgentTargetKind.DEVICE -> {
-            val d = devices.firstOrNull { it.id == t.id }
-            val alias = vault.values.mapNotNull { it.data as? VaultData.DeviceMeta }.firstOrNull { it.deviceId == t.id }?.alias
-            MockTarget(t.id, alias ?: d?.hostname ?: t.id, d?.platform ?: Platform.LINUX)
-        }
-        AgentTargetKind.SSH_HOST -> MockTarget(t.id, (vault[t.id]?.data as? VaultData.SshHost)?.label ?: t.id, Platform.LINUX)
+    private fun deviceTarget(id: String): MockTarget? {
+        val d = devices.firstOrNull { it.id == id } ?: return null
+        val alias = vault.values.mapNotNull { it.data as? VaultData.DeviceMeta }.firstOrNull { it.deviceId == id }?.alias
+        return MockTarget(id, alias?.takeIf { it.isNotBlank() } ?: d.hostname, d.platform, d.online || d.lanSeen)
     }
+
+    private fun sshTarget(id: String): MockTarget? =
+        (vault[id]?.data as? VaultData.SshHost)?.let { MockTarget(id, it.label, Platform.LINUX, true) }
+
+    private fun resolveTarget(id: String): MockTarget? = deviceTarget(id) ?: sshTarget(id)
+
+    /** list_devices 的结果：设备（不含手机与本机）与 SSH 主机。 */
+    private fun catalog(): List<MockTarget> =
+        devices.filter { it.kind != cn.lemonit.galaxy.core.bridge.DeviceKind.MOBILE && !it.isSelf }.mapNotNull { deviceTarget(it.id) } +
+            vault.values.filter { it.data is VaultData.SshHost }.mapNotNull { sshTarget(it.id) }
+
+    private fun targetOf(t: AgentTarget): MockTarget = resolveTarget(t.id) ?: MockTarget(t.id, t.id, Platform.LINUX)
+
+    private fun conversation(id: String, config: ConversationConfig, targets: List<MockTarget>, listener: AgentListener) = MockConversation(
+        id, config, targets, listener, scope, core.zh, core::desktopPreview, ::resolveTarget, ::catalog,
+    )
 
     override suspend fun newConversation(config: ConversationConfig, listener: AgentListener): AgentConversationInterface {
-        val model = MockData.models().firstOrNull { it.id == config.modelId }?.name ?: config.modelId
-        val c = MockConversation(
-            MockConversation.newId(), config, model, config.targets.map(::targetOf), listener, scope, core.zh,
-            core::desktopPreview,
-        )
+        if (MockData.models().none { it.providerId == config.providerId && it.id == config.modelId }) {
+            throw GalaxyException.Permission(tr("未开通该模型", "This model is not enabled for you"))
+        }
+        val c = conversation(MockConversation.newId(), config, config.targets.map(::targetOf), listener)
         conversations[c.id()] = c
         return c
+    }
+
+    override suspend fun accountActivity(limit: UInt): List<ActivityItem> {
+        delay(200)
+        return MockData.activity().take(limit.toInt())
     }
 
     override suspend fun totpSetup(): TotpSetup {
@@ -390,11 +421,11 @@ internal class MockClient(
         return conversations.values.map { it.summary() }.sortedByDescending { it.updatedAt }
     }
 
-    override suspend fun openConversation(id: String, config: ConversationConfig, listener: AgentListener): AgentConversationInterface {
+    override suspend fun openConversation(id: String, config: ConversationConfig?, listener: AgentListener): AgentConversationInterface {
         seedConversations()
         val c = conversations[id] ?: throw GalaxyException.NotFound(tr("对话不存在", "Conversation not found"))
         c.listener = listener
-        c.config = config.copy(title = c.title)
+        if (config != null) c.config = config.copy(title = c.title)
         return c
     }
 
@@ -411,9 +442,9 @@ internal class MockClient(
             override fun onEvent(event: cn.lemonit.galaxy.core.bridge.AgentEvent) = Unit
         }
         val t0 = MockData.NOW - 3 * 3600_000L
-        val c1 = MockConversation(
-            "seed-nginx", ConversationConfig(1u, "glm-5.2", listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_WEB_01)), AiMode.CONFIRM_DANGEROUS, false, null, null),
-            "GLM-5.2", listOf(MockTarget(MockData.DEV_WEB_01, "web-01 (nginx)", Platform.LINUX)), noop, scope, core.zh, core::desktopPreview,
+        val c1 = conversation(
+            "seed-nginx", ConversationConfig(1u, "glm-5.2", emptyList(), AiMode.CONFIRM_DANGEROUS, false, null, null),
+            listOf(MockTarget(MockData.DEV_WEB_01, "web-01 (nginx)", Platform.LINUX)), noop,
         )
         val call = ToolCallView(
             "seed-call-1", "run_command", MockData.DEV_WEB_01, "web-01 (nginx)", "sudo systemctl reload nginx",
@@ -422,7 +453,10 @@ internal class MockClient(
         )
         c1.seed(
             listOf(
-                AgentMessage.User(tr("nginx 改了配置，帮我检查并重新加载", "I changed the nginx config, please check it and reload")),
+                AgentMessage.User(
+                    tr("nginx 改了配置，帮我检查并重新加载", "I changed the nginx config, please check it and reload"),
+                    listOf(ContextRef(ContextRefKind.DEVICE, "", MockData.DEV_WEB_01, "web-01 (nginx)")),
+                ),
                 AgentMessage.Assistant("a1", tr("先检查配置语法。", "Checking the configuration syntax first."), ""),
                 AgentMessage.Tool(
                     ToolCallView("seed-call-0", "run_command", MockData.DEV_WEB_01, "web-01 (nginx)", "sudo nginx -t", "{}", RiskLevel.DANGEROUS, listOf(tr("sudo 提权执行", "Runs with sudo")), tr("检查配置语法", "Validate syntax"), null),
@@ -435,13 +469,16 @@ internal class MockClient(
             t0 + 16000,
         )
         val t1 = MockData.NOW - 26 * 3600_000L
-        val c2 = MockConversation(
-            "seed-mac", ConversationConfig(1u, "kimi-k2.6", listOf(AgentTarget(AgentTargetKind.DEVICE, MockData.DEV_BUILD_MAC)), AiMode.CONFIRM_ALL, false, null, null),
-            "Kimi K2.6", listOf(MockTarget(MockData.DEV_BUILD_MAC, "Build Mac", Platform.MACOS)), noop, scope, core.zh, core::desktopPreview,
+        val c2 = conversation(
+            "seed-mac", ConversationConfig(1u, "kimi-k2.6", emptyList(), AiMode.CONFIRM_ALL, false, null, null),
+            listOf(MockTarget(MockData.DEV_BUILD_MAC, "Build Mac", Platform.MACOS)), noop,
         )
         c2.seed(
             listOf(
-                AgentMessage.User(tr("看看 Xcode 为什么卡住了", "Why is Xcode stuck?")),
+                AgentMessage.User(
+                    tr("看看 Xcode 为什么卡住了", "Why is Xcode stuck?"),
+                    listOf(ContextRef(ContextRefKind.DEVICE, "", MockData.DEV_BUILD_MAC, "Build Mac")),
+                ),
                 AgentMessage.Assistant("a3", tr("Xcode 正在索引，占用 CPU 较高，等它完成即可。", "Xcode is indexing and using a lot of CPU; it should finish shortly."), ""),
             ),
             tr("看看 Xcode 为什么卡住了", "Why is Xcode stuck?"),

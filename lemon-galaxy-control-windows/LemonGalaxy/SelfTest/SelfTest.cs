@@ -54,6 +54,7 @@ internal static class SelfTest
             if (Styles.LoadError != null) Problems.Add("控件模板解析失败：" + Styles.LoadError);
             CheckIcons();
             CheckForwardDraft();
+            CheckMarkdown();
             Clock.FrozenMs = 1_795_225_692_000;      // 2026-11-21 09:48:12（北京时间）
             var fakeHome = MakeFakeHome();
             LocalFileSource.HomeOverride = fakeHome;
@@ -305,6 +306,175 @@ internal static class SelfTest
         return false;
     }
 
+    /// <summary>
+    /// AI 页面：不可用的四种提示（加载中、失败、没开通、没模型）、新对话、Markdown 回复、连接设备确认、危险命令确认、提问与密码、
+    /// 图形界面目标、引用标签、文件选择器、对话列表分组。
+    /// </summary>
+    private static void RenderAi(AppModel app, FrameworkElement root, string prefix, bool zh)
+    {
+        var ai = app.Ai;
+        var mock = app.Client as MockClient;
+        app.SelectHome(NavSection.Ai);
+
+        // 不可用时的提示
+        if (mock != null)
+        {
+            ai.Models = null;
+            ai.ModelsError = null;
+            ai.LoadingModels = true;
+            ai.Changed.Notify();
+            Capture($"{prefix}-50-ai-loading", root);
+            ai.LoadingModels = false;
+            foreach (var (state, name) in new[] { (MockAiState.Error, "51-ai-failed"), (MockAiState.Disabled, "52-ai-disabled"), (MockAiState.NoModels, "53-ai-no-models") })
+            {
+                mock.AiState = state;
+                ai.Retry();
+                Wait("AI 模型列表 " + state, () => !ai.LoadingModels);
+                if (ai.Availability.ToString() != state switch { MockAiState.Error => "Failed", MockAiState.Disabled => "Disabled", _ => "NoModels" })
+                    Problems.Add($"AI 不可用提示：模拟 {state} 时状态是 {ai.Availability}");
+                Capture($"{prefix}-{name}", root);
+            }
+            mock.AiState = MockAiState.Ready;
+        }
+        ai.Retry();
+        Wait("AI 模型列表", () => ai.Availability == AiAvailability.Ready);
+        if (ai.DraftMode != AiMode.ConfirmDangerous) Problems.Add("AI：新对话默认档位应为危险操作确认，实际 " + ai.DraftMode);
+        if (ai.DraftModel != "1:kimi-k2") Problems.Add("AI：没有上次的选择时应取列表第一个模型，实际 " + ai.DraftModel);
+        CheckMention(ai);
+
+        // 新对话：问候 + 输入框居中，输入框里有一个设备引用
+        ai.NewChat();
+        ai.NewDraft.Refs.Clear();
+        ai.NewDraft.AddRef(AiHub.DeviceRef(app, "dev-build"));
+        ai.NewDraft.Text = zh ? "/data 快满了，帮我看看是什么占的空间" : "/data is almost full, find out what uses the space";
+        ai.NewDraft.Notify();
+        Capture($"{prefix}-54-ai-new", root);
+
+        // 没引用设备的问答：账号查询（只读工具行）+ Markdown 回复
+        ai.NewDraft.Refs.Clear();
+        ai.NewDraft.Text = zh ? "我的账号里有哪些设备？" : "Which devices are in my account?";
+        ai.SendNew();
+        Wait("AI 回答", () => ai.Current is { Running: false, Items.Count: > 2 });
+        if (ai.Current?.Items.OfType<ToolItem>().FirstOrDefault() is not { Call.Tool: "list_devices", Phase: ToolPhase.Finished })
+            Problems.Add("AI：没引用设备时应先用 list_devices 查账号");
+        if (ai.NewDraft.Text.Length != 0) Problems.Add("AI：发出后输入框应清空");
+        if (ai.Current?.Items.OfType<ToolItem>().FirstOrDefault() is { } listTool) { listTool.Expanded = true; listTool.Notify(); }
+        Capture($"{prefix}-55-ai-markdown", root);
+
+        // 消息里点名了没引用的设备：先弹「AI 想连接」卡片（只有允许与拒绝）
+        var chat = ai.Current;
+        if (chat != null)
+        {
+            chat.Draft.Text = zh ? "看看 build-server-01 的 /data 为什么满了，清理一下旧备份" : "Find out why /data on build-server-01 is full and clean up old backups";
+            ai.Send(chat);
+            if (Wait("AI 想连接设备", () => chat.HasPendingApproval))
+            {
+                var use = chat.Items.OfType<ToolItem>().Last();
+                if (!use.IsUseTarget) Problems.Add("AI：点名没引用的设备时第一张卡片应是 use_target");
+                Capture($"{prefix}-56-ai-use-target", root);
+                chat.Decide(use, new ApprovalDecision.AllowOnce());
+                // 危险命令确认
+                if (Wait("AI 危险命令确认", () => chat.Items.OfType<ToolItem>().Any(c => c.Decision == ToolDecision.Pending && c.Call.Risk == RiskLevel.Dangerous)))
+                    Capture($"{prefix}-57-ai-approval", root);
+                var card = chat.Items.OfType<ToolItem>().FirstOrDefault(c => c.Decision == ToolDecision.Pending);
+                if (card != null)
+                {
+                    chat.Decide(card, new ApprovalDecision.AllowOnce());
+                    if (Wait("AI 提问", () => chat.Items.OfType<AskItem>().Any()))
+                    {
+                        Capture($"{prefix}-58-ai-ask", root);
+                        var ask = chat.Items.OfType<AskItem>().First();
+                        chat.Answer(ask, ask.Options[0]);
+                        Wait("AI 请求密码", () => chat.Items.OfType<SecretItem>().Any());
+                    }
+                }
+                Capture($"{prefix}-59-ai-secret", root);
+                if (chat.Items.OfType<SecretItem>().FirstOrDefault() is { } sec) chat.CancelSecret(sec);
+                Wait("AI 任务结束", () => !chat.Running);
+            }
+        }
+
+        // 图形界面目标（引用了 Windows 设备）：截图 + 点击标注图，每步确认档，模型换成能看图的
+        ai.NewChat();
+        ai.SetModel(null, ai.Models!.Items.First(m => m.Vision));
+        ai.SetMode(null, AiMode.ConfirmAll, 0);
+        ai.NewDraft.AddRef(AiHub.DeviceRef(app, "dev-office"));
+        ai.NewDraft.Text = zh ? "把记事本里的内容保存一下" : "Save the Notepad content";
+        ai.SendNew();
+        if (Wait("AI 图形界面确认", () => ai.Current is { HasPendingApproval: true }))
+        {
+            var shot = ai.Current!.Items.OfType<ToolItem>().FirstOrDefault(c => c.Call.Tool == "screenshot");
+            if (shot != null) { shot.Expanded = true; shot.Notify(); }
+        }
+        Capture($"{prefix}-60-ai-gui", root);
+        if (app.Settings.AiLastModel != "1:qwen3-vl-plus" || app.Settings.AiMode != AiMode.ConfirmAll)
+            Problems.Add("AI：选过的模型与档位应记到本机设置里");
+        ai.Current?.Stop();
+
+        // 引用了文件、片段、端口映射、连接记录的消息 + 历史列表分组
+        ai.NewChat();
+        foreach (var r in new[]
+        {
+            new ContextRef(ContextRefKind.File, "dev-build", "/var/log/nginx/error.log", "error.log"),
+            new ContextRef(ContextRefKind.Snippet, "", "n-df", zh ? "磁盘占用" : "Disk usage"),
+            new ContextRef(ContextRefKind.PortForward, "", "p-db", zh ? "生产数据库" : "Production database"),
+            AiPickers.ActivityRef(),
+        }) ai.NewDraft.AddRef(r);
+        ai.NewDraft.Text = zh ? "最近有没有异常登录？" : "Any unusual sign-ins lately?";
+        ai.SendNew();
+        Wait("AI 连接记录", () => ai.Current is { Running: false, Items.Count: > 2 });
+        Capture($"{prefix}-61-ai-refs", root);
+
+        // 文件选择器：选设备后浏览主目录
+        var listed = AiPickers.PickFileOn(app, ai.NewDraft, "dev-build");
+        Wait("文件选择器列出主目录", listed);
+        Capture($"{prefix}-62-ai-file-picker", root);
+        app.CloseModal(true);
+
+        // 历史对话：重新打开时用 messages() 恢复
+        var first = ai.Rows().LastOrDefault();
+        if (first != null)
+        {
+            ai.Live.Clear();
+            ai.Select(first.Id);
+            Wait("AI 打开历史对话", () => ai.Current is { Opening: false });
+            if (ai.Current is not { Items.Count: > 0 }) Problems.Add("AI：打开历史对话后消息流是空的");
+            Capture($"{prefix}-63-ai-history", root);
+        }
+        ai.NewChat();
+    }
+
+    /// <summary>@ 引用：光标前的 @ 片段识别（开头或空白后才算，邮件地址不算）与候选过滤</summary>
+    private static void CheckMention(AiHub ai)
+    {
+        void Expect(bool ok, string what) { if (!ok) Problems.Add("@ 引用：" + what); }
+        Expect(Mention.Find("@bu", 3) is { at: 0, query: "bu" }, "开头的 @bu 没识别");
+        Expect(Mention.Find("看看 @gpu", 7) is { at: 3, query: "gpu" }, "空格后的 @gpu 没识别");
+        Expect(Mention.Find("a@b.com", 7) == null, "邮件地址被当成了引用");
+        Expect(Mention.Find("@bu ild", 7) == null, "@ 片段里有空格还被识别");
+        var c = ai.TargetCandidates("build");
+        Expect(c.Count == 1 && c[0].Kind == ContextRefKind.Device && c[0].Id == "dev-build", "按 build 过滤的候选不对");
+        Expect(!ai.TargetCandidates("").Any(r => r.Id is "dev-self" or "dev-phone"), "候选里不应有本机与手机");
+        Expect(ai.TargetCandidates("db-").All(r => r.Kind == ContextRefKind.SshHost) && ai.TargetCandidates("db-").Count == 2, "按 db- 过滤应只有两台 SSH 主机");
+    }
+
+    /// <summary>Markdown 解析：标题、列表嵌套、代码块（含未闭合）、表格</summary>
+    private static void CheckMarkdown()
+    {
+        void Expect(bool ok, string what) { if (!ok) Problems.Add("Markdown：" + what); }
+        var b = Md.Parse("# 标题\n\n段落 **粗体** `code`\n\n- a\n  - b\n- c\n\n1. x\n2. y\n\n| A | B |\n|---|:-:|\n| 1 | 2 |\n\n```bash\nls -la\n```\n\n> 引用\n\n---\n\n```py\nprint(1)");
+        Expect(b.Count == 9, "块数应为 9，实际 " + b.Count);
+        Expect(b.ElementAtOrDefault(0) is Md.Heading { Level: 1, Text: "标题" }, "标题");
+        Expect(b.ElementAtOrDefault(2) is Md.ListBlock { Ordered: false, Items.Count: 2 } l && l.Items[0].Child is { Items.Count: 1 }, "无序列表与嵌套");
+        Expect(b.ElementAtOrDefault(3) is Md.ListBlock { Ordered: true, Items.Count: 2 }, "有序列表");
+        Expect(b.ElementAtOrDefault(4) is Md.Table { Header.Length: 2, Rows.Count: 1 } t && t.Align[1] == TextAlignment.Center, "表格");
+        Expect(b.ElementAtOrDefault(5) is Md.Code { Lang: "bash", Text: "ls -la" }, "代码块");
+        Expect(b.ElementAtOrDefault(8) is Md.Code { Lang: "py", Text: "print(1)" }, "流式输出中未闭合的代码块");
+        var inl = Md.Inlines("a **b** `c` [d](https://e.example) *f*");
+        Expect(inl.OfType<System.Windows.Documents.Bold>().Count() == 1 && inl.OfType<System.Windows.Documents.Hyperlink>().Count() == 1 && inl.OfType<System.Windows.Documents.Italic>().Count() == 1, "行内粗体 / 链接 / 斜体");
+        Expect(Md.Inlines("snake_case_name").Count == 1, "下划线不应当成斜体");
+    }
+
     private static void RenderAll(AppSettings settings, string lang, string theme)
     {
         settings.ResetForSelfTest();
@@ -487,38 +657,8 @@ internal static class SelfTest
         // 复制粘贴文件
         if (app.ActiveTab is RemoteTab remote4) CheckFileClip(remote4, root, prefix);
 
-        // 6. AI 智能体
-        app.SelectHome(NavSection.Ai);
-        app.Ai.LoadModels();
-        Wait("AI 模型列表", () => app.Ai.Models != null);
-        app.Ai.DraftTargets = new List<AgentTarget> { new(AgentTargetKind.Device, "dev-build"), new(AgentTargetKind.SshHost, "s-dbp") };
-        app.Ai.DraftPrompt = zh ? "build-server-01 的 /data 快满了，帮我看看是什么占的空间，清理一下旧备份。" : "/data on build-server-01 is almost full. Find out what uses the space and clean up old backups.";
-        app.Ai.Changed.Notify();
-        Capture($"{prefix}-50-ai-new", root);
-        app.Ai.DraftTargets = new List<AgentTarget> { new(AgentTargetKind.Device, "dev-build") };
-        var conv = app.Ai.Start();
-        if (conv != null) Wait("AI 确认卡片", () => conv.HasPendingApproval);
-        Capture($"{prefix}-51-ai-approval", root);
-        if (conv != null && conv.Items.OfType<ToolCard>().FirstOrDefault(c => c.Decision == ToolDecision.Pending) is { } card)
-        {
-            conv.Decide(card, new ApprovalDecision.AllowOnce());
-            if (Wait("AI 提问", () => conv.Items.OfType<AskItem>().Any()))
-            {
-                var ask = conv.Items.OfType<AskItem>().First();
-                conv.Answer(ask, ask.Options[0]);
-                Wait("AI 请求密码", () => conv.ActiveSecret != null);
-            }
-        }
-        Capture($"{prefix}-52-ai-secret", root);
-        if (conv?.ActiveSecret is { } sec) conv.CancelSecret(sec);
-        // 图形界面目标：截图 + 点击标注图，每步确认档
-        app.SelectHome(NavSection.Ai);
-        app.Ai.DraftTargets = new List<AgentTarget> { new(AgentTargetKind.Device, "dev-office") };
-        app.Ai.DraftMode = AiMode.ConfirmAll;
-        app.Ai.DraftModel = "1:qwen3-vl-plus";
-        app.Ai.DraftPrompt = zh ? "把记事本里的内容保存一下" : "Save the Notepad content";
-        if (app.Ai.Start() is { } gui) Wait("AI 图形界面确认", () => gui.HasPendingApproval);
-        Capture($"{prefix}-53-ai-gui", root);
+        // 6. AI 聊天（docs/ai-chat-ui.md）
+        RenderAi(app, root, prefix, zh);
 
         // 7. 片段
         app.SelectedSnippet = "n-docker";

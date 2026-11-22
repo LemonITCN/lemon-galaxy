@@ -51,7 +51,7 @@ struct MainView: View {
             Rectangle().fill(p.separator).frame(width: 1)
             if !settings.listHidden && !(settings.autoHideList && app.activeTabId != nil) {
                 MiddleColumn()
-                    .frame(width: 284)
+                    .frame(width: app.section == .ai ? 240 : 284)
                     .background(p.list)
                 Rectangle().fill(p.separator).frame(width: 1)
             }
@@ -260,7 +260,6 @@ struct TabContent: View {
         case .terminal: TerminalTabView(tab: tab as! TerminalTabModel)
         case .sftp: SFTPTabView(tab: tab as! SFTPTabModel)
         case .remote: RemoteDesktopView(tab: tab as! RemoteDesktopModel)
-        case .ai: AIConversationView(tab: tab as! AIConversationModel)
         }
     }
 }
@@ -273,7 +272,7 @@ struct HomePage: View {
         case .hosts: HostsHome()
         case .sftp: SFTPHome()
         case .forwards: PortForwardHome()
-        case .ai: NewConversationPage()
+        case .ai: AIHomePage()
         case .snippets: SnippetHome()
         case .local: LocalHostPageView()
         case .settings: SettingsPageView()

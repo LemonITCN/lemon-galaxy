@@ -356,9 +356,18 @@ internal sealed class MockClient : ICoreClient
 
     // ---------- AI ----------
 
+    /// <summary>selftest 用：模拟 AI 不可用的各种情况</summary>
+    public MockAiState AiState = MockAiState.Ready;
+
     public async Task<AiModels> AiModels()
     {
         await Delay(200);
+        switch (AiState)
+        {
+            case MockAiState.Error: throw new GalaxyException.Network(Z("无法连接服务器：连接超时", "Cannot reach the server: connection timed out"));
+            case MockAiState.Disabled: return new AiModels(false, AiMode.Off, Array.Empty<AiModel>());
+            case MockAiState.NoModels: return new AiModels(true, AiMode.ConfirmDangerous, Array.Empty<AiModel>());
+        }
         return new AiModels(true, AiMode.FullTrust, new[]
         {
             new AiModel(1, "OpenCode Go", "kimi-k2", "Kimi K2", false, true, 131_072),
@@ -367,6 +376,21 @@ internal sealed class MockClient : ICoreClient
             new AiModel(2, Z("公司网关", "Company gateway"), "deepseek-v3.2", "DeepSeek V3.2", false, true, 128_000),
         });
     }
+
+    public async Task<ActivityItem[]> AccountActivity(uint limit)
+    {
+        await Delay(150);
+        var t = MockData.Now;
+        var items = new[]
+        {
+            new ActivityItem(t - 600_000, "connection.start", "alice", "device", "dev-build", "build-server-01", "203.0.113.24", Z("终端", "Terminal")),
+            new ActivityItem(t - 3_600_000, "user.login", "alice", "user", "", "", "203.0.113.24", "Windows"),
+            new ActivityItem(t - 7_200_000, "connection.end", "bob", "device", "dev-office", "OFFICE-PC-07", "198.51.100.7", Z("远程桌面", "Remote desktop")),
+        };
+        return items.Take((int)Math.Min(limit, (uint)items.Length)).ToArray();
+    }
+
+    public DeviceInfo[] DevicesSnapshot() { lock (lk) return devices.ToArray(); }
 
     public async Task<ICoreConversation> NewConversation(ConversationConfig config, AgentListener l)
     {
@@ -431,6 +455,9 @@ internal sealed class MockClient : ICoreClient
 
     public Platform TargetPlatform(AgentTarget t) => t.Kind == AgentTargetKind.Device ? Device(t.Id)?.Platform ?? Platform.Linux : Platform.Linux;
 }
+
+/// <summary>模拟 AI 模型列表的结果（selftest 截各种不可用状态）</summary>
+internal enum MockAiState { Ready, Error, Disabled, NoModels }
 
 internal sealed class MockPeer : ICorePeer
 {

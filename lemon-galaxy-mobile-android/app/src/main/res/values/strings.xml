@@ -348,7 +348,7 @@
     <string name="ai_title">AI agent</string>
     <string name="ai_new">New conversation</string>
     <string name="ai_empty">No conversations yet</string>
-    <string name="ai_disabled">AI is not enabled for your account</string>
+    <string name="ai_disabled">AI is not enabled for your account. Please ask your administrator to enable it.</string>
     <string name="ai_model">Model</string>
     <string name="ai_vision">Vision</string>
     <string name="ai_text_only">Text only</string>
@@ -365,7 +365,7 @@
     <string name="trust_60">1 hour</string>
     <string name="trust_unlimited">No limit</string>
     <string name="ai_start">Start</string>
-    <string name="ai_input_hint">Tell the agent what to do</string>
+    <string name="ai_input_hint">Message</string>
     <string name="ai_send">Send</string>
     <string name="ai_stop">Stop</string>
     <string name="ai_tokens">%1$s in · %2$s out</string>
@@ -401,7 +401,7 @@
     <string name="tool_awaiting">Needs approval</string>
     <string name="tool_allowed_by">Allowed by you</string>
     <string name="approve_once">Allow once</string>
-    <string name="approve_similar">Allow similar</string>
+    <string name="approve_similar">Allow similar in this conversation</string>
     <string name="approve_deny">Deny</string>
     <string name="approve_edit">Edit and run</string>
     <string name="approve_similar_info">Allow similar: actions of the same kind and risk run without asking for the rest of this conversation.</string>
@@ -428,6 +428,40 @@
     <string name="tool_keyboard">Keyboard</string>
     <string name="tool_wait">Wait</string>
     <string name="image_viewer">Image</string>
+    <string name="ai_greeting">How can I help?</string>
+    <string name="ai_no_models">Your administrator has not enabled any models for your account. Ask them to enable models for you on the Users page of the admin console.</string>
+    <string name="ai_models_failed">Could not load the model list</string>
+    <string name="ai_add_context">Add reference</string>
+    <string name="ai_ctx_targets">Device or host</string>
+    <string name="ai_ctx_files">File or folder</string>
+    <string name="ai_ctx_snippets">Snippets</string>
+    <string name="ai_ctx_forwards">Port forwards</string>
+    <string name="ai_ctx_activity">Connection history</string>
+    <string name="ai_ref_activity">Recent connections</string>
+    <string name="ai_ref_remove">Remove reference</string>
+    <string name="ai_pick_add">Add</string>
+    <string name="ai_pick_empty">Nothing to choose from</string>
+    <string name="ai_pick_place">Choose a device or host</string>
+    <string name="ai_pick_file">Choose this file</string>
+    <string name="ai_pick_folder">Choose this folder</string>
+    <string name="trust_conversation">This conversation</string>
+    <string name="ai_plan_first_locked_info">Plan first only applies when a conversation is created. This conversation has already started.</string>
+    <string name="ai_thinking_now">Thinking…</string>
+    <string name="ai_jump_bottom">Jump to bottom</string>
+    <string name="ai_group_today">Today</string>
+    <string name="ai_group_yesterday">Yesterday</string>
+    <string name="ai_group_week">Previous 7 days</string>
+    <string name="ai_group_earlier">Earlier</string>
+    <string name="ai_wants_connect">AI wants to connect to %s</string>
+    <string name="approve_allow">Allow</string>
+    <string name="tool_risk">Risk</string>
+    <string name="tool_result">Result</string>
+    <string name="tool_show_all">Show all %d lines</string>
+    <string name="tool_use_target">Connect device</string>
+    <string name="tool_list_devices">List devices and hosts</string>
+    <string name="tool_list_snippets">List snippets</string>
+    <string name="tool_list_port_forwards">List port forwards</string>
+    <string name="tool_recent_activity">View connection history</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>

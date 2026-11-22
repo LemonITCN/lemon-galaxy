@@ -6,7 +6,7 @@ public enum ToolPhase: Equatable {
 
 /// 对话页里的一条。
 public enum ChatItem: Identifiable {
-    case user(key: String, text: String)
+    case user(key: String, text: String, refs: [ContextRef])
     case assistant(key: String, text: String, thinking: String, streaming: Bool)
     case tool(ToolEntry)
     case ask(key: String, question: String, options: [String], answer: String?)
@@ -15,7 +15,7 @@ public enum ChatItem: Identifiable {
 
     public var id: String {
         switch self {
-        case .user(let k, _), .assistant(let k, _, _, _), .ask(let k, _, _, _), .secret(let k, _, _, _), .error(let k, _): return k
+        case .user(let k, _, _), .assistant(let k, _, _, _), .ask(let k, _, _, _), .secret(let k, _, _, _), .error(let k, _): return k
         case .tool(let t): return "tool-" + t.call.callId
         }
     }
@@ -48,6 +48,10 @@ public struct ConversationState {
     public var vision: Bool
     public var targetNames: [String]
     public var mode: AiMode
+    /// 当前模型（中途可换）
+    public var providerId: UInt64 = 0
+    public var modelId = ""
+    public var planFirst = false
     public var items: [ChatItem] = []
     public var running = false
     public var step: UInt32 = 0
@@ -162,11 +166,15 @@ public enum ChatReducer {
 
     // MARK: 用户动作（界面先改本地，再交给内核）
 
-    public static func userSent(_ state: ConversationState, text: String) -> ConversationState {
+    public static func userSent(_ state: ConversationState, text: String, refs: [ContextRef] = []) -> ConversationState {
         var s = state
         let k = s.nextKey("u")
-        s.items.append(.user(key: k, text: text))
-        if s.title.isEmpty { s.title = String(text.prefix(40)) }
+        s.items.append(.user(key: k, text: text, refs: refs))
+        if s.title.isEmpty {
+            // 与内核一致：空白合并后取前 40 字；只有引用时用第一个引用的名称
+            let t = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            s.title = t.isEmpty ? (refs.first?.label ?? "") : String(t.prefix(40))
+        }
         s.running = true
         return s
     }
@@ -202,8 +210,8 @@ public enum ChatReducer {
     public static func items(fromHistory history: [AgentMessage]) -> [ChatItem] {
         history.enumerated().map { i, m in
             switch m {
-            case .user(let text):
-                return .user(key: "h-u-\(i)", text: text)
+            case .user(let text, let refs):
+                return .user(key: "h-u-\(i)", text: text, refs: refs)
             case .assistant(let id, let text, let thinking):
                 return .assistant(key: id.isEmpty ? "h-a-\(i)" : id, text: text, thinking: thinking, streaming: false)
             case .tool(let call, let result):

@@ -93,7 +93,7 @@ final class ChatReducerTests: XCTestCase {
 
     func testHistoryMapping() {
         let items = ChatReducer.items(fromHistory: [
-            .user(text: "hi"), .assistant(id: "", text: "hello", thinking: "t"),
+            .user(text: "hi", refs: [.device("d1", label: "build")]), .assistant(id: "", text: "hello", thinking: "t"),
             .tool(call: call("t1"), result: ToolResultView(ok: true, summary: "", output: "out", image: nil, denied: false)),
             .tool(call: call("t2"), result: nil),
         ])

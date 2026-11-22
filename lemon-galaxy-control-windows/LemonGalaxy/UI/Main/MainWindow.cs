@@ -65,6 +65,13 @@ internal sealed class MainWindow : Window
                 app.CloseTab(id);
                 e.Handled = true;
             }
+            else if (ctrl && e.Key == System.Windows.Input.Key.N && app.LoggedIn && app.Section == NavSection.Ai)
+            {
+                // AI 页：新对话
+                app.SelectHome(NavSection.Ai);
+                app.Ai.NewChat();
+                e.Handled = true;
+            }
             else if (ctrl && e.Key == System.Windows.Input.Key.Tab && app.LoggedIn)
             {
                 // 首页 + 各标签循环切换

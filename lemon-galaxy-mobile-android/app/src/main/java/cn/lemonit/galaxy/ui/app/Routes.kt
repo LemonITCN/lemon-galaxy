@@ -36,9 +36,22 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.LifecycleStartEffect
 import cn.lemonit.galaxy.R
-import cn.lemonit.galaxy.app.AgentTargetOf
+import cn.lemonit.galaxy.app.AiModelsState
 import cn.lemonit.galaxy.app.AppContainer
-import cn.lemonit.galaxy.app.ConversationController
+import cn.lemonit.galaxy.app.MentionCandidate
+import cn.lemonit.galaxy.app.Refs
+import cn.lemonit.galaxy.app.Tab
+import cn.lemonit.galaxy.app.aiAvailability
+import cn.lemonit.galaxy.app.canSend
+import cn.lemonit.galaxy.app.capMode
+import cn.lemonit.galaxy.app.mentionCandidates
+import cn.lemonit.galaxy.app.pickDefaultModel
+import cn.lemonit.galaxy.core.bridge.AiModel
+import cn.lemonit.galaxy.ui.ai.ChatActions
+import cn.lemonit.galaxy.ui.ai.ChatScreen
+import cn.lemonit.galaxy.ui.ai.ChatSettings
+import cn.lemonit.galaxy.ui.ai.ComposerState
+import cn.lemonit.galaxy.ui.ai.RefSources
 import cn.lemonit.galaxy.app.EntryKind
 import cn.lemonit.galaxy.app.HostItem
 import cn.lemonit.galaxy.app.HostTree
@@ -60,11 +73,6 @@ import cn.lemonit.galaxy.core.bridge.VaultData
 import cn.lemonit.galaxy.core.platform.HoldMulticastLock
 import cn.lemonit.galaxy.data.AppSettings
 import cn.lemonit.galaxy.data.VideoQuality
-import cn.lemonit.galaxy.ui.ai.ConversationActions
-import cn.lemonit.galaxy.ui.ai.ConversationScreen
-import cn.lemonit.galaxy.ui.ai.NewConversationDraft
-import cn.lemonit.galaxy.ui.ai.NewConversationScreen
-import cn.lemonit.galaxy.ui.ai.key
 import cn.lemonit.galaxy.ui.components.ConfirmDialog
 import cn.lemonit.galaxy.ui.components.TextInputDialog
 import cn.lemonit.galaxy.ui.files.ChmodDialog
@@ -99,8 +107,8 @@ fun RouteContent(route: Route, container: AppContainer, nav: Navigator, showBack
         is Route.Files -> FilesRoute(route.target, container, nav, showBack)
         is Route.FileEditor -> FileEditorRoute(route, container, nav)
         is Route.Remote -> RemoteRoute(route.deviceId, container, nav)
-        is Route.Conversation -> ConversationRoute(route.id, container, nav, showBack)
-        is Route.NewConversation -> NewConversationRoute(route.target, container, nav, showBack)
+        is Route.Conversation -> ChatRoute(route.id, null, container, nav, showBack)
+        is Route.NewConversation -> ChatRoute(null, route.target, container, nav, showBack)
         is Route.EditEntry -> EditorRoute(route, container, nav)
         Route.Licenses -> LicensesScreen(onBack = { nav.pop() }, onOpen = openUrl)
     }
@@ -613,14 +621,31 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
 
 // ---------------- AI ----------------
 
+/**
+ * AI 对话页（docs/ai-chat-ui.md）。[conversationId] 为空是还没发消息的新对话：发第一条消息时才创建对话。
+ * [initialTarget] 从设备与主机页点「AI」进来时预先放入的引用。
+ */
 @Composable
-fun ConversationRoute(id: String, container: AppContainer, nav: Navigator, showBack: Boolean) {
-    val models by container.agents.models.collectAsState()
+fun ChatRoute(conversationId: String?, initialTarget: TargetRef?, container: AppContainer, nav: Navigator, showBack: Boolean) {
+    val agents = container.agents
+    val modelsState by agents.state.collectAsState()
+    val user by container.account.user.collectAsState()
+    val prefs by container.settings.prefs.collectAsState()
+    val data by container.hosts.data.collectAsState()
+    val scope = rememberCoroutineScope()
+    val wide = isWideLayout()
+    // 进入 AI 页面就调用 ai_models()
+    LaunchedEffect(Unit) { agents.loadModels() }
+    val availability = aiAvailability(modelsState, user?.aiEnabled)
+    val models = (modelsState as? AiModelsState.Loaded)?.models
+    val modelItems = models?.items.orEmpty()
+    val maxMode = models?.maxMode ?: AiMode.FULL_TRUST
+
     // 已打开的直接用；历史对话要向内核重新打开（异步）
-    val loaded by androidx.compose.runtime.produceState<ConversationController?>(container.agents.opened(id), id) {
-        if (value == null) {
+    val controller by androidx.compose.runtime.produceState(conversationId?.let { agents.opened(it) }, conversationId) {
+        if (conversationId != null && value == null) {
             value = try {
-                container.agents.open(id)
+                agents.open(conversationId)
             } catch (e: Exception) {
                 container.toast(e.userMessage())
                 null
@@ -628,44 +653,151 @@ fun ConversationRoute(id: String, container: AppContainer, nav: Navigator, showB
             if (value == null) nav.pop()
         }
     }
-    val controller = loaded
-    if (controller == null) {
+    if (conversationId != null && controller == null) {
         androidx.compose.foundation.layout.Box(androidx.compose.ui.Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
             androidx.compose.material3.CircularProgressIndicator()
         }
         return
     }
-    val ui by controller.ui.collectAsState()
+    val c = controller
+    val ui = c?.ui?.collectAsState()?.value
+    val composer = remember(conversationId) {
+        ComposerState(refs = initialTarget?.let { listOf(targetRef(data, it)) }.orEmpty())
+    }
+    val settings = if (ui == null) {
+        ChatSettings(
+            modelItems,
+            pickDefaultModel(modelItems, prefs.aiProviderId, prefs.aiModelId),
+            capMode(prefs.defaultAiMode, maxMode),
+            maxMode,
+            prefs.aiPlanFirst,
+        )
+    } else {
+        ChatSettings(
+            modelItems,
+            modelItems.firstOrNull { it.providerId == ui.providerId && it.id == ui.modelId }
+                ?: cn.lemonit.galaxy.core.bridge.AiModel(ui.providerId, "", ui.modelId, ui.modelId, false, false, 0u),
+            ui.mode,
+            maxMode,
+            ui.planFirst,
+        )
+    }
+    val sources = remember(data) {
+        RefSources(
+            targets = mentionCandidates(data),
+            snippets = data.snippets.mapNotNull { e ->
+                (e.data as? VaultData.Snippet)?.let { MentionCandidate(Refs.snippet(e.id, it.label), null, true, it.command) }
+            },
+            forwards = data.vault.mapNotNull { e ->
+                (e.data as? VaultData.PortForward)?.let { f ->
+                    val via = f.viaDeviceId?.let { data.deviceName(it) } ?: f.viaSshHostId?.let { (data.entry(it)?.data as? VaultData.SshHost)?.label }.orEmpty()
+                    MentionCandidate(Refs.portForward(e.id, f.label), null, true, "${f.localPort} → ${f.remoteHost}:${f.remotePort}" + if (via.isNotEmpty()) "  ·  $via" else "")
+                }
+            },
+            placeName = { Refs.placeName(data, it) },
+            browser = { t -> FileBrowserController(t, container.connections, scope, container::toast) },
+        )
+    }
     var deleting by remember { mutableStateOf(false) }
-    LaunchedEffect(ui.running, ui.items.size) { container.agents.refreshList() }
-    ConversationScreen(
-        ui = ui,
-        maxMode = models?.maxMode ?: AiMode.FULL_TRUST,
-        showBack = showBack || !isWideLayout(),
-        actions = object : ConversationActions {
+    ChatScreen(
+        conversationId = conversationId,
+        title = ui?.title.orEmpty(),
+        availability = availability,
+        loadError = (modelsState as? AiModelsState.Failed)?.message,
+        settings = settings,
+        items = ui?.items.orEmpty(),
+        running = ui?.running == true,
+        composer = composer,
+        sources = sources,
+        showBack = showBack || !wide,
+        actions = object : ChatActions {
             override fun onBack() {
                 nav.pop()
             }
 
-            override fun onSend(text: String) = controller.send(text)
-            override fun onStop() = controller.stop()
-            override fun onDecide(callId: String, decision: ApprovalDecision) = controller.decide(callId, decision)
-            override fun onAnswer(questionId: String, answer: String) = controller.answer(questionId, answer)
-            override fun onSecret(requestId: String, secret: CharArray) = controller.provideSecret(requestId, secret)
-            override fun onMode(mode: AiMode, trustMinutes: UInt?) = controller.setMode(mode, trustMinutes)
+            override fun onNewChat() {
+                if (wide && nav.tab == Tab.AI) nav.selectTab(Tab.AI) else nav.replace(Route.NewConversation(null))
+            }
+
             override fun onDelete() {
                 deleting = true
             }
+
+            override fun onRetry() = agents.loadModels()
+
+            override fun onSend() {
+                val text = composer.value.text
+                val refs = composer.refs
+                if (!canSend(text, refs)) return
+                if (c != null) {
+                    c.send(text, refs)
+                    composer.clear()
+                    return
+                }
+                val m = settings.model ?: return
+                if (composer.busy) return
+                composer.busy = true
+                composer.error = null
+                scope.launch {
+                    try {
+                        val created = agents.create(
+                            ConversationConfig(
+                                m.providerId, m.id, emptyList(), settings.mode, settings.planFirst,
+                                trustMinutes = if (settings.mode == AiMode.FULL_TRUST) prefs.aiTrustMinutes.takeIf { it > 0 }?.toUInt() else null,
+                                title = null,
+                            ),
+                        )
+                        created.send(text, refs)
+                        composer.clear()
+                        val route = Route.Conversation(created.ui.value.id)
+                        if (nav.top is Route.NewConversation) nav.replace(route) else nav.push(route)
+                    } catch (e: Exception) {
+                        // 创建失败：消息留在输入框里，错误显示在输入框上方
+                        composer.error = e.userMessage()
+                    }
+                    composer.busy = false
+                }
+            }
+
+            override fun onStop() {
+                c?.stop()
+            }
+
+            override fun onModel(model: AiModel) {
+                container.settings.update { it.copy(aiProviderId = model.providerId.toLong(), aiModelId = model.id) }
+                c?.setModel(model.providerId, model.id)?.let(container::toast)
+            }
+
+            override fun onMode(mode: AiMode, trustMinutes: UInt?) {
+                container.settings.update { it.copy(defaultAiMode = mode, aiTrustMinutes = trustMinutes?.toInt() ?: -1) }
+                c?.setMode(mode, trustMinutes)
+            }
+
+            override fun onPlanFirst(on: Boolean) {
+                if (c == null) container.settings.update { it.copy(aiPlanFirst = on) }
+            }
+
+            override fun onDecide(callId: String, decision: ApprovalDecision) {
+                c?.decide(callId, decision)
+            }
+
+            override fun onAnswer(questionId: String, answer: String) {
+                c?.answer(questionId, answer)
+            }
+
+            override fun onSecret(requestId: String, secret: CharArray) {
+                c?.provideSecret(requestId, secret)
+            }
         },
     )
-    if (deleting) {
+    if (deleting && conversationId != null) {
         ConfirmDialog(
             title = stringResource(R.string.ai_delete),
             message = stringResource(R.string.ai_delete_message),
             confirmText = stringResource(R.string.delete),
             destructive = true,
             onConfirm = {
-                container.agents.delete(id)
+                agents.delete(conversationId)
                 nav.pop()
             },
             onDismiss = { deleting = false },
@@ -673,57 +805,10 @@ fun ConversationRoute(id: String, container: AppContainer, nav: Navigator, showB
     }
 }
 
-@Composable
-fun NewConversationRoute(target: TargetRef?, container: AppContainer, nav: Navigator, showBack: Boolean) {
-    val data by container.hosts.data.collectAsState()
-    val models by container.agents.models.collectAsState()
-    val modelsError by container.agents.modelsError.collectAsState()
-    val prefs = container.settings.prefs.value
-    // SSH 主机作为 AI 目标时内核用加密库里保存的凭据与已确认的主机密钥连接（对话里不能弹窗问密码）
-    val targets = HostTree.items(data).filter { (it is HostItem.Device && it.reachable()) || it is HostItem.Ssh }
-    val initialKey = when (target) {
-        is TargetRef.Device -> "device:${target.deviceId}"
-        is TargetRef.Ssh -> "ssh:${target.hostId}"
-        null -> null
-    }
-    var draft by remember {
-        mutableStateOf(NewConversationDraft(targets = setOfNotNull(initialKey), mode = prefs.defaultAiMode))
-    }
-    var starting by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    LaunchedEffect(models) {
-        if (models == null) container.agents.loadModels()
-        if (draft.modelKey == null) models?.items?.firstOrNull()?.let { draft = draft.copy(modelKey = it.key()) }
-    }
-    NewConversationScreen(
-        models = models,
-        modelsError = modelsError,
-        targets = targets,
-        draft = draft,
-        onDraft = { draft = it },
-        showBack = showBack || !isWideLayout(),
-        onBack = { nav.pop() },
-        onStart = {
-            val m = models?.items?.firstOrNull { it.key() == draft.modelKey } ?: return@NewConversationScreen
-            if (starting) return@NewConversationScreen
-            val chosen = targets.filter { it.key in draft.targets }
-            val config = ConversationConfig(
-                m.providerId, m.id, chosen.mapNotNull(AgentTargetOf::of), draft.mode, draft.planFirst,
-                trustMinutes = if (draft.mode == AiMode.FULL_TRUST) draft.trustMinutes else null,
-                title = null,
-            )
-            starting = true
-            scope.launch {
-                try {
-                    val c = container.agents.create(config, m.name, m.vision, chosen.map { it.title })
-                    nav.replace(Route.Conversation(c.ui.value.id))
-                } catch (e: Exception) {
-                    container.toast(e.userMessage())
-                }
-                starting = false
-            }
-        },
-    )
+/** 设备或主机 → 引用标签。 */
+private fun targetRef(data: cn.lemonit.galaxy.app.HostsData, t: TargetRef) = when (t) {
+    is TargetRef.Device -> Refs.device(t.deviceId, data.deviceName(t.deviceId))
+    is TargetRef.Ssh -> Refs.sshHost(t.hostId, data.targetName(t))
 }
 
 // ---------------- 编辑条目 ----------------

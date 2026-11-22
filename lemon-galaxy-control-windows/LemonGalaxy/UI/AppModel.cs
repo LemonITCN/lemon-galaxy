@@ -9,7 +9,7 @@ namespace LemonGalaxy.UI;
 internal enum NavSection { Hosts, Sftp, Ai, Forwards, Snippets, Local, Settings }
 internal enum HostsListTab { Hosts, Credentials, KnownHosts }
 internal enum SettingsPage { Account, Appearance, Terminal, Connection, Ai, About }
-internal enum TabKind { Terminal, Sftp, Remote, Ai }
+internal enum TabKind { Terminal, Sftp, Remote }
 
 /// <summary>右侧编辑面板的目标</summary>
 internal abstract record EditTarget
@@ -395,7 +395,7 @@ internal sealed class AppModel
 
     private void ReleaseIfUnused(string? deviceId, string? sshHostId)
     {
-        if (deviceId != null && !Tabs.Any(t => t.DeviceId == deviceId) && !Ai.UsesDevice(deviceId) && peers.TryGetValue(deviceId, out var p))
+        if (deviceId != null && !Tabs.Any(t => t.DeviceId == deviceId) && peers.TryGetValue(deviceId, out var p))
         {
             try { p.Session.Disconnect(); } catch { }
             peers.Remove(deviceId);
@@ -507,12 +507,12 @@ internal sealed class AppModel
         tab.Start();
     }
 
+    /// <summary>设备、主机页的「AI」：切到 AI 页开一个新对话，输入框里先引用这台设备或主机</summary>
     public void OpenAi(params AgentTarget[] targets)
     {
-        Ai.DraftTargets = targets.ToList();
         Section = NavSection.Ai;
         ActiveTabId = null;
-        Ai.Changed.Notify();
+        Ai.StartWith(targets.Select(t => t.Kind == AgentTargetKind.Device ? AiHub.DeviceRef(this, t.Id) : AiHub.SshRef(this, t.Id)));
         Nav.Notify();
     }
 

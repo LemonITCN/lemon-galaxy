@@ -1,7 +1,10 @@
 package cn.lemonit.galaxy.core.rust
 
 import android.content.Context
+import cn.lemonit.galaxy.core.bridge.ActivityItem
 import cn.lemonit.galaxy.core.bridge.AgentConversationInterface
+import cn.lemonit.galaxy.core.bridge.ContextRef
+import cn.lemonit.galaxy.core.bridge.ConversationModel
 import cn.lemonit.galaxy.core.bridge.AgentListener
 import cn.lemonit.galaxy.core.bridge.AgentMessage
 import cn.lemonit.galaxy.core.bridge.AiMode
@@ -175,10 +178,12 @@ internal class UniffiClient(private val c: FGalaxyClient) : GalaxyClientInterfac
     override suspend fun newConversation(config: ConversationConfig, listener: AgentListener): AgentConversationInterface =
         ffi { UniffiConversation(c.newConversation(config.toFfi(), agentListener(listener))) }
 
+    override suspend fun accountActivity(limit: UInt): List<ActivityItem> = ffi { c.accountActivity(limit).map { it.toBridge() } }
+
     override fun listConversations(): List<ConversationSummary> = c.listConversations().map { it.toBridge() }
 
-    override suspend fun openConversation(id: String, config: ConversationConfig, listener: AgentListener): AgentConversationInterface =
-        ffi { UniffiConversation(c.openConversation(id, config.toFfi(), agentListener(listener))) }
+    override suspend fun openConversation(id: String, config: ConversationConfig?, listener: AgentListener): AgentConversationInterface =
+        ffi { UniffiConversation(c.openConversation(id, config?.toFfi(), agentListener(listener))) }
 
     override fun deleteConversation(id: String) = c.deleteConversation(id)
 
@@ -350,6 +355,9 @@ internal class UniffiConversation(private val a: FAgentConversation) : AgentConv
     override fun id(): String = a.id()
     override fun title(): String = a.title()
     override fun send(text: String) = a.send(text)
+    override fun sendWithRefs(text: String, refs: List<ContextRef>) = a.sendWithRefs(text, refs.map { it.toFfi() })
+    override fun setModel(providerId: ULong, modelId: String) = ffi { a.setModel(providerId, modelId) }
+    override fun model(): ConversationModel = a.model().toBridge()
     override fun decide(callId: String, decision: ApprovalDecision) = a.decide(callId, decision.toFfi())
     override fun answer(questionId: String, answer: String) = a.answer(questionId, answer)
     override fun provideSecret(requestId: String, secret: String) = a.provideSecret(requestId, secret)

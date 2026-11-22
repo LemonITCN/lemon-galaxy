@@ -19,8 +19,18 @@ public final class ConversationController: ObservableObject, Identifiable {
         var s = initial
         let history = conversation.messages()
         if !history.isEmpty { s.items = ChatReducer.items(fromHistory: history) }
+        let m = conversation.model()
+        if !m.modelId.isEmpty {
+            s.providerId = m.providerId
+            s.modelId = m.modelId
+        }
         state = s
         adapter.handler = { [weak self] e in onMain { self?.apply(e) } }
+    }
+
+    func refreshModel(_ m: AiModel) {
+        state.modelName = m.name
+        state.vision = m.vision
     }
 
     func apply(_ e: AgentEvent) {
@@ -28,11 +38,24 @@ public final class ConversationController: ObservableObject, Identifiable {
         onChange?()
     }
 
-    public func send(_ text: String) {
+    public func send(_ text: String) { send(text, refs: []) }
+
+    /// 发一条消息（可带引用）：文本与引用都为空时不发
+    public func send(_ text: String, refs: [ContextRef]) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
-        state = ChatReducer.userSent(state, text: t)
-        conversation.send(text: t)
+        guard !t.isEmpty || !refs.isEmpty else { return }
+        state = ChatReducer.userSent(state, text: t, refs: refs)
+        conversation.sendWithRefs(text: t, refs: refs)
+        onChange?()
+    }
+
+    /// 中途换模型（上下文保留）
+    public func setModel(_ m: AiModel) throws {
+        try conversation.setModel(providerId: m.providerId, modelId: m.id)
+        state.providerId = m.providerId
+        state.modelId = m.id
+        state.modelName = m.name
+        state.vision = m.vision
         onChange?()
     }
 
@@ -119,6 +142,7 @@ public final class AgentHub: ObservableObject {
     }
 
     public func model(_ id: String) -> AiModel? { models?.items.first { $0.id == id } }
+    public func model(providerId: UInt64, modelId: String) -> AiModel? { models?.items.first { $0.providerId == providerId && $0.id == modelId } }
 
     public func refreshList() {
         let saved = client().listConversations()
@@ -130,8 +154,8 @@ public final class AgentHub: ObservableObject {
                                         mode: live?.mode ?? c.config?.mode ?? defaultMode(), updatedAt: c.updatedAt,
                                         running: live?.running ?? false, waitingForUser: live?.waitingForUser ?? false)
         }
-        // 刚建还没落盘的对话也列出来
-        for (id, c) in opened where !ids.contains(id) {
+        // 刚建还没落盘的对话也列出来（还没发出消息的不列）
+        for (id, c) in opened where !ids.contains(id) && !c.state.items.isEmpty {
             let s = c.state
             list.append(ConversationListItem(id: id, title: s.title, modelName: s.modelName, targetNames: s.targetNames, mode: s.mode,
                                              updatedAt: Clock.nowMs, running: s.running, waitingForUser: s.waitingForUser))
@@ -155,19 +179,26 @@ public final class AgentHub: ObservableObject {
         }
     }
 
-    /// 新建对话：内核会先连上所有目标设备
+    /// 新建对话（聊天式：targets 为空，设备在消息里引用、用到时才连接）。发第一条消息时才调用
     public func create(_ config: ConversationConfig) async throws -> ConversationController {
         let adapter = AgentListenerAdapter()
         let conv = try await client().newConversation(config: config, listener: adapter)
-        let m = model(config.modelId)
+        let m = models?.items.first { $0.providerId == config.providerId && $0.id == config.modelId }
         let names = config.targets.map { hosts().targetName($0) }
-        let s = ConversationState(id: conv.id(), title: config.title ?? "", modelName: m?.name ?? config.modelId,
+        var s = ConversationState(id: conv.id(), title: config.title ?? "", modelName: m?.name ?? config.modelId,
                                   vision: m?.vision ?? false, targetNames: names, mode: config.mode)
+        s.providerId = config.providerId
+        s.modelId = config.modelId
+        s.planFirst = config.planFirst
         let c = ConversationController(conversation: conv, initial: s, config: config, adapter: adapter)
         adapters[c.id] = adapter
         attach(c)
-        refreshList()
         return c
+    }
+
+    /// 最近的登录与连接记录
+    public func activity(limit: UInt32 = 50) async throws -> [ActivityItem] {
+        try await client().accountActivity(limit: limit)
     }
 
     public func opened(_ id: String) -> ConversationController? { opened[id] }
@@ -180,8 +211,9 @@ public final class AgentHub: ObservableObject {
         }
         if models == nil { await loadModels() }
         let m = model(summary.modelId)
-        var config = summary.config
-        if config == nil {
+        // 有保存的配置时传空，由内核用保存的配置；老记录没有，按摘要里的模型与目标名称拼一个
+        var config: ConversationConfig? = nil
+        if summary.config == nil {
             let h = hosts()
             let targets: [AgentTarget] = summary.targetNames.compactMap { name in
                 if let d = h.devices.first(where: { h.deviceName($0.id) == name || $0.hostname == name }) { return AgentTarget(kind: .device, id: d.id) }
@@ -193,9 +225,17 @@ public final class AgentHub: ObservableObject {
         }
         let adapter = AgentListenerAdapter()
         let conv = try await client().openConversation(id: id, config: config, listener: adapter)
-        let s = ConversationState(id: id, title: summary.title, modelName: m?.name ?? summary.modelId, vision: m?.vision ?? false,
-                                  targetNames: summary.targetNames, mode: config?.mode ?? defaultMode())
-        let c = ConversationController(conversation: conv, initial: s, config: config, adapter: adapter)
+        let saved = summary.config ?? config
+        var s = ConversationState(id: id, title: summary.title, modelName: m?.name ?? summary.modelId, vision: m?.vision ?? false,
+                                  targetNames: summary.targetNames, mode: saved?.mode ?? defaultMode())
+        s.providerId = saved?.providerId ?? m?.providerId ?? 0
+        s.modelId = saved?.modelId ?? summary.modelId
+        s.planFirst = saved?.planFirst ?? false
+        let c = ConversationController(conversation: conv, initial: s, config: saved, adapter: adapter)
+        // 内核给的当前模型（可能中途换过）
+        if let cur = models?.items.first(where: { $0.providerId == c.state.providerId && $0.id == c.state.modelId }) {
+            c.refreshModel(cur)
+        }
         adapters[id] = adapter
         attach(c)
         return c

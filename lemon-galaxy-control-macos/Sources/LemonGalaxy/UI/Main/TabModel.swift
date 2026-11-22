@@ -1,8 +1,8 @@
 import SwiftUI
 
-enum TabKind { case terminal, sftp, remote, ai }
+enum TabKind { case terminal, sftp, remote }
 
-/// 工作区标签（终端、SFTP、远程桌面、AI 对话）的基类。
+/// 工作区标签（终端、SFTP、远程桌面）的基类。AI 对话不开标签，在 AI 页面里切换。
 @MainActor
 class TabModel: ObservableObject, Identifiable {
     let id = UUID().uuidString
@@ -24,7 +24,6 @@ class TabModel: ObservableObject, Identifiable {
         case .terminal: return "terminal"
         case .sftp: return "folder"
         case .remote: return "display"
-        case .ai: return "wand.and.stars"
         }
     }
 

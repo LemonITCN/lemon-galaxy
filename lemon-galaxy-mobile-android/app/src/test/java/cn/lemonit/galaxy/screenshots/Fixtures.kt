@@ -86,10 +86,12 @@ object Fixtures {
     val models = AiModels(true, AiMode.FULL_TRUST, MockData.models())
 
     fun summaries(zh: Boolean) = listOf(
-        ConversationListItem("c1", if (zh) "web-01 磁盘快满了，帮我清理一下" else "web-01 is almost out of disk, please clean up", "GLM-5.2", listOf("web-01 (nginx)"), AiMode.CONFIRM_DANGEROUS, MockData.NOW - 2 * 60_000, true, true),
-        ConversationListItem("c2", if (zh) "nginx 改了配置，帮我检查并重新加载" else "I changed the nginx config, please check it and reload", "GLM-5.2", listOf("web-01 (nginx)"), AiMode.CONFIRM_DANGEROUS, MockData.NOW - 3 * 3_600_000, false, false),
-        ConversationListItem("c3", if (zh) "看看 Xcode 为什么卡住了" else "Why is Xcode stuck?", "Kimi K2.6", listOf("Build Mac"), AiMode.CONFIRM_ALL, MockData.NOW - 26 * 3_600_000, false, false),
-        ConversationListItem("c4", if (zh) "批量重启 3 台 worker 上的 docker" else "Restart docker on three workers", "DeepSeek V4", listOf("web-01 (nginx)", "db-01", "nas"), AiMode.READ_ONLY, MockData.NOW - 4 * 86_400_000, false, false),
+        ConversationListItem("c1", if (zh) "web-01 磁盘快满了，帮我清理一下" else "web-01 is almost out of disk, please clean up", MockData.NOW - 2 * 60_000, running = true, waiting = true),
+        ConversationListItem("c5", if (zh) "看看最近有没有陌生 IP 登录" else "Any sign-ins from unfamiliar IPs lately?", MockData.NOW - 20 * 60_000, running = true),
+        ConversationListItem("c2", if (zh) "nginx 改了配置，帮我检查并重新加载" else "I changed the nginx config, please check it and reload", MockData.NOW - 3 * 3_600_000),
+        ConversationListItem("c3", if (zh) "看看 Xcode 为什么卡住了" else "Why is Xcode stuck?", MockData.NOW - 26 * 3_600_000),
+        ConversationListItem("c4", if (zh) "批量重启 3 台 worker 上的 docker" else "Restart docker on three workers", MockData.NOW - 4 * 86_400_000),
+        ConversationListItem("c6", if (zh) "备份脚本为什么没跑" else "Why did the backup script not run?", MockData.NOW - 12 * 86_400_000),
     )
 
     fun conversation(zh: Boolean, image: ImageData?): ConversationUi {
@@ -111,16 +113,21 @@ object Fixtures {
         return ConversationUi(
             id = "c1",
             title = t("web-01 磁盘快满了，帮我清理一下", "web-01 is almost out of disk, please clean up"),
-            modelName = "GLM-5.2",
-            vision = false,
-            targetNames = listOf("web-01 (nginx)"),
+            providerId = 1u,
+            modelId = "glm-5.2",
             mode = AiMode.CONFIRM_DANGEROUS,
             running = true,
             step = 3,
             promptTokens = 18_234,
             completionTokens = 1_320,
             items = listOf(
-                ChatItem.User("u1", t("web-01 磁盘快满了，帮我清理一下", "web-01 is almost out of disk, please clean up")),
+                ChatItem.User(
+                    "u1", t("磁盘快满了，帮我清理一下", "It is almost out of disk, please clean up"),
+                    listOf(
+                        cn.lemonit.galaxy.core.bridge.ContextRef(cn.lemonit.galaxy.core.bridge.ContextRefKind.DEVICE, "", MockData.DEV_WEB_01, "web-01 (nginx)"),
+                        cn.lemonit.galaxy.core.bridge.ContextRef(cn.lemonit.galaxy.core.bridge.ContextRefKind.FOLDER, MockData.DEV_WEB_01, "/var/log", "log"),
+                    ),
+                ),
                 ChatItem.Assistant(
                     "a1", t("好的，我先看一下 **web-01** 的磁盘使用情况。根分区已用 `87%`。", "Sure. The root filesystem on **web-01** is `87%` full."),
                     t("用户想释放磁盘空间。先用只读命令看分区使用率。", "The user wants to free disk space."), false,
@@ -136,7 +143,7 @@ object Fixtures {
                     t(
                         "systemd 日志占了 **3.2G**。建议只保留最近 7 天：\n\n- 释放约 2.8G\n- 不影响正在运行的服务",
                         "The systemd journal uses **3.2G**. I suggest keeping only the last 7 days:\n\n- Frees about 2.8G\n- Running services are not affected",
-                    ),
+                    ).replace("\n\n- ", "\n\n| ${t("目录", "Folder")} | ${t("大小", "Size")} |\n|---|---|\n| /var/log/journal | 3.2G |\n| /var/log/nginx | 412M |\n\n```bash\nsudo journalctl --vacuum-time=7d\n```\n\n- ").let { it },
                     null, false,
                 ),
                 ChatItem.Tool("k2", danger, true, ToolPhase.AWAITING, "", null, null),

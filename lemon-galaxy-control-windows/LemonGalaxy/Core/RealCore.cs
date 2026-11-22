@@ -44,6 +44,7 @@ internal sealed class RealClient : ICoreClient
 
     public Task<AiModels> AiModels() => c.AiModels();
     public async Task<ICoreConversation> NewConversation(ConversationConfig config, AgentListener listener) => new RealConversation(await c.NewConversation(config, listener));
+    public Task<ActivityItem[]> AccountActivity(uint limit) => c.AccountActivity(limit);
     public ConversationSummary[] ListConversations() => c.ListConversations();
     public async Task<ICoreConversation> OpenConversation(string id, ConversationConfig? config, AgentListener listener) => new RealConversation(await c.OpenConversation(id, config, listener));
     public void DeleteConversation(string id) => c.DeleteConversation(id);
@@ -205,6 +206,9 @@ internal sealed class RealConversation : ICoreConversation
     public string Id() => c.Id();
     public string Title() => c.Title();
     public void Send(string text) => c.Send(text);
+    public void SendWithRefs(string text, ContextRef[] refs) => c.SendWithRefs(text, refs);
+    public void SetModel(ulong providerId, string modelId) => c.SetModel(providerId, modelId);
+    public ConversationModel Model() => c.Model();
     public void Decide(string callId, ApprovalDecision decision) => c.Decide(callId, decision);
     public void Answer(string questionId, string answer) => c.Answer(questionId, answer);
     public void ProvideSecret(string requestId, string secret) => c.ProvideSecret(requestId, secret);

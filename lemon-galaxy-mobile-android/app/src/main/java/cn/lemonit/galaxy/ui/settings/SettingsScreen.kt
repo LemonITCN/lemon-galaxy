@@ -66,7 +66,7 @@ import cn.lemonit.galaxy.data.AppLanguage
 import cn.lemonit.galaxy.data.AppSettings
 import cn.lemonit.galaxy.data.Prefs
 import cn.lemonit.galaxy.data.VideoQuality
-import cn.lemonit.galaxy.ui.ai.SELECTABLE_MODES
+import cn.lemonit.galaxy.app.SELECTABLE_MODES
 import cn.lemonit.galaxy.ui.ai.modeLabel
 import cn.lemonit.galaxy.ui.components.GalaxyTopBar
 import cn.lemonit.galaxy.ui.components.InfoButton

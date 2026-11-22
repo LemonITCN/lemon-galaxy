@@ -406,6 +406,43 @@ data class ConversationSummary(
     val modelId: String,
     val targetNames: List<String>,
     val updatedAt: Long,
+    /** 创建时的配置（模型、目标、档位）；老记录没有。 */
+    val config: ConversationConfig? = null,
+)
+
+/** 对话当前使用的模型。 */
+data class ConversationModel(
+    val providerId: ULong,
+    val modelId: String,
+)
+
+/** 聊天时引用的资源种类（ai-chat-ui.md 第 2.2 节）。 */
+enum class ContextRefKind { DEVICE, SSH_HOST, FILE, FOLDER, SNIPPET, PORT_FORWARD, ACTIVITY }
+
+/**
+ * 消息里引用的资源。
+ * [targetId]：文件、文件夹所在的设备 ID 或 SSH 主机条目 ID，其他种类留空；
+ * [id]：设备 ID / SSH 主机条目 ID / 片段条目 ID / 端口映射条目 ID；文件与文件夹是路径；连接记录留空；
+ * [label]：界面上标签显示的名字。
+ */
+data class ContextRef(
+    val kind: ContextRefKind,
+    val targetId: String,
+    val id: String,
+    val label: String,
+)
+
+/** 账号最近的活动（登录、连接等），服务器 GET /account/activity。 */
+data class ActivityItem(
+    val at: Long,
+    /** 如 user.login、connection.start、connection.end、device.register */
+    val action: String,
+    val actorName: String,
+    val targetType: String,
+    val targetId: String,
+    val targetName: String,
+    val ip: String,
+    val detail: String,
 )
 
 sealed class ApprovalDecision {
@@ -465,7 +502,7 @@ sealed class AgentEvent {
 
 /** `AgentConversation.messages()` 返回的历史（恢复界面用）。 */
 sealed class AgentMessage {
-    data class User(val text: String) : AgentMessage()
+    data class User(val text: String, val refs: List<ContextRef> = emptyList()) : AgentMessage()
     data class Assistant(val id: String, val text: String, val thinking: String) : AgentMessage()
     data class Tool(val call: ToolCallView, val result: ToolResultView?) : AgentMessage()
 }

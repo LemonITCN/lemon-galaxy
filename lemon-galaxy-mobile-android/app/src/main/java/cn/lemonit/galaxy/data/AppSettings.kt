@@ -41,7 +41,15 @@ data class Prefs(
     val terminalFontSize: Int = 14,
     val appLock: Boolean = false,
     val defaultQuality: VideoQuality = VideoQuality.AUTO,
+    /** AI 输入框上次选的档位（也是设置页里的默认档位）；用时不超过管理员上限。 */
     val defaultAiMode: AiMode = AiMode.CONFIRM_DANGEROUS,
+    /** AI 输入框上次选的模型（供应商 ID 为 -1 表示没选过）。 */
+    val aiProviderId: Long = -1L,
+    val aiModelId: String = "",
+    /** AI 输入框「先出计划」勾选。 */
+    val aiPlanFirst: Boolean = false,
+    /** 完全信任的时限（分钟），-1 表示本对话内一直有效。 */
+    val aiTrustMinutes: Int = -1,
     /** 远程桌面操作方式：鼠标（触控板式，默认）或触控；菜单里切换后记住 */
     val remoteMouseMode: Boolean = true,
     /** 远程桌面播放被控端声音（默认开，记住用户的选择） */
@@ -71,6 +79,10 @@ class AppSettings(private val sp: SharedPreferences?) {
             appLock = p.getBoolean("app_lock", d.appLock),
             defaultQuality = VideoQuality.of(p.getString("default_quality", null)),
             defaultAiMode = runCatching { AiMode.valueOf(p.getString("default_ai_mode", null) ?: "") }.getOrDefault(d.defaultAiMode),
+            aiProviderId = p.getLong("ai_provider_id", d.aiProviderId),
+            aiModelId = p.getString("ai_model_id", null) ?: d.aiModelId,
+            aiPlanFirst = p.getBoolean("ai_plan_first", d.aiPlanFirst),
+            aiTrustMinutes = p.getInt("ai_trust_minutes", d.aiTrustMinutes),
             // 新键：旧版 remote_mouse_mode 默认是触控且每次存设置都会写进去，沿用它就改不成默认鼠标
             remoteMouseMode = when (p.getString("remote_input_mode", null)) {
                 "mouse" -> true
@@ -96,6 +108,10 @@ class AppSettings(private val sp: SharedPreferences?) {
             putBoolean("app_lock", n.appLock)
             putString("default_quality", n.defaultQuality.key)
             putString("default_ai_mode", n.defaultAiMode.name)
+            putLong("ai_provider_id", n.aiProviderId)
+            putString("ai_model_id", n.aiModelId)
+            putBoolean("ai_plan_first", n.aiPlanFirst)
+            putInt("ai_trust_minutes", n.aiTrustMinutes)
             putString("remote_input_mode", if (n.remoteMouseMode) "mouse" else "touch")
             remove("remote_mouse_mode")
             putBoolean("remote_audio", n.remoteAudio)

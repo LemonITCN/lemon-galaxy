@@ -26,7 +26,14 @@ final class AppSettings: ObservableObject {
     @Published var language: String { didSet { d.set(language, forKey: "language") } }
     @Published var appLock: Bool { didSet { d.set(appLock, forKey: "appLock") } }
     @Published var defaultQuality: VideoQuality { didSet { d.set(defaultQuality.rawValue, forKey: "defaultQuality") } }
+    /// AI 输入框上次选的档位（新对话默认用它，不超过管理员上限）
     @Published var defaultAiMode: AiMode { didSet { d.set(defaultAiMode.key, forKey: "defaultAiMode") } }
+    /// AI 输入框上次选的模型（「供应商 ID/模型 ID」）
+    @Published var aiLastModel: String { didSet { d.set(aiLastModel, forKey: "aiLastModel") } }
+    /// AI 输入框的「先出计划」
+    @Published var aiPlanFirst: Bool { didSet { d.set(aiPlanFirst, forKey: "aiPlanFirst") } }
+    /// 完全信任的时限（分钟），0 表示本对话内一直有效
+    @Published var aiTrustMinutes: Int { didSet { d.set(aiTrustMinutes, forKey: "aiTrustMinutes") } }
     /// 远程桌面操作方式：鼠标（触控板式，默认）或触控；菜单里切换后记住
     @Published var remoteMouseMode: Bool {
         didSet {
@@ -57,6 +64,9 @@ final class AppSettings: ObservableObject {
         appLock = d.bool(forKey: "appLock")
         defaultQuality = VideoQuality(rawValue: d.string(forKey: "defaultQuality") ?? "") ?? .auto
         defaultAiMode = AiMode.fromKey(d.string(forKey: "defaultAiMode")) ?? .confirmDangerous
+        aiLastModel = d.string(forKey: "aiLastModel") ?? ""
+        aiPlanFirst = d.bool(forKey: "aiPlanFirst")
+        aiTrustMinutes = d.object(forKey: "aiTrustMinutes") as? Int ?? 60
         // 新键（与安卓一致）：旧键 remoteMouseMode 默认是触控，沿用它就改不成默认鼠标
         remoteMouseMode = d.string(forKey: "remoteInputMode").map { $0 != "touch" } ?? true
         remoteAudio = d.object(forKey: "remoteAudio") as? Bool ?? true

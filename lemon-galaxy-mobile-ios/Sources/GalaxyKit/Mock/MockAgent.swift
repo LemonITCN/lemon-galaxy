@@ -5,7 +5,9 @@ import Foundation
 final class MockAgentConversation: AgentConversation, @unchecked Sendable {
     required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
     private let client: MockGalaxyClient
-    private let config: ConversationConfig
+    private var config: ConversationConfig
+    /// 用户引用过（或同意连接）的目标，本对话内可直接使用
+    private var allowedTargets: [AgentTarget] = []
     var listener: AgentListener?
     private let convId: String
     private let lock = NSLock()
@@ -32,6 +34,7 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
         self.trustUntil = config.trustMinutes.map { Date().addingTimeInterval(TimeInterval($0) * 60) }
         self.titleText = config.title ?? ""
         self.convId = "conv-" + UUID().uuidString.prefix(8).lowercased()
+        self.allowedTargets = config.targets
         super.init(noHandle: NoHandle())
     }
 
@@ -59,14 +62,43 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
 
     private func pause(_ ms: Int) async { await client.delay(ms) }
 
-    override func send(text: String) {
-        lock.locked { if titleText.isEmpty { titleText = String(text.prefix(28)) } }
-        record(.user(text: text))
+    override func send(text: String) { sendWithRefs(text: text, refs: []) }
+
+    override func sendWithRefs(text: String, refs: [ContextRef]) {
+        lock.locked {
+            if titleText.isEmpty {
+                let t = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+                titleText = t.isEmpty ? (refs.first?.label ?? "") : String(t.prefix(40))
+            }
+            for r in refs {
+                let t: AgentTarget?
+                switch r.kind {
+                case .device: t = AgentTarget(kind: .device, id: r.id)
+                case .sshHost: t = AgentTarget(kind: .sshHost, id: r.id)
+                case .file, .folder:
+                    t = client.device(r.targetId) != nil ? AgentTarget(kind: .device, id: r.targetId) : AgentTarget(kind: .sshHost, id: r.targetId)
+                default: t = nil
+                }
+                if let t, !allowedTargets.contains(t) { allowedTargets.append(t) }
+            }
+        }
+        record(.user(text: text, refs: refs))
         task?.cancel()
         task = Task { [weak self] in
             guard let self else { return }
-            await self.runScript(userText: text)
+            await self.runScript(userText: text, refs: refs)
         }
+    }
+
+    override func setModel(providerId: UInt64, modelId: String) throws {
+        lock.locked {
+            config.providerId = providerId
+            config.modelId = modelId
+        }
+    }
+
+    override func model() -> ConversationModel {
+        lock.locked { ConversationModel(providerId: config.providerId, modelId: config.modelId) }
     }
 
     override func decide(callId: String, decision: ApprovalDecision) {
@@ -110,7 +142,7 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
 
     // MARK: 脚本
 
-    private var target: AgentTarget { config.targets.first ?? AgentTarget(kind: .device, id: "dev-build") }
+    private var target: AgentTarget { lock.locked { allowedTargets.first } ?? AgentTarget(kind: .device, id: "dev-build") }
     private var targetName: String { client.targetName(target) }
     private var isGui: Bool { [.windows, .macos].contains(client.targetPlatform(target)) }
 
@@ -152,13 +184,18 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
 
     /// 返回 nil 表示被拒绝
     private func tool(_ tool: String, summary: String, detail: String = "", risk: RiskLevel, reasons: [String] = [], why: String,
-                      output: String, resultSummary: String, image: ImageData? = nil, resultImage: ImageData? = nil) async -> String? {
+                      output: String, resultSummary: String, image: ImageData? = nil, resultImage: ImageData? = nil, forTarget: AgentTarget? = nil) async -> String? {
+        let target = forTarget ?? self.target
+        let targetName = client.targetName(target)
         step += 1
         emit(.status(running: true, step: step))
         let callId = "call-" + UUID().uuidString.prefix(6)
-        let call = ToolCallView(callId: callId, tool: tool, targetId: target.id, targetName: targetName, summary: summary,
+        let accountTool = ["list_devices", "list_snippets", "list_port_forwards", "recent_activity"].contains(tool)
+        let call = ToolCallView(callId: callId, tool: tool, targetId: accountTool ? "" : target.id, targetName: accountTool ? "" : targetName, summary: summary,
                                 detail: detail.isEmpty ? summary : detail, risk: risk, riskReasons: reasons, modelReason: why, image: image)
-        let approval = needsApproval(risk, tool: tool)
+        // 连接没引用过的设备：除完全信任外都要用户同意（只有允许 / 拒绝）
+        let approval: Bool? = tool == "use_target" ? (lock.locked { mode } == .fullTrust ? false : true)
+            : accountTool ? false : needsApproval(risk, tool: tool)
         emit(.toolProposed(call: call, needsApproval: approval == true))
         var finalCommand = summary
         if approval == nil {
@@ -216,7 +253,7 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
         return await withCheckedContinuation { c in lock.locked { secrets[rid] = c } }
     }
 
-    private func runScript(userText: String) async {
+    private func runScript(userText: String, refs: [ContextRef]) async {
         step = 0
         emit(.status(running: true, step: 0))
         let thinkingId = "th-" + UUID().uuidString.prefix(6)
@@ -227,6 +264,32 @@ final class MockAgentConversation: AgentConversation, @unchecked Sendable {
                          : "Plan:\n1. Check disk and directory usage\n2. Find old files that can be removed\n3. Clean up after your approval\n4. Verify the result\n\nI will start once you agree.")
             let a = await ask(zh ? "按这个计划执行吗？" : "Proceed with this plan?", options: zh ? ["执行", "取消"] : ["Proceed", "Cancel"])
             if a != (zh ? "执行" : "Proceed") { emit(.status(running: false, step: step)); return }
+        }
+        // 引用了片段 / 端口映射 / 连接记录 / 文件：先说明收到了哪些
+        let extra = refs.filter { ![.device, .sshHost].contains($0.kind) }
+        if !extra.isEmpty {
+            let names = extra.map(\.label).joined(separator: zh ? "、" : ", ")
+            await say(zh ? "已收到你引用的：\(names)。" : "Got the references: \(names).")
+            guard !Task.isCancelled else { return }
+        }
+        if lock.locked({ allowedTargets.isEmpty }) {
+            // 没引用设备：先查账号里的设备，再请用户同意连接
+            let list = (client.devices().filter { !$0.isSelf && $0.kind != .mobile }.map { "\($0.hostname)\t\($0.platform)\t\($0.online ? "online" : "offline")" })
+                .joined(separator: "\n")
+            _ = await tool("list_devices", summary: zh ? "列出账号里的设备与 SSH 主机" : "List devices and SSH hosts", risk: .read,
+                           why: zh ? "看看有哪些机器可用" : "See which machines are available", output: list, resultSummary: zh ? "共 \(list.split(separator: "\n").count) 台" : "\(list.split(separator: "\n").count) found")
+            guard !Task.isCancelled else { return }
+            let t = AgentTarget(kind: .device, id: "dev-build")
+            let name = client.targetName(t)
+            let ok = await tool("use_target", summary: zh ? "连接 \(name)" : "Connect to \(name)", risk: .read,
+                                why: zh ? "要在这台机器上查看磁盘" : "Need to check the disk on this machine", output: "", resultSummary: zh ? "已连接" : "Connected",
+                                forTarget: t)
+            guard ok != nil, !Task.isCancelled else {
+                await say(zh ? "好的，不连接。你可以用 @ 指定要操作的设备。" : "OK, not connecting. Use @ to pick the device you want.")
+                emit(.status(running: false, step: step))
+                return
+            }
+            lock.locked { if !allowedTargets.contains(t) { allowedTargets.append(t) } }
         }
         if isGui { await guiScript() } else { await shellScript() }
         emit(.status(running: false, step: step))

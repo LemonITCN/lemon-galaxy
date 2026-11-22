@@ -354,6 +354,109 @@ enum SelfTest {
     }
 
     /// 渲染整个主窗口（RootView）当前状态
+    /// AI 页面：新对话、引用、不可用的四种提示、use_target 确认、危险命令确认、提问、要密码、图形界面目标、@ 候选
+    static func checkAI(prefix: String, zh: Bool, app: AppModel, window: NSWindow, host: NSHostingView<RootView>) {
+        let ai = app.ai
+        app.selectHome(.ai)
+        ai.newChat()
+        ai.loadModels()
+        wait("AI 模型列表") { ai.models != nil }
+        guard let first = ai.current else { problems.append("AI 页面没有当前对话"); return }
+        if first.modelId.isEmpty { problems.append("新对话没有默认模型") }
+        if first.mode != .confirmDangerous { problems.append("新对话默认档位应为危险操作确认：\(first.mode)") }
+        shot("\(prefix)-50-ai-new", app, window: window, host: host)
+
+        // 不可用的四种状态
+        let saved = ai.models
+        ai.pinModels = true
+        ai.models = nil
+        ai.modelsError = nil
+        shot("\(prefix)-50-ai-state-loading", app, window: window, host: host)
+        ai.modelsError = zh ? "连接服务器超时" : "Timed out connecting to the server"
+        if ai.availability != .failed(ai.modelsError!) { problems.append("加载失败状态不对") }
+        shot("\(prefix)-50-ai-state-failed", app, window: window, host: host)
+        ai.modelsError = nil
+        ai.models = AiModels(enabled: false, maxMode: .fullTrust, items: [])
+        if ai.availability != .disabled { problems.append("没开通 AI 的状态不对") }
+        shot("\(prefix)-50-ai-state-disabled", app, window: window, host: host)
+        ai.models = AiModels(enabled: true, maxMode: .confirmAll, items: [])
+        if ai.availability != .noModels { problems.append("没有模型的状态不对") }
+        if first.canSend { problems.append("没有模型时不应能发送") }
+        shot("\(prefix)-50-ai-state-nomodels", app, window: window, host: host)
+        ai.models = saved
+        ai.pinModels = false
+
+        // 输入框：引用标签、@ 候选
+        first.addRef(ai.ref(for: AgentTarget(kind: .device, id: "dev-build")))
+        first.addRef(ContextRef(kind: .folder, targetId: "dev-build", id: "/data/backups", label: "backups"))
+        first.addRef(ContextRef(kind: .snippet, targetId: "", id: "n-docker", label: zh ? "清理 Docker" : "Docker cleanup"))
+        first.addRef(first.refs[0])
+        if first.refs.count != 3 { problems.append("同一引用不应重复：\(first.refs.count)") }
+        first.text = zh ? "/data 快满了，帮我看看是什么占的空间，清理一下旧备份。 @bu" : "/data is almost full. Find out what uses the space and clean up old backups. @bu"
+        let ns = first.text as NSString
+        let at = ns.range(of: "@bu", options: .backwards)
+        first.mention = MentionState(range: at, query: "bu", caret: CGPoint(x: 280, y: 18))
+        if !ai.candidates("bu").contains(where: { $0.ref.id == "dev-build" }) { problems.append("@ 候选里找不到 build-server-01") }
+        if ai.candidates("").contains(where: { $0.ref.id == "dev-self" || app.device($0.ref.id)?.kind == .mobile }) { problems.append("@ 候选不应含本机与手机") }
+        shot("\(prefix)-51-ai-composer", app, window: window, host: host)
+        first.pickMention(ai.ref(for: AgentTarget(kind: .sshHost, id: "s-dbp")))
+        if first.text.contains("@bu") || first.refs.count != 4 { problems.append("选中 @ 候选后应删掉 @ 文字并加引用") }
+        first.removeRef(first.refs[3])
+
+        // 发出第一条消息才建对话；引用随消息交给内核
+        first.send()
+        wait("AI 建对话") { first.conversationId != nil }
+        if let m = first.conversation?.messages().first, case .user(_, let refs) = m {
+            if refs.count != 3 { problems.append("引用没有随消息交给内核：\(refs.count)") }
+        } else { problems.append("内核里没有用户消息") }
+        wait("AI 确认卡片") { first.hasPendingApproval }
+        pump(0.2)
+        shot("\(prefix)-52-ai-approval", app, window: window, host: host, settle: 0.3)
+        if let card = first.items.compactMap({ if case .tool(let t) = $0, t.decision == .pending { return t }; return nil }).first {
+            first.decide(card, .allowOnce)
+            wait("AI 提问") { first.items.contains { if case .ask = $0 { return true }; return false } }
+            if let ask = first.items.compactMap({ if case .ask(let a) = $0 { return a }; return nil }).first {
+                first.answer(ask, ask.options[0])
+                wait("AI 请求密码") { first.pendingSecret != nil }
+            }
+        }
+        shot("\(prefix)-53-ai-secret", app, window: window, host: host, settle: 0.3)
+        if let s = first.pendingSecret { first.cancelSecret(s) }
+        wait("AI 对话结束") { !first.running }
+        if !ai.rows.contains(where: { $0.id == first.conversationId }) { problems.append("对话列表里没有刚建的对话") }
+
+        // 没引用设备：先查设备，再请用户同意连接（use_target）
+        ai.newChat()
+        guard let chat = ai.current, chat !== first else { problems.append("新对话没有新建"); return }
+        chat.text = zh ? "帮我把记事本里的内容保存一下" : "Save the Notepad content for me"
+        chat.setMode(.confirmAll)
+        if let vl = ai.models?.items.first(where: { $0.vision }) { chat.setModel(vl) }
+        chat.send()
+        wait("AI 连接确认") { chat.items.contains { if case .tool(let t) = $0 { return t.isUseTarget && t.decision == .pending }; return false } }
+        shot("\(prefix)-54-ai-use-target", app, window: window, host: host, settle: 0.3)
+        if let card = chat.items.compactMap({ if case .tool(let t) = $0, t.isUseTarget { return t }; return nil }).first {
+            chat.decide(card, .allowOnce)
+            wait("AI 图形界面确认") { chat.items.contains { if case .tool(let t) = $0 { return !t.isUseTarget && t.decision == .pending }; return false } }
+        }
+        shot("\(prefix)-55-ai-gui", app, window: window, host: host, settle: 0.3)
+        chat.stop()
+        // 设置记住上次的模型与档位
+        if app.settings.aiMode != .confirmAll { problems.append("档位没有记到本机设置") }
+        if !app.settings.aiLastModel.hasSuffix(chat.modelId) { problems.append("模型没有记到本机设置") }
+        app.settings.aiMode = .confirmDangerous
+
+        // 打开历史对话
+        ai.conversations.removeAll { $0 === first }
+        if let s = ai.summaries.first(where: { $0.id == first.conversationId }) {
+            ai.open(s)
+            wait("AI 打开历史对话") { ai.current?.conversation != nil && !(ai.current?.items.isEmpty ?? true) }
+            // 展开第一条工具调用：命令、理由、风险原因、输出
+            if let t = ai.current?.items.compactMap({ if case .tool(let t) = $0 { return t }; return nil }).first { t.expanded = true }
+            shot("\(prefix)-56-ai-history", app, window: window, host: host, settle: 0.3)
+        } else { problems.append("历史里找不到刚才的对话") }
+        ai.newChat()
+    }
+
     static func shot(_ name: String, _ app: AppModel, window: NSWindow, host: NSHostingView<RootView>, settle: Double = 0.2) {
         if let only, !name.contains(only) { return }
         pump(settle)
@@ -612,40 +715,8 @@ enum SelfTest {
             checkFileClip(r, prefix: prefix, window: window, host: host)
         }
 
-        // 6. AI 智能体
-        app.selectHome(.ai)
-        app.ai.loadModels()
-        wait("AI 模型列表") { app.ai.models != nil }
-        app.ai.draftTargets = [AgentTarget(kind: .device, id: "dev-build"), AgentTarget(kind: .sshHost, id: "s-dbp")]
-        app.ai.draftPrompt = zh ? "build-server-01 的 /data 快满了，帮我看看是什么占的空间，清理一下旧备份。" : "/data on build-server-01 is almost full. Find out what uses the space and clean up old backups."
-        shot("\(prefix)-50-ai-new", app, window: window, host: host)
-        app.ai.draftTargets = [AgentTarget(kind: .device, id: "dev-build")]
-        let conv = app.ai.start()
-        if let conv {
-            wait("AI 确认卡片") { conv.items.contains { if case .tool(let t) = $0 { return t.decision == .pending }; return false } }
-            pump(0.2)
-        }
-        shot("\(prefix)-51-ai-approval", app, window: window, host: host, settle: 0.3)
-        if let conv, let card = conv.items.compactMap({ if case .tool(let t) = $0, t.decision == .pending { return t }; return nil }).first {
-            conv.decide(card, .allowOnce)
-            wait("AI 提问") { conv.items.contains { if case .ask = $0 { return true }; return false } }
-            if let ask = conv.items.compactMap({ if case .ask(let a) = $0 { return a }; return nil }).first {
-                conv.answer(ask, ask.options[0])
-                wait("AI 请求密码") { conv.activeSecret != nil }
-            }
-        }
-        shot("\(prefix)-52-ai-secret", app, window: window, host: host, settle: 0.3)
-        if let conv, let s = conv.activeSecret { conv.cancelSecret(s) }
-        // 图形界面目标：截图 + 点击标注图，每步确认档
-        app.selectHome(.ai)
-        app.ai.draftTargets = [AgentTarget(kind: .device, id: "dev-office")]
-        app.ai.draftMode = .confirmAll
-        app.ai.draftModel = "1:qwen3-vl-plus"
-        app.ai.draftPrompt = zh ? "把记事本里的内容保存一下" : "Save the Notepad content"
-        if let gui = app.ai.start() {
-            wait("AI 图形界面确认") { gui.items.contains { if case .tool(let t) = $0 { return t.decision == .pending }; return false } }
-        }
-        shot("\(prefix)-53-ai-gui", app, window: window, host: host, settle: 0.3)
+        // 6. AI 智能体（聊天式，docs/ai-chat-ui.md）
+        checkAI(prefix: prefix, zh: zh, app: app, window: window, host: host)
 
         // 7. 片段
         app.selectHome(.snippets)

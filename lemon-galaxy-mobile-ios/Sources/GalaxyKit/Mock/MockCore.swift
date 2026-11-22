@@ -296,6 +296,21 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
         return c
     }
 
+    override func accountActivity(limit: UInt32) async throws -> [ActivityItem] {
+        await delay(150)
+        let now = MockData.now
+        let me = currentUser()?.username ?? "demo"
+        let items: [ActivityItem] = [
+            ActivityItem(at: now - 120_000, action: "connection.start", actorName: me, targetType: "device", targetId: "dev-build",
+                         targetName: "build-server", ip: "198.51.100.23", detail: ""),
+            ActivityItem(at: now - 3_600_000, action: "connection.end", actorName: me, targetType: "device", targetId: "dev-office",
+                         targetName: zh ? "办公室电脑" : "Office PC", ip: "198.51.100.23", detail: ""),
+            ActivityItem(at: now - 7_200_000, action: "user.login", actorName: me, targetType: "user", targetId: "",
+                         targetName: "", ip: "198.51.100.23", detail: "iOS"),
+        ]
+        return Array(items.prefix(Int(limit)))
+    }
+
     // 手机端只能主控：没有本机被控服务
     override func host() -> HostService? { nil }
     override func deviceId() -> String { "dev-self" }
@@ -324,7 +339,8 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
     }
     override func listConversations() -> [ConversationSummary] {
         let all = lock.locked { Array(savedConversations.values) }
-        return all.map { $0.summary() }.sorted { $0.updatedAt > $1.updatedAt }
+        // 与内核一致：有了消息才落盘，还没发消息的新对话不在列表里
+        return all.filter { !$0.messages().isEmpty }.map { $0.summary() }.sorted { $0.updatedAt > $1.updatedAt }
     }
     override func openConversation(id: String, config: ConversationConfig?, listener: AgentListener) async throws -> AgentConversation {
         await delay(150)

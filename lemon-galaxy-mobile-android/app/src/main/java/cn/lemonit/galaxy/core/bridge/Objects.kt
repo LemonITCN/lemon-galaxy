@@ -86,13 +86,18 @@ interface GalaxyClientInterface {
     fun downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener)
 
     suspend fun aiModels(): AiModels
+
+    /** 新建对话；targets 可以为空（聊天式，设备用到时才连接）。 */
     suspend fun newConversation(config: ConversationConfig, listener: AgentListener): AgentConversationInterface
+
+    /** 账号最近的登录与连接记录（新的在前）。 */
+    suspend fun accountActivity(limit: UInt): List<ActivityItem>
 
     /** 本机保存的对话，按更新时间倒序。 */
     fun listConversations(): List<ConversationSummary>
 
-    /** 重新打开历史对话（模型、目标、档位由界面给出）。 */
-    suspend fun openConversation(id: String, config: ConversationConfig, listener: AgentListener): AgentConversationInterface
+    /** 重新打开历史对话。[config] 为空时用创建时保存的配置。 */
+    suspend fun openConversation(id: String, config: ConversationConfig?, listener: AgentListener): AgentConversationInterface
     fun deleteConversation(id: String)
 }
 
@@ -273,6 +278,15 @@ interface AgentConversationInterface {
 
     /** 发送一条消息；任务在内核后台运行，进度经监听器回调。 */
     fun send(text: String)
+
+    /** 带引用发送：设备与主机本对话内可直接使用；文件、目录、片段、端口映射、连接记录展开后随消息交给模型。 */
+    fun sendWithRefs(text: String, refs: List<ContextRef>)
+
+    /** 中途换模型（上下文保留）；模型未开通时抛 GalaxyException。 */
+    fun setModel(providerId: ULong, modelId: String)
+
+    /** 当前使用的模型。 */
+    fun model(): ConversationModel
 
     /** 回应确认卡片。 */
     fun decide(callId: String, decision: ApprovalDecision)

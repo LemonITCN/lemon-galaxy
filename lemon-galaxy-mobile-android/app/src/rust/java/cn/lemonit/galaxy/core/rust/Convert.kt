@@ -1,6 +1,10 @@
 package cn.lemonit.galaxy.core.rust
 
+import cn.lemonit.galaxy.core.bridge.ActivityItem
 import cn.lemonit.galaxy.core.bridge.AgentEvent
+import cn.lemonit.galaxy.core.bridge.ContextRef
+import cn.lemonit.galaxy.core.bridge.ContextRefKind
+import cn.lemonit.galaxy.core.bridge.ConversationModel
 import cn.lemonit.galaxy.core.bridge.AgentMessage
 import cn.lemonit.galaxy.core.bridge.AgentTarget
 import cn.lemonit.galaxy.core.bridge.AgentTargetKind
@@ -50,7 +54,11 @@ import cn.lemonit.galaxy.core.bridge.UserInfo
 import cn.lemonit.galaxy.core.bridge.VaultData
 import cn.lemonit.galaxy.core.bridge.VaultEntry
 import cn.lemonit.galaxy.core.bridge.VideoCodec
+import uniffi.galaxy_ffi.ActivityItem as FActivityItem
 import uniffi.galaxy_ffi.AgentEvent as FAgentEvent
+import uniffi.galaxy_ffi.ContextRef as FContextRef
+import uniffi.galaxy_ffi.ContextRefKind as FContextRefKind
+import uniffi.galaxy_ffi.ConversationModel as FConversationModel
 import uniffi.galaxy_ffi.AgentMessage as FAgentMessage
 import uniffi.galaxy_ffi.AgentTarget as FAgentTarget
 import uniffi.galaxy_ffi.AgentTargetKind as FAgentTargetKind
@@ -241,7 +249,16 @@ internal fun VaultEntry.toFfi() = FVaultEntry(id, folderId, sort, data.toFfi(), 
 internal fun FAiModels.toBridge() = AiModels(enabled, maxMode.toBridge(), items.map { AiModel(it.providerId, it.providerName, it.id, it.name, it.vision, it.tools, it.contextLength) })
 internal fun AgentTarget.toFfi() = FAgentTarget(kind.toFfi(), id)
 internal fun ConversationConfig.toFfi() = FConversationConfig(providerId, modelId, targets.map { it.toFfi() }, mode.toFfi(), planFirst, trustMinutes, title)
-internal fun FConversationSummary.toBridge() = ConversationSummary(id, title, modelId, targetNames, updatedAt)
+internal fun FAgentTarget.toBridge() = AgentTarget(AgentTargetKind.valueOf(kind.name), id)
+internal fun FConversationConfig.toBridge() = ConversationConfig(providerId, modelId, targets.map { it.toBridge() }, mode.toBridge(), planFirst, trustMinutes, title)
+internal fun FConversationSummary.toBridge() = ConversationSummary(id, title, modelId, targetNames, updatedAt, config?.toBridge())
+internal fun FConversationModel.toBridge() = ConversationModel(providerId, modelId)
+
+internal fun ContextRefKind.toFfi() = FContextRefKind.valueOf(name)
+internal fun FContextRefKind.toBridge() = ContextRefKind.valueOf(name)
+internal fun ContextRef.toFfi() = FContextRef(kind.toFfi(), targetId, id, label)
+internal fun FContextRef.toBridge() = ContextRef(kind.toBridge(), targetId, id, label)
+internal fun FActivityItem.toBridge() = ActivityItem(at, action, actorName, targetType, targetId, targetName, ip, detail)
 
 internal fun ApprovalDecision.toFfi(): FApprovalDecision = when (this) {
     ApprovalDecision.AllowOnce -> FApprovalDecision.AllowOnce
@@ -270,7 +287,7 @@ internal fun FAgentEvent.toBridge(): AgentEvent = when (this) {
 }
 
 internal fun FAgentMessage.toBridge(): AgentMessage = when (this) {
-    is FAgentMessage.User -> AgentMessage.User(text)
+    is FAgentMessage.User -> AgentMessage.User(text, refs.map { it.toBridge() })
     is FAgentMessage.Assistant -> AgentMessage.Assistant(id, text, thinking)
     is FAgentMessage.Tool -> AgentMessage.Tool(call.toBridge(), result?.toBridge())
 }
