@@ -1614,6 +1614,7 @@ dependencies = [
  "ndk-context",
  "openh264",
  "parking_lot 0.12.5",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1639,6 +1640,7 @@ dependencies = [
  "galaxy-net",
  "galaxy-proto",
  "hex",
+ "jpeg-encoder",
  "libc",
  "nix 0.29.0",
  "opus",
@@ -1652,6 +1654,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vt100 0.15.2",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

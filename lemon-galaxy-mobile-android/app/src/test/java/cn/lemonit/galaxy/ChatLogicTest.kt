@@ -2,6 +2,16 @@ package cn.lemonit.galaxy
 
 import cn.lemonit.galaxy.app.AiAvailability
 import cn.lemonit.galaxy.app.AiModelsState
+import cn.lemonit.galaxy.app.ChatItem
+import cn.lemonit.galaxy.app.PlanItem
+import cn.lemonit.galaxy.app.PlanStatus
+import cn.lemonit.galaxy.app.ToolPhase
+import cn.lemonit.galaxy.app.continueOfferKey
+import cn.lemonit.galaxy.app.isSimpleApproval
+import cn.lemonit.galaxy.app.latestPlanKeys
+import cn.lemonit.galaxy.app.offersContinue
+import cn.lemonit.galaxy.app.parsePlan
+import cn.lemonit.galaxy.app.planProgress
 import cn.lemonit.galaxy.app.ConversationListItem
 import cn.lemonit.galaxy.app.DateGroup
 import cn.lemonit.galaxy.app.HostsData
@@ -24,6 +34,8 @@ import cn.lemonit.galaxy.core.bridge.AiMode
 import cn.lemonit.galaxy.core.bridge.AiModel
 import cn.lemonit.galaxy.core.bridge.AiModels
 import cn.lemonit.galaxy.core.bridge.ContextRefKind
+import cn.lemonit.galaxy.core.bridge.RiskLevel
+import cn.lemonit.galaxy.core.bridge.ToolCallView
 import cn.lemonit.galaxy.core.mock.MockData
 import cn.lemonit.galaxy.ui.ai.Markdown
 import cn.lemonit.galaxy.ui.ai.MdBlock
@@ -254,5 +266,59 @@ class ChatLogicTest {
         )
         // 乘号、未闭合的星号不当斜体
         assertEquals(listOf(MdSpan.Plain("2 * 3 = 6 and *x")), Markdown.spans("2 * 3 = 6 and *x"))
+    }
+
+    // ---------- 任务清单、简单确认、继续 ----------
+
+    private fun tool(key: String, name: String) = ChatItem.Tool(
+        key, ToolCallView(key, name, "", "", "", "", RiskLevel.READ, emptyList(), "", null), false, ToolPhase.DONE, "", null, null,
+    )
+
+    @Test
+    fun planParse() {
+        val items = parsePlan("[x] 查磁盘\n[>] 清理缓存\n[ ] 重启服务\n\n不带前缀\n[ ] \n")
+        assertEquals(
+            listOf(
+                PlanItem("查磁盘", PlanStatus.DONE),
+                PlanItem("清理缓存", PlanStatus.IN_PROGRESS),
+                PlanItem("重启服务", PlanStatus.PENDING),
+                PlanItem("不带前缀", PlanStatus.PENDING),
+            ),
+            items,
+        )
+        assertEquals(1 to 4, planProgress(items))
+        assertEquals(emptyList<PlanItem>(), parsePlan(""))
+    }
+
+    @Test
+    fun planLatestPerTurn() {
+        val items = listOf(
+            ChatItem.User("u1", "a"),
+            tool("p1", "update_plan"), tool("c1", "run_command"), tool("p2", "update_plan"),
+            ChatItem.User("u2", "b"),
+            tool("p3", "update_plan"), tool("c2", "run_command"),
+            ChatItem.User("u3", "c"),
+        )
+        assertEquals(setOf("p2", "p3"), latestPlanKeys(items))
+        assertEquals(emptySet<String>(), latestPlanKeys(emptyList()))
+    }
+
+    @Test
+    fun simpleApproval() {
+        assertTrue(isSimpleApproval("use_target"))
+        assertTrue(isSimpleApproval("use_app"))
+        assertFalse(isSimpleApproval("app_click"))
+    }
+
+    @Test
+    fun continueOffer() {
+        val msg = "已连续执行 40 步，先暂停一下。回复「继续」可以接着做"
+        assertTrue(offersContinue(msg))
+        assertFalse(offersContinue("智能体在重复同一个操作，已暂停。可以补充说明后让它继续"))
+        val items = listOf(ChatItem.User("u1", "a"), ChatItem.Error("e1", msg))
+        assertEquals("e1", continueOfferKey(items, running = false))
+        assertNull(continueOfferKey(items, running = true))
+        assertNull(continueOfferKey(items + ChatItem.User("u2", "继续"), running = false))
+        assertNull(continueOfferKey(listOf(ChatItem.Error("e2", "网络错误")), running = false))
     }
 }

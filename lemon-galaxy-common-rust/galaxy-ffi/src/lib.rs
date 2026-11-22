@@ -13,6 +13,7 @@ mod client;
 #[cfg(feature = "decoder")]
 mod decode;
 mod host;
+mod local_ai;
 mod screen;
 mod session;
 mod ssh;

@@ -66,6 +66,9 @@ pub trait HostPlatform: Send + Sync {
     fn inject(&self, display_id: u32, event: InputEvent);
     fn screenshot(&self, display_id: u32, max_width: u32, max_height: u32) -> Option<ImageData>;
     fn ui_tree(&self, display_id: u32, max_nodes: u32) -> Option<String>;
+    /// AI 应用操作（docs/computer-use.md）：请求 JSON，返回给模型的文字与可选窗口截图；不支持返回 None。
+    /// 在后台线程调用，可以阻塞（单次最多约 10 秒）。支持时在 capabilities 里报 "computer_use"。
+    fn computer_use(&self, request_json: String) -> Option<ComputerUseReply>;
     fn clipboard_get(&self) -> Option<ClipboardData>;
     fn clipboard_set(&self, data: ClipboardData);
     /// 隐私屏：本机屏幕黑掉、本地键鼠失效，远端照常看到和操作。返回是否做到了（不支持返回 false）。

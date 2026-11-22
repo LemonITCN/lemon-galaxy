@@ -14,9 +14,11 @@ import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Keyboard
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lan
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.LockOpen
+import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Screenshot
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
@@ -24,6 +26,7 @@ import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.WebAsset
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
@@ -94,6 +97,19 @@ fun toolInfo(tool: String): Pair<Int?, ImageVector> = when (tool) {
     "list_snippets" -> R.string.tool_list_snippets to Icons.Rounded.Code
     "list_port_forwards" -> R.string.tool_list_port_forwards to Icons.Rounded.Lan
     "recent_activity" -> R.string.tool_recent_activity to Icons.Rounded.History
+    "use_app" -> R.string.tool_use_app to Icons.Rounded.WebAsset
+    "app_list" -> R.string.tool_app_list to Icons.Rounded.WebAsset
+    "app_state" -> R.string.tool_app_state to Icons.Rounded.WebAsset
+    "app_click" -> R.string.tool_app_click to Icons.Rounded.WebAsset
+    "app_set_value" -> R.string.tool_app_set_value to Icons.Rounded.WebAsset
+    "app_type" -> R.string.tool_app_type to Icons.Rounded.WebAsset
+    "app_key" -> R.string.tool_app_key to Icons.Rounded.WebAsset
+    "app_scroll" -> R.string.tool_app_scroll to Icons.Rounded.WebAsset
+    "app_action" -> R.string.tool_app_action to Icons.Rounded.WebAsset
+    "app_open" -> R.string.tool_app_open to Icons.Rounded.WebAsset
+    "web_fetch" -> R.string.tool_web_fetch to Icons.Rounded.Language
+    "system_info" -> R.string.tool_system_info to Icons.Rounded.Memory
+    "update_plan" -> R.string.tool_update_plan to Icons.Rounded.Checklist
     else -> null to Icons.AutoMirrored.Rounded.HelpOutline
 }
 

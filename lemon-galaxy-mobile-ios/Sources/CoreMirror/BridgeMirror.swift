@@ -191,6 +191,26 @@ public struct CaptureStarted: Equatable, Hashable {
 extension CaptureStarted: Sendable {}
 #endif
 
+public struct ComputerUseReply: Equatable, Hashable {
+    public var text: String
+    public var image: ImageData?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(text: String, image: ImageData?) {
+        self.text = text
+        self.image = image
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ComputerUseReply: Sendable {}
+#endif
+
 public struct ContextRef: Equatable, Hashable {
     public var kind: ContextRefKind
     /**
@@ -2254,6 +2274,12 @@ public protocol HostPlatform: AnyObject, Sendable {
     func screenshot(displayId: UInt32, maxWidth: UInt32, maxHeight: UInt32)  -> ImageData?
     
     func uiTree(displayId: UInt32, maxNodes: UInt32)  -> String?
+    
+    /**
+     * AI 应用操作（docs/computer-use.md）：请求 JSON，返回给模型的文字与可选窗口截图；不支持返回 None。
+     * 在后台线程调用，可以阻塞（单次最多约 10 秒）。支持时在 capabilities 里报 "computer_use"。
+     */
+    func computerUse(requestJson: String)  -> ComputerUseReply?
     
     func clipboardGet()  -> ClipboardData?
     

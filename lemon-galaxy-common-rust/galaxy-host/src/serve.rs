@@ -519,6 +519,21 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
                 MgmtResp::Error(PeerError::new("unsupported", "被控端不支持隐私屏"))
             }
         }
+        MgmtReq::ComputerUse { request, origin } => {
+            if !p.control {
+                return MgmtResp::Error(denied("没有控制键鼠的权限"));
+            }
+            let action = serde_json::from_str::<serde_json::Value>(&request).ok().and_then(|v| v["action"].as_str().map(String::from)).unwrap_or_default();
+            let read = matches!(action.as_str(), "list_apps" | "get_app_state" | "end");
+            let a = risk::Assessment { level: if read { risk::Risk::Read } else { risk::Risk::Normal }, reasons: vec![], commands: vec![] };
+            if let Err(e) = ai_gate(host, sess, &origin, &a, &format!("应用操作 {}", galaxy_agent::agent::truncate(&request, 300))) {
+                return MgmtResp::Error(e);
+            }
+            match tokio::task::spawn_blocking(move || platform.computer_use(&request)).await.ok().flatten() {
+                Some((text, image)) => MgmtResp::ComputerUse { text, image },
+                None => MgmtResp::Error(PeerError::new("unsupported", "被控端不支持应用操作")),
+            }
+        }
         MgmtReq::Inject { display, events, origin } => {
             if !p.control {
                 return MgmtResp::Error(denied("没有控制键鼠的权限"));

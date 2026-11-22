@@ -55,7 +55,8 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
         // 系统声音也走 ScreenCaptureKit，只要「屏幕录制」授权
         // client_cursor：画面里可以不画光标、单独报位置（主控端在本地画，跟手）
         if screen { caps += ["display", "screenshot", "audio", "client_cursor"] }
-        if ax { caps += ["input", "ui_tree"] }
+        // computer_use：AI 在后台操作某个应用（docs/computer-use.md），控件树与后台事件只要「辅助功能」，窗口截图另要「屏幕录制」
+        if ax { caps += ["input", "ui_tree", "computer_use"] }
         // 隐私屏：拦截本地键鼠要「辅助功能」；没有画面时开隐私屏没有意义
         if screen && ax { caps.append("privacy") }
         return caps
@@ -195,6 +196,12 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
     func uiTree(displayId: UInt32, maxNodes: UInt32) -> String? {
         guard SystemPermissions.accessibilityGranted else { return nil }
         return AXTreeExporter(displayId: displayId, maxNodes: Int(maxNodes)).export()
+    }
+
+    // MARK: AI 应用操作
+
+    func computerUse(requestJson: String) -> ComputerUseReply? {
+        ComputerUse.shared.handle(requestJson)
     }
 
     // MARK: 剪贴板
@@ -902,7 +909,10 @@ final class InputInjector {
     static func ownWindow(at p: CGPoint) -> Bool {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
         let shield = Int(CGShieldingWindowLevel())
+        // AI 光标不接收鼠标，跳过
+        let aiCursor = AICursorOverlay.windowNumbers
         for w in list {
+            if let n = w[kCGWindowNumber as String] as? Int, aiCursor.contains(n) { continue }
             guard let layer = w[kCGWindowLayer as String] as? Int, layer < shield,
                   let alpha = w[kCGWindowAlpha as String] as? Double, alpha > 0,
                   let b = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: b),

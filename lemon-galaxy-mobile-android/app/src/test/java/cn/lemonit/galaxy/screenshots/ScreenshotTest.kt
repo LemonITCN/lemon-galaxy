@@ -602,6 +602,7 @@ class ScreenshotTest {
         override fun onDelete() = Unit
         override fun onRetry() = Unit
         override fun onSend() = Unit
+        override fun onQuickReply(text: String) = Unit
         override fun onStop() = Unit
         override fun onModel(model: cn.lemonit.galaxy.core.bridge.AiModel) = Unit
         override fun onMode(mode: AiMode, trustMinutes: UInt?) = Unit

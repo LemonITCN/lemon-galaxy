@@ -5,7 +5,12 @@ import GalaxyKit
 struct ChatItemView: View {
     let item: ChatItem
     @ObservedObject var controller: ConversationController
+    /// 每一轮里最后一个任务清单的 callId（只有它展开）
+    var latestPlans: Set<String> = []
+    /// 要显示「继续」按钮的错误条目
+    var continueKey: String?
     @Environment(\.palette) private var p
+    @Environment(\.loc) private var loc
 
     var body: some View {
         switch item {
@@ -16,6 +21,8 @@ struct ChatItemView: View {
         case .tool(let t):
             if t.phase == .awaiting {
                 ApprovalCard(entry: t, controller: controller)
+            } else if t.call.tool == PlanChecklist.tool {
+                PlanCard(call: t.call, latest: latestPlans.contains(t.call.callId))
             } else {
                 ToolRow(entry: t)
             }
@@ -23,10 +30,16 @@ struct ChatItemView: View {
             AskCard(key: key, question: q, options: options, answer: answer, controller: controller)
         case .secret(let key, let prompt, _, let provided):
             SecretCard(key: key, prompt: prompt, provided: provided, controller: controller)
-        case .error(_, let message):
+        case .error(let key, let message):
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: "exclamationmark.circle.fill")
                 Text(message).textSelection(.enabled)
+                if key == continueKey {
+                    Button(loc("ai.continue")) { controller.send(ChatContinue.text) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(p.accent)
+                }
             }
             .font(.callout)
             .foregroundStyle(p.danger)
@@ -351,6 +364,63 @@ struct ToolRow: View {
     }
 }
 
+/// update_plan 的任务清单：每轮最后一份展开成勾选清单，前面的收成一行摘要（点开可看）。
+struct PlanCard: View {
+    let call: ToolCallView
+    let latest: Bool
+    @State private var toggled: Bool?
+    @Environment(\.palette) private var p
+    @Environment(\.loc) private var loc
+
+    var body: some View {
+        let items = PlanChecklist.parse(call.detail)
+        let progress = PlanChecklist.progress(items)
+        let expanded = toggled ?? latest
+        VStack(alignment: .leading, spacing: 8) {
+            Button { withAnimation(.easeInOut(duration: 0.15)) { toggled = !expanded } } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: Icons.tool(call.tool)).font(.footnote).foregroundStyle(p.secondaryText).frame(width: 18)
+                    Text(expanded ? loc("plan.title") : (call.summary.isEmpty ? loc("plan.title") : call.summary))
+                        .font(.footnote.weight(expanded ? .semibold : .regular))
+                        .foregroundStyle(p.text)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text("\(progress.done)/\(progress.total)").font(.caption.monospacedDigit()).foregroundStyle(p.tertiaryText)
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.caption2.weight(.semibold)).foregroundStyle(p.tertiaryText)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if expanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, it in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            icon(it.status).frame(width: 18)
+                            Text(it.text)
+                                .font(.footnote.weight(it.status == .inProgress ? .semibold : .regular))
+                                .foregroundStyle(it.status == .done ? p.tertiaryText : p.text)
+                                .strikethrough(it.status == .done, color: p.tertiaryText)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, expanded ? 12 : 0)
+        .padding(.vertical, expanded ? 10 : 4)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(expanded ? p.card : Color.clear))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(expanded ? p.border : Color.clear, lineWidth: 0.5))
+    }
+
+    @ViewBuilder private func icon(_ s: PlanChecklist.Status) -> some View {
+        switch s {
+        case .done: Image(systemName: "checkmark.circle.fill").font(.footnote).foregroundStyle(p.success)
+        case .inProgress: Image(systemName: "smallcircle.filled.circle").font(.footnote).foregroundStyle(p.accent)
+        case .pending: Image(systemName: "circle").font(.footnote).foregroundStyle(p.tertiaryText)
+        }
+    }
+}
+
 /// 需要确认的工具调用：醒目的卡片。use_target（连接某设备）只有「允许」「拒绝」。
 struct ApprovalCard: View {
     let entry: ToolEntry
@@ -364,20 +434,29 @@ struct ApprovalCard: View {
     @State private var editedCommand = ""
     @State private var zoomImage: ImageData?
 
-    private var isUseTarget: Bool { entry.call.tool == "use_target" }
+    private var isSimple: Bool { SimpleApproval.applies(to: entry.call.tool) }
+
+    private var simpleTitle: String {
+        let c = entry.call
+        if c.tool == "use_target" { return loc("approve.useTarget", c.targetName) }
+        return c.summary.isEmpty ? ToolText.name(c.tool, loc) : c.summary
+    }
 
     var body: some View {
         let c = entry.call
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Image(systemName: isUseTarget ? "link" : Icons.tool(c.tool)).foregroundStyle(p.warning)
-                Text(isUseTarget ? loc("approve.useTarget", c.targetName) : ToolText.name(c.tool, loc))
+                Image(systemName: Icons.tool(c.tool)).foregroundStyle(p.warning)
+                Text(isSimple ? simpleTitle : ToolText.name(c.tool, loc))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(p.text)
                 Spacer()
-                if !isUseTarget { RiskBadge(risk: c.risk) }
+                if !isSimple { RiskBadge(risk: c.risk) }
             }
-            if !isUseTarget {
+            if c.tool == "use_app" && !c.detail.isEmpty {
+                Text(c.detail).font(.caption).foregroundStyle(p.secondaryText)
+            }
+            if !isSimple {
                 if !c.targetName.isEmpty {
                     Label(c.targetName, systemImage: targetSymbol(c.targetId)).font(.caption).foregroundStyle(p.secondaryText)
                 }
@@ -423,7 +502,7 @@ struct ApprovalCard: View {
     }
 
     @ViewBuilder private func buttons(_ c: ToolCallView) -> some View {
-        if isUseTarget {
+        if isSimple {
             HStack(spacing: 8) {
                 Button { controller.decide(c.callId, .allowOnce) } label: { Text(loc("approve.allow")).frame(maxWidth: .infinity) }
                     .buttonStyle(.borderedProminent)

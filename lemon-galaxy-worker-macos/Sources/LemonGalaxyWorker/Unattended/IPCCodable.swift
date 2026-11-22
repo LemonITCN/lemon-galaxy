@@ -342,6 +342,9 @@ struct PScreenshot: Codable { var display: UInt32; var maxWidth: UInt32; var max
 struct PImageMeta: Codable { var mime: String; var width: UInt32; var height: UInt32 }
 struct PUiTree: Codable { var display: UInt32; var maxNodes: UInt32 }
 struct PText: Codable { var text: String? }
+/// AI 应用操作（docs/computer-use.md）：请求 JSON；应答文字为空表示代理不支持，图片放附件
+struct PComputerUse: Codable { var request: String }
+struct PComputerUseReply: Codable { var text: String?; var mime: String; var width: UInt32; var height: UInt32 }
 struct PClipboard: Codable { var data: ClipboardData? }
 struct POn: Codable { var on: Bool }
 struct PBool: Codable { var value: Bool }
@@ -451,6 +454,7 @@ enum IPCMethod {
     static let inject = "p.inject"
     static let screenshot = "p.screenshot"
     static let uiTree = "p.uiTree"
+    static let computerUse = "p.computerUse"
     static let clipboardGet = "p.clipboardGet"
     static let clipboardSet = "p.clipboardSet"
     static let privacy = "p.privacy"

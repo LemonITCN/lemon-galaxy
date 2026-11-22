@@ -54,7 +54,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import cn.lemonit.galaxy.R
 import cn.lemonit.galaxy.app.AiAvailability
+import cn.lemonit.galaxy.app.CONTINUE_TEXT
 import cn.lemonit.galaxy.app.ChatItem
+import cn.lemonit.galaxy.app.continueOfferKey
+import cn.lemonit.galaxy.app.isSimpleApproval
+import cn.lemonit.galaxy.app.latestPlanKeys
 import cn.lemonit.galaxy.core.bridge.AiMode
 import cn.lemonit.galaxy.core.bridge.AiModel
 import cn.lemonit.galaxy.core.bridge.ApprovalDecision
@@ -69,6 +73,9 @@ interface ChatActions {
     /** 重新调用 ai_models()。 */
     fun onRetry()
     fun onSend()
+
+    /** 不经输入框直接发一条消息（错误行上的「继续」）。 */
+    fun onQuickReply(text: String)
     fun onStop()
     fun onModel(model: AiModel)
     fun onMode(mode: AiMode, trustMinutes: UInt?)
@@ -172,6 +179,7 @@ fun ChatScreen(
                     onEdit = { editFor = it },
                     onAnswer = actions::onAnswer,
                     onSecret = actions::onSecret,
+                    onQuickReply = actions::onQuickReply,
                 )
             }
             if (!ready) AvailabilityLine(availability, loadError, actions::onRetry)
@@ -202,8 +210,11 @@ private fun MessageList(
     onEdit: (ChatItem.Tool) -> Unit,
     onAnswer: (String, String) -> Unit,
     onSecret: (String, CharArray) -> Unit,
+    onQuickReply: (String) -> Unit,
 ) {
     val listState = rememberLazyListState()
+    val latestPlans = remember(items) { latestPlanKeys(items) }
+    val continueKey = continueOfferKey(items, running)
     // 用户往上翻看时不自动滚动；回到底部后恢复跟随
     var follow by remember { mutableStateOf(true) }
     val dragged by listState.interactionSource.collectIsDraggedAsState()
@@ -234,16 +245,17 @@ private fun MessageList(
                             is ChatItem.Assistant -> AssistantMessage(item)
                             is ChatItem.Tool -> ToolEntry(
                                 item,
+                                latestPlan = item.key in latestPlans,
                                 onImage = onImage,
                                 onAllowOnce = { onDecide(item.key, ApprovalDecision.AllowOnce) },
                                 onAllowSimilar = { onDecide(item.key, ApprovalDecision.AllowSimilar) },
-                                // use_target 的拒绝不问理由
-                                onDeny = { if (item.call.tool == "use_target") onDecide(item.key, ApprovalDecision.Deny(null)) else onDeny(item.key) },
+                                // use_target / use_app 的拒绝不问理由
+                                onDeny = { if (isSimpleApproval(item.call.tool)) onDecide(item.key, ApprovalDecision.Deny(null)) else onDeny(item.key) },
                                 onEdit = { onEdit(item) },
                             )
                             is ChatItem.Ask -> AskCard(item) { onAnswer(item.key, it) }
                             is ChatItem.Secret -> SecretCard(item) { onSecret(item.key, it) }
-                            is ChatItem.Error -> ErrorLine(item.message)
+                            is ChatItem.Error -> ErrorLine(item.message, if (item.key == continueKey) ({ onQuickReply(CONTINUE_TEXT) }) else null)
                         }
                     }
                 }

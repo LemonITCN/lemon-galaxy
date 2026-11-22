@@ -138,6 +138,12 @@ pub enum LoginResult {
 // ---------------- 账号与设备 ----------------
 
 #[derive(uniffi::Record, Clone, Debug)]
+pub struct ComputerUseReply {
+    pub text: String,
+    pub image: Option<ImageData>,
+}
+
+#[derive(uniffi::Record, Clone, Debug)]
 pub struct CoreConfig {
     pub data_dir: String,
     pub cache_dir: String,

@@ -280,6 +280,14 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
         return (try? m.decode(PText.self))?.text
     }
 
+    /// 转给当前会话的代理（它在用户的图形会话里，能读控件树、投递事件、画 AI 光标）
+    func computerUse(requestJson: String) -> ComputerUseReply? {
+        guard let m = request(IPCMethod.computerUse, PComputerUse(request: requestJson), wait: 3, timeout: 30),
+              let r = try? m.decode(PComputerUseReply.self), let text = r.text else { return nil }
+        let image = m.blob.isEmpty ? nil : ImageData(mime: r.mime, data: m.blob, width: r.width, height: r.height)
+        return ComputerUseReply(text: text, image: image)
+    }
+
     func clipboardGet() -> ClipboardData? {
         guard let m = request(IPCMethod.clipboardGet, IPCEmpty(), timeout: 5) else { return nil }
         return (try? m.decode(PClipboard.self))?.data

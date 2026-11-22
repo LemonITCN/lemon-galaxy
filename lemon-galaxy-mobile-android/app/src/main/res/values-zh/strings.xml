@@ -464,6 +464,21 @@
     <string name="tool_list_snippets">查看命令片段</string>
     <string name="tool_list_port_forwards">查看端口映射</string>
     <string name="tool_recent_activity">查看连接记录</string>
+    <string name="tool_use_app">操作应用</string>
+    <string name="tool_app_list">查看应用</string>
+    <string name="tool_app_state">读取应用界面</string>
+    <string name="tool_app_click">点击</string>
+    <string name="tool_app_set_value">设置控件值</string>
+    <string name="tool_app_type">输入文字</string>
+    <string name="tool_app_key">按键</string>
+    <string name="tool_app_scroll">滚动</string>
+    <string name="tool_app_action">执行控件动作</string>
+    <string name="tool_app_open">打开应用</string>
+    <string name="tool_web_fetch">读取网页</string>
+    <string name="tool_system_info">系统概况</string>
+    <string name="tool_update_plan">任务清单</string>
+    <string name="plan_title">任务清单</string>
+    <string name="ai_continue">继续</string>
 
     <!-- 设置 -->
     <string name="settings_title">设置</string>

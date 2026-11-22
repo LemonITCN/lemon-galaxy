@@ -221,6 +221,13 @@ pub fn main() -> i32 {
             ToAgent::ClipboardSet { data } => {
                 let _ = ui_tx.send(UiJob::ClipboardSet(data));
             }
+            ToAgent::ComputerUse { id, request } => {
+                let out = out_tx.clone();
+                std::thread::spawn(move || {
+                    let (text, image) = galaxy_host::win_cu::handle(&request).unwrap_or_else(|| ("错误：这台电脑不支持应用操作".into(), None));
+                    let _ = out.send(FromAgent::ComputerUse { id, text, image });
+                });
+            }
             ToAgent::Screenshot { id, display, max_w, max_h } => {
                 let out = out_tx.clone();
                 std::thread::spawn(move || {

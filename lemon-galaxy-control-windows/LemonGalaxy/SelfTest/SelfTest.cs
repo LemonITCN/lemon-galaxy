@@ -410,6 +410,7 @@ internal static class SelfTest
         if (app.Settings.AiLastModel != "1:qwen3-vl-plus" || app.Settings.AiMode != AiMode.ConfirmAll)
             Problems.Add("AI：选过的模型与档位应记到本机设置里");
         ai.Current?.Stop();
+        if (ai.Current is { } gui) RenderAiLocalPlan(ai, gui, root, prefix, zh);
 
         // 引用了文件、片段、端口映射、连接记录的消息 + 历史列表分组
         ai.NewChat();
@@ -444,6 +445,55 @@ internal static class SelfTest
         ai.NewChat();
     }
 
+    /// <summary>本机目标、任务清单（update_plan，同一轮只展开最新一份）、应用操作确认（use_app）、应用工具行、连续执行暂停后的「继续」</summary>
+    private static void RenderAiLocalPlan(AiHub ai, AiChat chat, FrameworkElement root, string prefix, bool zh)
+    {
+        Wait("AI 停止", () => !chat.Running);
+        var local = ai.LocalRef;
+        var img = chat.Items.OfType<ToolItem>().Select(c => c.Result?.Image ?? c.Call.Image).FirstOrDefault(i => i != null);
+        ToolCallView Call(string id, string tool, string summary, string detail, RiskLevel risk = RiskLevel.Read, string[]? reasons = null, string reason = "")
+            => new(id, tool, AiHub.LocalId, local.Label, summary, detail, risk, reasons ?? Array.Empty<string>(), reason, null);
+        void Done(ToolCallView c, string summary, string output = "", ImageData? image = null)
+        {
+            chat.Handle(new AgentEvent.ToolProposed(c, false));
+            chat.Handle(new AgentEvent.ToolFinished(c.CallId, new ToolResultView(true, summary, output, image, false)));
+        }
+        Done(Call("st-p1", "update_plan", zh ? "任务清单 0/3：打开 Safari" : "Task list 0/3: Open Safari",
+            zh ? "[>] 打开 Safari\n[ ] 进入内网首页\n[ ] 找到值班表\n" : "[>] Open Safari\n[ ] Go to the intranet home page\n[ ] Find the on-call rota\n"), "0/3");
+        Done(Call("st-a1", "app_open", zh ? "打开 Safari" : "Open Safari", "Safari"), zh ? "已打开" : "Opened");
+        Done(Call("st-a2", "app_state", zh ? "读取 Safari 界面" : "Read the Safari window", "Safari"), zh ? "142 个控件" : "142 elements", "[1] AXWindow \"Safari\"\n  [2] AXTextField", img);
+        if (chat.Items.OfType<ToolItem>().LastOrDefault(c => c.Call.Tool == "app_state") is { } st) { st.Expanded = true; st.Notify(); }
+        Done(Call("st-p2", "update_plan", zh ? "任务清单 1/3：进入内网首页" : "Task list 1/3: Go to the intranet home page",
+            zh ? "[x] 打开 Safari\n[>] 进入内网首页\n[ ] 找到值班表\n" : "[x] Open Safari\n[>] Go to the intranet home page\n[ ] Find the on-call rota\n"), "1/3");
+        Done(Call("st-w", "web_fetch", "https://intranet.example.com/oncall", ""), "200");
+        Done(Call("st-s", "system_info", zh ? "查看系统信息" : "System info", ""), "Windows 11");
+        var plans = chat.Items.OfType<ToolItem>().Where(c => c.IsPlan).ToList();
+        if (plans.Count != 2 || !plans[0].PlanSuperseded || plans[1].PlanSuperseded) Problems.Add("AI：同一轮里只有最新的任务清单展开");
+        var parsed = AiViews.ParsePlan("[x] a\n[>] b\n[ ] c\n");
+        if (parsed.Count != 3 || parsed[0].Status != AiViews.PlanStatus.Done || parsed[1].Status != AiViews.PlanStatus.Active || parsed[2].Status != AiViews.PlanStatus.Pending)
+            Problems.Add("AI：任务清单解析不对");
+        chat.Handle(new AgentEvent.ToolProposed(Call("st-ua-app", "use_app", zh ? "AI 想操作「Safari」" : "AI wants to use “Safari”",
+            zh ? "允许后，本对话里 AI 可以读取「Safari」的界面并在里面点击、输入（不会占用你的鼠标键盘）" : "Once allowed, the agent can read Safari's window and click and type in it during this conversation (without taking over your mouse and keyboard)",
+            RiskLevel.Normal, new[] { zh ? "本对话第一次操作这个应用" : "First time this conversation uses this app" }, zh ? "要在地址栏输入内网地址" : "Needs to type the intranet address"), true));
+        Capture($"{prefix}-60a-ai-local-plan-app", root);
+        if (chat.Items.OfType<ToolItem>().LastOrDefault() is { IsUseApp: true } ua)
+        {
+            ua.Decision = ToolDecision.Approved;
+            chat.Handle(new AgentEvent.ToolFinished(ua.Call.CallId, new ToolResultView(true, zh ? "已允许" : "Allowed", "", null, false)));
+        }
+        else Problems.Add("AI：use_app 没有成为确认卡片");
+        chat.Handle(new AgentEvent.Error("已连续执行 40 步，先暂停一下。回复「继续」可以接着做"));
+        Capture($"{prefix}-60b-ai-continue", root);
+        if (WirePathOk() is { } bad) Problems.Add("AI：本机路径换算不对：" + bad);
+    }
+
+    private static string? WirePathOk()
+    {
+        foreach (var (a, b) in new[] { (@"C:\Users\alice\a.txt", "/C:/Users/alice/a.txt"), (@"d:\", "/D:/"), (@"\\nas\share\x", "//nas/share/x"), (@"\\?\C:\x", "/C:/x") })
+            if (AiPickers.WirePath(a) != b) return a + " → " + AiPickers.WirePath(a);
+        return null;
+    }
+
     /// <summary>@ 引用：光标前的 @ 片段识别（开头或空白后才算，邮件地址不算）与候选过滤</summary>
     private static void CheckMention(AiHub ai)
     {
@@ -454,7 +504,9 @@ internal static class SelfTest
         Expect(Mention.Find("@bu ild", 7) == null, "@ 片段里有空格还被识别");
         var c = ai.TargetCandidates("build");
         Expect(c.Count == 1 && c[0].Kind == ContextRefKind.Device && c[0].Id == "dev-build", "按 build 过滤的候选不对");
-        Expect(!ai.TargetCandidates("").Any(r => r.Id is "dev-self" or "dev-phone"), "候选里不应有本机与手机");
+        Expect(!ai.TargetCandidates("").Any(r => r.Id is "dev-self" or "dev-phone"), "候选里不应有本机设备记录与手机");
+        Expect(ai.TargetCandidates("").FirstOrDefault() is { Kind: ContextRefKind.Device, TargetId: "", Id: AiHub.LocalId }, "第一项应是本机");
+        Expect(ai.WhereName(AiHub.LocalId) == ai.LocalRef.Label, "本机的显示名不对");
         Expect(ai.TargetCandidates("db-").All(r => r.Kind == ContextRefKind.SshHost) && ai.TargetCandidates("db-").Count == 2, "按 db- 过滤应只有两台 SSH 主机");
     }
 

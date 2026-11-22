@@ -779,7 +779,7 @@ struct RefChip: View {
     }
 }
 
-/// @ 候选：账号里的设备（不含本机与手机）与 SSH 主机
+/// @ 候选：本机（排第一）、账号里的其他设备（不含手机）与 SSH 主机
 struct MentionPopup: View {
     let candidates: [RefCandidate]
     let selected: Int
@@ -800,7 +800,7 @@ struct MentionPopup: View {
                 Button { pick(c.ref) } label: {
                     HStack(spacing: 8) {
                         Group {
-                            if let pf = c.platform { PlatformGlyph(platform: pf, size: 11) } else { Image(systemName: "server.rack").font(.system(size: 11)) }
+                            if let pf = c.platform { PlatformGlyph(platform: pf, size: 11) } else { Image(systemName: c.ref.kind.icon).font(.system(size: 11)) }
                         }
                         .foregroundStyle(p.secondaryText).frame(width: 16)
                         Text(c.ref.label).font(.system(size: 12.5)).lineLimit(1)

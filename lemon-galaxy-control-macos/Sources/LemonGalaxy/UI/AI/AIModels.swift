@@ -199,7 +199,18 @@ final class AIHubModel: ObservableObject {
 
     // MARK: 引用
 
-    /// 可引用的设备（不含本机与手机）与 SSH 主机，按名称过滤
+    /// 本机：桌面端 AI 直接操作这台电脑，目标 ID 固定为 "local"，不用添加设备
+    static let localId = "local"
+
+    /// 「本机（电脑名）」：有本机设备记录时用它的显示名（可能设了别名），否则用系统里的电脑名
+    var localLabel: String {
+        let name = app.flatMap { a in a.devices.first(where: { $0.isSelf }).map { a.deviceName($0.id) } } ?? AppInfo.computerName
+        return L("ai.ref.local", name)
+    }
+
+    var localRef: ContextRef { ContextRef(kind: .device, targetId: "", id: Self.localId, label: localLabel) }
+
+    /// 可引用的目标：本机排第一，其后是账号里的设备（不含本机与手机）与 SSH 主机，按名称过滤
     func candidates(_ query: String = "") -> [RefCandidate] {
         guard let app else { return [] }
         var out: [RefCandidate] = []
@@ -221,7 +232,12 @@ final class AIHubModel: ObservableObject {
             }
         }
         // 在线的排前面，其余按名称
-        return out.sorted { a, b in a.online != b.online ? a.online : a.ref.label.localizedStandardCompare(b.ref.label) == .orderedAscending }
+        out.sort { a, b in a.online != b.online ? a.online : a.ref.label.localizedStandardCompare(b.ref.label) == .orderedAscending }
+        let local = localRef
+        if q.isEmpty || local.label.localizedCaseInsensitiveContains(q) || AppInfo.computerName.localizedCaseInsensitiveContains(q) {
+            out.insert(RefCandidate(ref: local, platform: nil, online: true), at: 0)
+        }
+        return out
     }
 
     /// 从主机页「AI」入口带过来的目标
@@ -235,6 +251,7 @@ final class AIHubModel: ObservableObject {
     /// 设备 ID 或 SSH 主机条目 ID → 显示名
     func targetName(_ id: String) -> String {
         guard let app else { return id }
+        if id == Self.localId { return localLabel }
         if app.device(id) != nil { return app.deviceName(id) }
         if app.entry(id) != nil { return app.sshLabel(id) }
         return id
@@ -286,6 +303,10 @@ final class ToolCardModel: ObservableObject, Identifiable {
     }
 
     var isUseTarget: Bool { call.tool == "use_target" }
+    /// 第一次操作某个应用前的确认（与 use_target 一样只有允许、拒绝）
+    var isUseApp: Bool { call.tool == "use_app" }
+    var isSimpleApproval: Bool { isUseTarget || isUseApp }
+    var isPlan: Bool { call.tool == "update_plan" }
     var failed: Bool {
         if case .denied = decision { return true }
         guard let r = result else { return false }
@@ -581,6 +602,27 @@ final class AIConversationModel: ObservableObject, Identifiable {
     var pendingSecret: SecretRequestModel? {
         for case .secret(let s) in items.reversed() where !s.done && !s.cancelled { return s }
         return nil
+    }
+
+    /// 一轮里后面还有更新的任务清单：这一份收成一行摘要
+    func isPlanSuperseded(_ card: ToolCardModel) -> Bool {
+        guard let i = items.firstIndex(where: { $0.id == card.id }) else { return false }
+        for item in items[(i + 1)...] {
+            switch item {
+            case .user: return false
+            case .tool(let t) where t.isPlan: return true
+            default: continue
+            }
+        }
+        return false
+    }
+
+    /// 智能体连续执行太多步暂停后，错误提示旁的「继续」直接发一条「继续」
+    func sendQuick(_ t: String) {
+        guard let conversation, !running, !connecting else { return }
+        appendUser(t, [])
+        running = true
+        conversation.sendWithRefs(text: t, refs: [])
     }
 
     var hasPendingApproval: Bool {

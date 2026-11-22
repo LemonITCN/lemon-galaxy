@@ -570,6 +570,8 @@ internal static class AiViews
                 return new Region(() => ThinkingView(t)).On(t);
             case ReplyItem r:
                 return ReplyView(r);
+            case ToolItem { IsPlan: true } plan:
+                return new Region(() => PlanView(plan)).Keyed(() => (plan.Expanded, plan.PlanSuperseded)).On(plan);
             case ToolItem c:
                 return new Region(() => ToolView(app, chat, c)).Keyed(() => (c.Decision, c.Editing, c.Denying, c.Phase, c.Expanded, c.OutputExpanded, c.Output.Length, c.Result != null)).On(c);
             case AskItem a:
@@ -577,9 +579,86 @@ internal static class AiViews
             case SecretItem s:
                 return new Region(() => SecretView(app, chat, s)).Keyed(() => (s.Done, s.Cancelled)).On(s);
             case ErrorItem e:
-                return K.Row(8, K.Top(K.Margin(K.Icon("alertCircle", 15, Th.Danger), 0, 1, 0, 0)), K.Grow(K.Text(e.Text, 13, Th.Danger, wrap: true)));
+                return new Region(() => ErrorView(chat, e)).Keyed(() => CanContinue(chat, e)).On(chat, chat.ItemsChanged);
         }
         return K.Gap(0);
+    }
+
+    /// <summary>连续执行太多步暂停：提示里让回复「继续」，只在最后一条、没在运行时旁边给个按钮</summary>
+    private static bool CanContinue(AiChat chat, ErrorItem e)
+        => e.Text.Contains("「继续」") && chat.Items.Count > 0 && chat.Items[chat.Items.Count - 1] == e && !chat.Running && chat.Conversation != null;
+
+    private static FrameworkElement ErrorView(AiChat chat, ErrorItem e)
+    {
+        UIElement? go = null;
+        if (CanContinue(chat, e))
+        {
+            var b = K.TintButton(L.T("ai.continue"), () => chat.SendQuick("继续"), Th.P.Accent, "play", 22);
+            b.VerticalAlignment = VerticalAlignment.Top;
+            b.Margin = new Thickness(0, -2, 0, 0);
+            go = b;
+        }
+        return K.Row(8, K.Top(K.Margin(K.Icon("alertCircle", 15, Th.Danger), 0, 1, 0, 0)), K.Grow(K.Text(e.Text, 13, Th.Danger, wrap: true)), go);
+    }
+
+    // ---------- 任务清单（update_plan） ----------
+
+    internal enum PlanStatus { Done, Active, Pending }
+
+    /// <summary>detail 每行一项，前缀 "[x] " 已完成、"[>] " 进行中、"[ ] " 待做</summary>
+    internal static List<(PlanStatus Status, string Text)> ParsePlan(string detail)
+    {
+        var list = new List<(PlanStatus, string)>();
+        foreach (var raw in detail.Replace("\r", "").Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0) continue;
+            if (line.StartsWith("[x]", StringComparison.OrdinalIgnoreCase)) list.Add((PlanStatus.Done, line.Substring(3).Trim()));
+            else if (line.StartsWith("[>]", StringComparison.Ordinal)) list.Add((PlanStatus.Active, line.Substring(3).Trim()));
+            else if (line.StartsWith("[ ]", StringComparison.Ordinal)) list.Add((PlanStatus.Pending, line.Substring(3).Trim()));
+            else list.Add((PlanStatus.Pending, line));
+        }
+        return list;
+    }
+
+    /// <summary>任务清单卡片：一轮里只有最新的一份展开，之前的收成一行摘要（点开可看）</summary>
+    private static FrameworkElement PlanView(ToolItem c)
+    {
+        var open = c.PlanSuperseded ? c.Expanded : !c.Expanded;
+        var items = ParsePlan(c.Call.Detail);
+        var title = c.Call.Summary.Length > 0 ? c.Call.Summary.Replace('\n', ' ') : ToolLabel(c.Call.Tool);
+        var head = new Btn
+        {
+            CornerRadius = new CornerRadius(7), Padding = new Thickness(8, 5, 8, 5), HoverBrush = Th.Hover, HorizontalAlignment = HorizontalAlignment.Stretch,
+            Child = K.Row(8,
+                K.Icon("checklist", 13, Th.Tertiary, 1.9),
+                K.Grow(K.Text(title, 12.5, open ? Th.Text : Th.Secondary, open ? FontWeights.Medium : FontWeights.Normal)),
+                K.Icon(open ? "chevronDown" : "chevronRight", 10, Th.Tertiary, 2.4)),
+        };
+        head.UpdateLook();
+        K.Tip(head, ToolLabel(c.Call.Tool));
+        head.Click += () => { c.Expanded = !c.Expanded; c.Notify(); };
+        if (!open || items.Count == 0) return head;
+        var rows = new List<UIElement?>();
+        foreach (var (st, text) in items)
+        {
+            var icon = st switch
+            {
+                PlanStatus.Done => K.Icon("checkCircle", 14, Th.Success, 2),
+                PlanStatus.Active => K.Icon("circleDot", 14, Th.Accent, 2),
+                _ => K.Icon("circle", 14, Th.Tertiary, 1.8),
+            };
+            var t = K.Text(text, 12.5, st == PlanStatus.Pending ? Th.Secondary : st == PlanStatus.Done ? Th.Tertiary : Th.Text,
+                st == PlanStatus.Active ? FontWeights.Medium : FontWeights.Normal, wrap: true);
+            if (st == PlanStatus.Done) t.TextDecorations = TextDecorations.Strikethrough;
+            rows.Add(K.Row(9, K.Top(K.Margin(icon, 0, 1, 0, 0)), K.Grow(t)));
+        }
+        var body = new Border
+        {
+            Background = Th.Card, CornerRadius = new CornerRadius(9), BorderBrush = Th.Border, BorderThickness = new Thickness(1),
+            Padding = new Thickness(12, 10, 12, 10), Margin = new Thickness(29, 2, 0, 4), Child = K.Col(7, rows),
+        };
+        return K.Col(2, head, body);
     }
 
     private static FrameworkElement ReplyView(ReplyItem r)
@@ -625,6 +704,10 @@ internal static class AiViews
         "download_file" => "download",
         "wait" => "clock",
         "use_target" => "link",
+        "use_app" or "app_list" or "app_state" or "app_click" or "app_set_value" or "app_type" or "app_key" or "app_scroll" or "app_action" or "app_open" => "appWindow",
+        "web_fetch" => "globe",
+        "system_info" => "chip",
+        "update_plan" => "checklist",
         "list_devices" => "server",
         "list_snippets" => "code",
         "list_port_forwards" => "forward",
@@ -692,7 +775,8 @@ internal static class AiViews
         var call = c.Call;
         var col = new List<UIElement?>();
         var command = c.EditedCommand ?? (call.Detail.Length > 0 ? call.Detail : call.Summary);
-        if (command.Length > 0 && !c.IsUseTarget) col.Add(CommandBox(call.Tool, command));
+        if (command.Length > 0 && !c.IsSimpleApproval) col.Add(CommandBox(call.Tool, command));
+        if (c.IsUseApp && call.Detail.Length > 0) col.Add(K.Text(call.Detail, 12.5, Th.Secondary, wrap: true));
         if (call.ModelReason.Length > 0) col.Add(K.Row(7, K.Top(K.Margin(K.Icon("chatText", 12, Th.Tertiary), 0, 2, 0, 0)), K.Grow(K.Text(call.ModelReason, 12.5, Th.Secondary, wrap: true))));
         if (call.RiskReasons.Length > 0 || call.Risk is RiskLevel.Dangerous or RiskLevel.Unknown or RiskLevel.Forbidden) col.Add(RiskRow(call));
         if (call.Image != null) col.Add(Thumb(chat, call.Image));
@@ -756,12 +840,19 @@ internal static class AiViews
     private static FrameworkElement ApprovalCard(AppModel app, AiChat chat, ToolItem c)
     {
         var call = c.Call;
-        var rc = c.IsUseTarget ? Th.P.Accent : Img.RiskColor(call.Risk);
+        var rc = c.IsSimpleApproval ? Th.P.Accent : Img.RiskColor(call.Risk);
         var col = new List<UIElement?>();
         if (c.IsUseTarget)
         {
-            col.Add(K.Row(9, K.Icon(app.Device(call.TargetId) is { } d ? K.PlatformIcon(d.Platform) : "server", 16, Th.Text, 1.9),
+            col.Add(K.Row(9, K.Icon(app.Device(call.TargetId) is { } d ? K.PlatformIcon(d.Platform) : call.TargetId == AiHub.LocalId ? "display" : "server", 16, Th.Text, 1.9),
                 K.Grow(K.Semi(L.T("ai.useTarget.title", call.TargetName), 14))));
+        }
+        else if (c.IsUseApp)
+        {
+            // 第一次操作某个应用：标题就是内核给的摘要（「AI 想操作「Safari」」），下面是说明
+            col.Add(K.Row(9, K.Icon("appWindow", 16, Th.Text, 1.9), K.Semi(call.Summary.Length > 0 ? call.Summary : ToolLabel(call.Tool), 14),
+                call.TargetName.Length > 0 ? K.Row(4, K.Icon("arrowRight", 11, Th.Tertiary), K.Text(call.TargetName, 13, Th.Secondary)) : null));
+            if (call.Detail.Length > 0) col.Add(K.Text(call.Detail, 12.5, Th.Secondary, wrap: true));
         }
         else
         {
@@ -772,7 +863,7 @@ internal static class AiViews
         }
         if (call.Image != null) col.Add(Thumb(chat, call.Image));
         if (call.RiskReasons.Length > 0)
-            col.Add(K.Col(3, call.RiskReasons.Select(r => (UIElement?)K.Row(7, K.Top(K.Margin(K.Icon(c.IsUseTarget ? "info" : Img.RiskIcon(call.Risk), 12, Th.B(rc)), 0, 2, 0, 0)), K.Grow(K.Text(r, 12.5, Th.Text, wrap: true))))));
+            col.Add(K.Col(3, call.RiskReasons.Select(r => (UIElement?)K.Row(7, K.Top(K.Margin(K.Icon(c.IsSimpleApproval ? "info" : Img.RiskIcon(call.Risk), 12, Th.B(rc)), 0, 2, 0, 0)), K.Grow(K.Text(r, 12.5, Th.Text, wrap: true))))));
         if (call.ModelReason.Length > 0)
             col.Add(K.Row(7, K.Top(K.Margin(K.Icon("chatText", 12, Th.Tertiary), 0, 2, 0, 0)), K.Grow(K.Text(call.ModelReason, 12.5, Th.Secondary, wrap: true))));
         col.Add(ApprovalButtons(chat, c));
@@ -785,7 +876,7 @@ internal static class AiViews
 
     private static FrameworkElement ApprovalButtons(AiChat chat, ToolItem c)
     {
-        if (c.IsUseTarget)
+        if (c.IsSimpleApproval)
             return K.Row(8, K.PrimaryButton(L.T("ai.approve.allow"), () => chat.Decide(c, new ApprovalDecision.AllowOnce())),
                 K.SecondaryButton(L.T("ai.approve.deny"), () => chat.Decide(c, new ApprovalDecision.Deny(null)), destructive: true));
         if (c.Editing)
@@ -993,7 +1084,7 @@ internal sealed class Mention
                 Height = 32, CornerRadius = new CornerRadius(6), Padding = new Thickness(8, 0, 10, 0), Focusable = false,
                 Normal = active ? Th.Hover2 : Brushes.Transparent, HoverBrush = Th.Hover2,
                 Child = K.Row(9, K.Icon(AiPickers.RefIcon(app, r), 14, Th.Secondary, 1.8), K.Grow(K.Text(r.Label, 13)),
-                    d != null ? K.StatusDot(K.DotOf(d), 7, Th.Card) : K.Text("SSH", 10, Th.Tertiary, FontWeights.SemiBold)),
+                    d != null ? K.StatusDot(K.DotOf(d), 7, Th.Card) : AiHub.IsLocal(r) ? K.StatusDot(DotState.Online, 7, Th.Card) : K.Text("SSH", 10, Th.Tertiary, FontWeights.SemiBold)),
             };
             b.UpdateLook();
             var pick = r;

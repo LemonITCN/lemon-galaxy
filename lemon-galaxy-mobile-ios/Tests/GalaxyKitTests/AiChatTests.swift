@@ -154,3 +154,54 @@ final class AiChatTests: XCTestCase {
         XCTAssertEqual(MarkdownParser.parse(""), [])
     }
 }
+
+final class AiChatAgentUiTests: XCTestCase {
+    private func call(_ id: String, _ tool: String, detail: String = "") -> ChatItem {
+        .tool(ToolEntry(call: ToolCallView(callId: id, tool: tool, targetId: "", targetName: "", summary: "", detail: detail,
+                                           risk: .read, riskReasons: [], modelReason: "", image: nil),
+                        needsApproval: false, phase: .done))
+    }
+
+    func testPlanParse() {
+        let items = PlanChecklist.parse("[x] 查磁盘\n[>] 清理缓存\n[ ] 重启服务\n\n不带前缀\n[ ] \n")
+        XCTAssertEqual(items, [
+            .init(text: "查磁盘", status: .done),
+            .init(text: "清理缓存", status: .inProgress),
+            .init(text: "重启服务", status: .pending),
+            .init(text: "不带前缀", status: .pending),
+        ])
+        let p = PlanChecklist.progress(items)
+        XCTAssertEqual(p.done, 1)
+        XCTAssertEqual(p.total, 4)
+        XCTAssertEqual(PlanChecklist.parse(""), [])
+    }
+
+    func testPlanLatestPerTurn() {
+        let items: [ChatItem] = [
+            .user(key: "u1", text: "a", refs: []),
+            call("p1", "update_plan"), call("c1", "run_command"), call("p2", "update_plan"),
+            .user(key: "u2", text: "b", refs: []),
+            call("p3", "update_plan"), call("c2", "run_command"),
+            .user(key: "u3", text: "c", refs: []),
+        ]
+        XCTAssertEqual(PlanChecklist.latestIds(items), ["p2", "p3"])
+        XCTAssertEqual(PlanChecklist.latestIds([]), [])
+    }
+
+    func testSimpleApproval() {
+        XCTAssertTrue(SimpleApproval.applies(to: "use_target"))
+        XCTAssertTrue(SimpleApproval.applies(to: "use_app"))
+        XCTAssertFalse(SimpleApproval.applies(to: "app_click"))
+    }
+
+    func testContinueOffer() {
+        let msg = "已连续执行 40 步，先暂停一下。回复「继续」可以接着做"
+        XCTAssertTrue(ChatContinue.offered(by: msg))
+        XCTAssertFalse(ChatContinue.offered(by: "智能体在重复同一个操作，已暂停。可以补充说明后让它继续"))
+        let items: [ChatItem] = [.user(key: "u1", text: "a", refs: []), .error(key: "e1", message: msg)]
+        XCTAssertEqual(ChatContinue.offerKey(items, running: false), "e1")
+        XCTAssertNil(ChatContinue.offerKey(items, running: true))
+        XCTAssertNil(ChatContinue.offerKey(items + [.user(key: "u2", text: "继续", refs: [])], running: false))
+        XCTAssertNil(ChatContinue.offerKey([.error(key: "e2", message: "网络错误")], running: false))
+    }
+}

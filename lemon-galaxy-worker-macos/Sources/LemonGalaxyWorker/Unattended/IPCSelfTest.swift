@@ -300,6 +300,8 @@ enum IPCSelfTest {
         check("读剪贴板（图片）", dp.clipboardGet() == .image(image: img))
         check("截图走附件完整到达", dp.screenshot(displayId: 1, maxWidth: 800, maxHeight: 600) == fa.shot)
         check("控件树", dp.uiTree(displayId: 1, maxNodes: 10) == "{\"tag\":161}")
+        check("AI 应用操作（文字）", dp.computerUse(requestJson: "{\"action\":\"list_apps\"}")?.text == "cu:161:{\"action\":\"list_apps\"}")
+        check("AI 应用操作（附图）", dp.computerUse(requestJson: "shot")?.image == fa.shot)
         check("打开隐私屏", dp.setPrivacy(on: true) && fa.privacy)
         let audio = TestAudio()
         check("开始采集声音", dp.startAudio(sink: audio))
@@ -619,6 +621,9 @@ final class FakePlatform: HostPlatform, @unchecked Sendable {
     func inject(displayId: UInt32, event: InputEvent) { lock.locked { _injected.append(event) } }
     func screenshot(displayId: UInt32, maxWidth: UInt32, maxHeight: UInt32) -> ImageData? { shot }
     func uiTree(displayId: UInt32, maxNodes: UInt32) -> String? { "{\"tag\":\(tag)}" }
+    func computerUse(requestJson: String) -> ComputerUseReply? {
+        ComputerUseReply(text: "cu:\(tag):" + requestJson, image: requestJson.contains("shot") ? shot : nil)
+    }
     func clipboardGet() -> ClipboardData? { clipboard }
     func clipboardSet(data: ClipboardData) { clipboard = data }
     func setPrivacy(on: Bool) -> Bool { lock.locked { _privacy = on }; return true }

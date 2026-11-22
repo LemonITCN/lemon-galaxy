@@ -37,6 +37,8 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Lightbulb
+import androidx.compose.material.icons.rounded.RadioButtonChecked
+import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -72,12 +74,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import cn.lemonit.galaxy.R
 import cn.lemonit.galaxy.app.ChatItem
+import cn.lemonit.galaxy.app.PLAN_TOOL
+import cn.lemonit.galaxy.app.PlanStatus
+import cn.lemonit.galaxy.app.isSimpleApproval
+import cn.lemonit.galaxy.app.parsePlan
+import cn.lemonit.galaxy.app.planProgress
 import cn.lemonit.galaxy.app.ToolPhase
 import cn.lemonit.galaxy.core.bridge.ContextRef
 import cn.lemonit.galaxy.core.bridge.ImageData
@@ -204,10 +212,11 @@ fun TypingIndicator() {
     CircularProgressIndicator(Modifier.padding(vertical = 6.dp).size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
-/** 工具调用：需要确认时是醒目的卡片，否则是一行紧凑的条目（点击展开）。 */
+/** 工具调用：需要确认时是醒目的卡片，任务清单是勾选清单，否则是一行紧凑的条目（点击展开）。[latestPlan] 为这一轮最后一份任务清单。 */
 @Composable
 fun ToolEntry(
     item: ChatItem.Tool,
+    latestPlan: Boolean,
     onImage: (ImageData) -> Unit,
     onAllowOnce: () -> Unit,
     onAllowSimilar: () -> Unit,
@@ -215,7 +224,9 @@ fun ToolEntry(
     onEdit: () -> Unit,
 ) {
     if (item.phase == ToolPhase.AWAITING && item.needsApproval) {
-        if (item.call.tool == "use_target") ConnectCard(item, onAllow = onAllowOnce, onDeny = onDeny) else ApprovalCard(item, onImage, onAllowOnce, onAllowSimilar, onDeny, onEdit)
+        if (isSimpleApproval(item.call.tool)) ConnectCard(item, onAllow = onAllowOnce, onDeny = onDeny) else ApprovalCard(item, onImage, onAllowOnce, onAllowSimilar, onDeny, onEdit)
+    } else if (item.call.tool == PLAN_TOOL) {
+        PlanCard(item, latestPlan)
     } else {
         ToolRow(item, onImage)
     }
@@ -266,6 +277,67 @@ private fun ToolRow(item: ChatItem.Tool, onImage: (ImageData) -> Unit) {
             PhaseIcon(item.phase)
         }
         if (expanded) ToolDetail(item, onImage, Modifier.padding(start = 32.dp, end = 10.dp, bottom = 10.dp))
+    }
+}
+
+/** update_plan 的任务清单：每轮最后一份展开成勾选清单，前面的收成一行摘要（点开可看）。 */
+@Composable
+private fun PlanCard(item: ChatItem.Tool, latest: Boolean) {
+    val call = item.call
+    val plan = remember(call.detail) { parsePlan(call.detail) }
+    val (done, total) = planProgress(plan)
+    var toggled by remember { mutableStateOf<Boolean?>(null) }
+    val expanded = toggled ?: latest
+    val shape = RoundedCornerShape(12.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent)
+            .border(1.dp, if (expanded) MaterialTheme.colorScheme.outlineVariant else Color.Transparent, shape)
+            .animateContentSize(),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().clickable { toggled = !expanded }.padding(horizontal = 8.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(toolInfo(call.tool).second, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (expanded || call.summary.isBlank()) stringResource(R.string.plan_title) else call.summary,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (expanded) FontWeight.SemiBold else null,
+                color = if (expanded) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text("$done/$total", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.width(4.dp))
+            Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(18.dp))
+        }
+        if (expanded) {
+            Column(Modifier.padding(start = 8.dp, end = 10.dp, bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                plan.forEach { p ->
+                    Row(verticalAlignment = Alignment.Top) {
+                        when (p.status) {
+                            PlanStatus.DONE -> Icon(Icons.Rounded.CheckCircle, stringResource(R.string.tool_done), tint = Galaxy.colors.success, modifier = Modifier.padding(top = 2.dp).size(16.dp))
+                            PlanStatus.IN_PROGRESS -> Icon(Icons.Rounded.RadioButtonChecked, stringResource(R.string.tool_running), tint = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 2.dp).size(16.dp))
+                            PlanStatus.PENDING -> Icon(Icons.Rounded.RadioButtonUnchecked, null, tint = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(top = 2.dp).size(16.dp))
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            p.text,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (p.status == PlanStatus.IN_PROGRESS) FontWeight.SemiBold else null,
+                            color = if (p.status == PlanStatus.DONE) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface,
+                            textDecoration = if (p.status == PlanStatus.DONE) TextDecoration.LineThrough else null,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -424,7 +496,7 @@ private fun ApprovalCard(
     }
 }
 
-/** use_target：「AI 想连接 某设备」，只有允许与拒绝。 */
+/** use_target：「AI 想连接 某设备」；use_app：标题用摘要「AI 想操作「某应用」」。只有允许与拒绝。 */
 @Composable
 private fun ConnectCard(item: ChatItem.Tool, onAllow: () -> Unit, onDeny: () -> Unit) {
     val call = item.call
@@ -435,7 +507,7 @@ private fun ConnectCard(item: ChatItem.Tool, onAllow: () -> Unit, onDeny: () -> 
                 Icon(toolInfo(call.tool).second, null, tint = accent, modifier = Modifier.size(17.dp))
             }
             Spacer(Modifier.width(10.dp))
-            Text(stringResource(R.string.ai_wants_connect, call.targetName), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            Text(if (call.tool == "use_target") stringResource(R.string.ai_wants_connect, call.targetName) else call.summary.ifBlank { toolInfo(call.tool).first?.let { stringResource(it) } ?: call.tool }, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
         }
         if (call.detail.isNotBlank()) Text(call.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (call.modelReason.isNotBlank()) LabeledLine(stringResource(R.string.tool_model_reason), call.modelReason)
@@ -525,13 +597,21 @@ fun SecretCard(item: ChatItem.Secret, onSubmit: (CharArray) -> Unit) {
     }
 }
 
-/** 错误：消息流里一行红色提示。 */
+/** 错误：消息流里一行红色提示。[onContinue] 不为空时后面跟一个小的「继续」按钮（连续执行太多步后暂停）。 */
 @Composable
-fun ErrorLine(message: String) {
+fun ErrorLine(message: String, onContinue: (() -> Unit)? = null) {
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
         Icon(Icons.Rounded.ErrorOutline, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 2.dp).size(16.dp))
         Spacer(Modifier.width(6.dp))
-        Text(message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+        Text(message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f, fill = false))
+        if (onContinue != null) {
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(
+                onClick = onContinue,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                modifier = Modifier.height(28.dp),
+            ) { Text(stringResource(R.string.ai_continue), style = MaterialTheme.typography.labelLarge) }
+        }
     }
 }
 

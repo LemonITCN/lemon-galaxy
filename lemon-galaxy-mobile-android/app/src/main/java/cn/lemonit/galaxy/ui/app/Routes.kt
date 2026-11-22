@@ -771,6 +771,10 @@ fun ChatRoute(conversationId: String?, initialTarget: TargetRef?, container: App
                 }
             }
 
+            override fun onQuickReply(text: String) {
+                c?.send(text)
+            }
+
             override fun onStop() {
                 c?.stop()
             }

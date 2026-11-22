@@ -38,6 +38,11 @@ pub trait HostPlatform: Send + Sync {
     fn ui_tree(&self, _display: u32, _max_nodes: u32) -> Option<String> {
         None
     }
+    /// AI 应用操作（docs/computer-use.md）：请求 JSON → (给模型的文字, 可选窗口截图)。None 表示不支持。
+    /// 在阻塞线程里调用，可以阻塞（单次最多约 10 秒）。支持的平台在能力里报 "computer_use"。
+    fn computer_use(&self, _request: &str) -> Option<(String, Option<ImageData>)> {
+        None
+    }
     fn clipboard_get(&self) -> Option<ClipboardData> {
         None
     }

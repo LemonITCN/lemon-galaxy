@@ -15,6 +15,9 @@ pub mod term;
 pub mod vdisplay;
 #[cfg(windows)]
 pub mod win;
+/// Windows 的 AI 应用操作（UI Automation + 窗口消息，不抢前台）；被控端会话代理与 Windows 主控端共用
+#[cfg(windows)]
+pub mod win_cu;
 
 pub use accounts::{AccountStatus, HostAccount, HostPolicy};
 pub use service::{HostConfig, HostEvents, HostService, HostStatus};

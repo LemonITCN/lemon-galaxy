@@ -27,6 +27,8 @@ pub enum ToAgent {
     VirtualState { id: u64 },
     /// 画面里画不画光标（主控端自己画光标时关掉）
     CursorInVideo { display: u32, show: bool },
+    /// AI 应用操作（docs/computer-use.md）：请求 JSON，在用户会话里由 galaxy_host::win_cu 执行
+    ComputerUse { id: u64, request: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,12 +52,14 @@ pub enum FromAgent {
     VirtualState { id: u64, ids: Vec<u32>, needs_headless: bool },
     /// 光标热点在画面里的位置（画面像素），变化时才发
     Cursor { display: u32, x: i32, y: i32, visible: bool },
+    /// 应用操作的结果：给模型的文字 + 可选窗口截图
+    ComputerUse { id: u64, text: String, image: Option<ImageData> },
 }
 
 impl FromAgent {
     pub fn reply_id(&self) -> Option<u64> {
         match self {
-            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::PrivacyResult { id, .. } | Self::AudioStarted { id, .. } | Self::VirtualAdded { id, .. } | Self::VirtualRemoved { id, .. } | Self::VirtualState { id, .. } => Some(*id),
+            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::PrivacyResult { id, .. } | Self::AudioStarted { id, .. } | Self::VirtualAdded { id, .. } | Self::VirtualRemoved { id, .. } | Self::VirtualState { id, .. } | Self::ComputerUse { id, .. } => Some(*id),
             _ => None,
         }
     }

@@ -253,6 +253,15 @@ final class AgentClient: @unchecked Sendable {
             case IPCMethod.uiTree:
                 let p = try m.decode(PUiTree.self)
                 reply.ok(PText(text: platform.uiTree(displayId: p.display, maxNodes: p.maxNodes)))
+            case IPCMethod.computerUse:
+                let p = try m.decode(PComputerUse.self)
+                if let r = platform.computerUse(requestJson: p.request) {
+                    let img = r.image
+                    reply.ok(PComputerUseReply(text: r.text, mime: img?.mime ?? "", width: img?.width ?? 0, height: img?.height ?? 0),
+                             blob: img?.data ?? Data())
+                } else {
+                    reply.ok(PComputerUseReply(text: nil, mime: "", width: 0, height: 0))
+                }
             case IPCMethod.clipboardGet:
                 reply.ok(PClipboard(data: platform.clipboardGet()))
             case IPCMethod.privacy:
@@ -475,6 +484,12 @@ final class AgentPlatform: HostPlatform, @unchecked Sendable {
     }
 
     func uiTree(displayId: UInt32, maxNodes: UInt32) -> String? { mac.uiTree(displayId: displayId, maxNodes: maxNodes) }
+    /// 登录界面不支持；用户会话里与主控端同一份实现。会动 AI 光标的动作先接上 AppKit（光标是个窗口）
+    func computerUse(requestJson: String) -> ComputerUseReply? {
+        if loginWindow { return nil }
+        if ComputerUse.needsCursor(requestJson) { AgentAppKit.ensure(mac) }
+        return mac.computerUse(requestJson: requestJson)
+    }
     func clipboardGet() -> ClipboardData? { mac.clipboardGet() }
     func clipboardSet(data: ClipboardData) { mac.clipboardSet(data: data) }
     func setPrivacy(on: Bool) -> Bool {

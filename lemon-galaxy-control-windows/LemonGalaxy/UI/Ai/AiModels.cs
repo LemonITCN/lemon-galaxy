@@ -360,12 +360,24 @@ internal sealed class AiHub
 
     // ---------- 引用 ----------
 
-    /// <summary>@ 与「设备或主机」可选的：账号里的设备（不含本机与手机）与 SSH 主机，在线的在前</summary>
+    /// <summary>本机：桌面端 AI 直接操作这台电脑，目标 ID 固定为 "local"，不用添加设备</summary>
+    public const string LocalId = "local";
+
+    /// <summary>「本机（电脑名）」：有本机设备记录时用它的显示名（可能设了别名），否则用系统里的电脑名</summary>
+    public string LocalLabel => L.T("ai.ref.local", app.Devices.FirstOrDefault(d => d.IsSelf) is { } self ? app.DeviceName(self.Id) : AppInfo.Hostname);
+
+    public ContextRef LocalRef => new(ContextRefKind.Device, "", LocalId, LocalLabel);
+
+    public static bool IsLocal(ContextRef r) => r.Kind == ContextRefKind.Device && r.Id == LocalId;
+
+    /// <summary>@ 与「设备或主机」可选的：本机排第一，其后是账号里的其他设备（不含手机）与 SSH 主机，在线的在前</summary>
     public List<ContextRef> TargetCandidates(string filter)
     {
         var q = filter.Trim();
         bool Hit(string s) => q.Length == 0 || s.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0;
         var list = new List<ContextRef>();
+        var local = LocalRef;
+        if (Hit(local.Label) || Hit(AppInfo.Hostname)) list.Add(local);
         foreach (var d in app.Devices.Where(d => !d.IsSelf && d.Kind != DeviceKind.Mobile).OrderByDescending(d => d.Online || d.LanSeen))
         {
             var name = app.DeviceName(d.Id);
@@ -384,7 +396,7 @@ internal sealed class AiHub
     public static ContextRef SshRef(AppModel app, string id) => new(ContextRefKind.SshHost, "", id, app.SshLabel(id));
 
     /// <summary>文件 / 文件夹引用所在的设备或主机名</summary>
-    public string WhereName(string targetId) => app.Device(targetId) != null ? app.DeviceName(targetId) : app.SshLabel(targetId);
+    public string WhereName(string targetId) => targetId == LocalId ? LocalLabel : app.Device(targetId) != null ? app.DeviceName(targetId) : app.SshLabel(targetId);
 }
 
 // ---------- 对话里的条目 ----------
@@ -441,6 +453,12 @@ internal sealed class ToolItem : ChatItem
     }
 
     public bool IsUseTarget => Call.Tool == "use_target";
+    /// <summary>第一次操作某个应用前的确认（与 use_target 一样只有允许、拒绝）</summary>
+    public bool IsUseApp => Call.Tool == "use_app";
+    public bool IsSimpleApproval => IsUseTarget || IsUseApp;
+    public bool IsPlan => Call.Tool == "update_plan";
+    /// <summary>一轮里后面还有更新的任务清单：这一份收成一行摘要</summary>
+    public bool PlanSuperseded;
     public bool Failed => Result is { Ok: false } || Decision == ToolDecision.Denied;
 }
 
@@ -507,8 +525,30 @@ internal sealed class AiChat : Observable
 
     private void Add(ChatItem item)
     {
+        SupersedePlans(item);
         Items.Add(item);
         ItemsChanged.Notify();
+    }
+
+    /// <summary>新的任务清单到来：同一轮（上一条用户消息之后）里之前的清单收起</summary>
+    private void SupersedePlans(ChatItem item)
+    {
+        if (item is not ToolItem { IsPlan: true }) return;
+        for (var i = Items.Count - 1; i >= 0 && Items[i] is not UserItem; i--)
+        {
+            if (Items[i] is ToolItem { IsPlan: true, PlanSuperseded: false } t)
+            {
+                t.PlanSuperseded = true;
+                t.Notify();
+            }
+        }
+    }
+
+    /// <summary>智能体连续执行太多步暂停后，错误提示旁的「继续」直接发一条「继续」</summary>
+    public void SendQuick(string text)
+    {
+        if (Conversation == null || Running) return;
+        Send(text, Array.Empty<ContextRef>());
     }
 
     public void AddError(string text) => Add(new ErrorItem { Text = text });
@@ -598,12 +638,16 @@ internal sealed class AiChat : Observable
                     if (a.Text.Length > 0) Items.Add(new ReplyItem { Id = a.Id, Text = a.Text, Done = true });
                     break;
                 case AgentMessage.Tool tool:
-                    Items.Add(new ToolItem(tool.Call, false)
+                {
+                    var item = new ToolItem(tool.Call, false)
                     {
                         Result = tool.Result, Output = tool.Result?.Output ?? "", Phase = ToolPhase.Finished,
                         Decision = tool.Result?.Denied == true ? ToolDecision.Denied : ToolDecision.Auto,
-                    });
+                    };
+                    SupersedePlans(item);
+                    Items.Add(item);
                     break;
+                }
             }
         }
         ItemsChanged.Notify();

@@ -46,6 +46,26 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
   "Win32_UI_Shell",
 ] }
+# AI 应用操作（win_cu）：UI Automation、窗口截图、窗口消息、AI 光标分层窗口
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_Storage_Xps",
+  "Win32_System_Com",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Ole",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_System_Variant",
+  "Win32_UI_Accessibility",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+jpeg-encoder = "0.7"
 
 [target.'cfg(all(windows, target_arch = "aarch64", target_env = "gnu"))'.dependencies]
 # 只影响本机交叉检查用的 MinGW ARM64（正式包用 MSVC）：libopus 在这里没有 ARM CPU 检测方法，关掉 SIMD

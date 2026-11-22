@@ -1009,22 +1009,51 @@ async fn build_conversation(inner: Arc<Inner>, c: ConversationConfig, listener: 
         mode: c.mode.into(),
         admin_cap: models.max_mode,
         plan_first: c.plan_first,
-        max_steps: 60,
+        max_steps: 100,
         locale: crate::locale(),
         trust_minutes: c.trust_minutes,
     };
     let title = c.title.clone().or_else(|| restore.as_ref().map(|r| r.title.clone())).unwrap_or_default();
     let names: Vec<String> = c.targets.iter().map(|t| ws.name_of(&t.id)).collect();
+    // 桌面端：本机直接可用，不用添加或引用
+    if let Some(l) = inner.local_ai() {
+        exec.add_local(LOCAL_TARGET.into(), l, inner.local_name());
+    }
     let conv = AgentConversation::build(cfg, Arc::new(galaxy_client::ai::GatewayLlm { api }), exec, ws.clone(), listener, inner.conv_key(), title, names, c.clone());
     if let Some(r) = restore {
         conv.agent.restore(r.messages);
+    }
+    if ws.exec.has(LOCAL_TARGET) {
+        conv.agent.authorize(vec![LOCAL_TARGET.into()]);
     }
     // 建对话时选的目标（老界面）：视同用户引用过，用到时再连
     conv.agent.authorize(c.targets.iter().map(|t| t.id.clone()).collect());
     Ok(conv)
 }
 
+/// AI 里「本机」的目标 ID
+pub(crate) const LOCAL_TARGET: &str = "local";
+
 impl Inner {
+    /// 本机执行后端：桌面客户端才有（手机不能跑命令）。Windows 主控端的被控是系统服务，命令、文件、终端照样在本进程执行
+    pub(crate) fn local_ai(&self) -> Option<Arc<dyn galaxy_client::ai::LocalHost>> {
+        use galaxy_proto::Platform::*;
+        if !matches!(self.meta.platform, Macos | Windows | Linux) {
+            return None;
+        }
+        let h = self.host.lock().clone();
+        Some(Arc::new(crate::local_ai::LocalAi {
+            host: h.map(|h| h.inner.clone()),
+            platform: self.meta.platform,
+            os: self.meta.os_version.clone(),
+            user_name: galaxy_host::sysuser::SysUser::current().name,
+        }))
+    }
+
+    pub(crate) fn local_name(&self) -> String {
+        if self.meta.hostname.is_empty() { "本机".into() } else { format!("本机（{}）", self.meta.hostname) }
+    }
+
     pub(crate) async fn ai_models_cached(&self) -> Result<galaxy_proto::api::AiModelsResp> {
         let cached = self.models.lock().clone();
         match cached {
@@ -1120,7 +1149,19 @@ impl ChatWorkspace {
         let vault = inner.vault_snapshot.lock().clone();
         let folder_name = |fid: &Option<String>| fid.as_ref().and_then(|f| vault.iter().find(|e| &e.id == f)).and_then(|e| match &e.data { VaultData::Folder { name, .. } => Some(name.clone()), _ => None });
         let mut v = vec![];
-        for d in inner.devices.lock().iter() {
+        if inner.local_ai().is_some() {
+            v.push(ag_core::CatalogItem {
+                id: LOCAL_TARGET.into(),
+                name: inner.local_name(),
+                kind: ag_core::TargetKind::Device,
+                platform: inner.meta.platform,
+                online: true,
+                detail: format!("用户正在用的这台电脑，{}", inner.meta.os_version),
+            });
+        }
+        // 先复制一份再遍历：下面的 device_name 也要拿 devices 这把锁（拿着锁调它会死锁）
+        let devices = inner.devices.lock().clone();
+        for d in devices.iter() {
             if d.id == me || d.kind == galaxy_proto::DeviceKind::Mobile {
                 continue;
             }
@@ -1243,6 +1284,11 @@ impl ag_core::Workspace for ChatWorkspace {
                 return Ok(());
             }
             let inner = self.inner()?;
+            if target == LOCAL_TARGET {
+                let l = inner.local_ai().ok_or_else(|| anyhow::anyhow!("这台设备不能在本机执行"))?;
+                self.exec.add_local(target, l, inner.local_name());
+                return Ok(());
+            }
             if let Some(d) = DeviceId::from_hex(&target) {
                 let s = inner.session_for(d).await.map_err(|e| anyhow::anyhow!("{e}"))?;
                 self.exec.add(target.clone(), s, inner.device_name(&d));
@@ -1256,6 +1302,39 @@ impl ag_core::Workspace for ChatWorkspace {
             let name = if info.label.is_empty() { format!("{}@{}", info.username, info.host) } else { info.label.clone() };
             self.exec.add_ssh(target, s, name).await;
             Ok(())
+        })
+    }
+
+    fn fetch(&self, url: &str, max_bytes: usize) -> ag_core::BoxFut<'_, anyhow::Result<(String, String, Vec<u8>)>> {
+        let url = url.to_string();
+        Box::pin(async move {
+            use futures::StreamExt;
+            let client = reqwest::Client::builder()
+                .user_agent(format!("LemonGalaxy/{} (AI web_fetch)", env!("CARGO_PKG_VERSION")))
+                .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::limited(5))
+                .build()?;
+            let resp = client.get(&url).header("accept", "text/html,text/plain,application/json,*/*;q=0.5").send().await?;
+            let status = resp.status();
+            let final_url = resp.url().to_string();
+            let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            if !status.is_success() {
+                anyhow::bail!("HTTP {status}");
+            }
+            if ctype.starts_with("image/") || ctype.starts_with("video/") || ctype.starts_with("audio/") || ctype.contains("octet-stream") || ctype.contains("zip") {
+                anyhow::bail!("不是文本内容（{ctype}）");
+            }
+            let mut body = Vec::new();
+            let mut st = resp.bytes_stream();
+            while let Some(c) = st.next().await {
+                let c = c?;
+                body.extend_from_slice(&c);
+                if body.len() >= max_bytes {
+                    body.truncate(max_bytes);
+                    break;
+                }
+            }
+            Ok((final_url, ctype, body))
         })
     }
 }

@@ -466,6 +466,21 @@
     <string name="tool_list_snippets">List snippets</string>
     <string name="tool_list_port_forwards">List port forwards</string>
     <string name="tool_recent_activity">View connection history</string>
+    <string name="tool_use_app">Use app</string>
+    <string name="tool_app_list">List apps</string>
+    <string name="tool_app_state">Read app</string>
+    <string name="tool_app_click">Click in app</string>
+    <string name="tool_app_set_value">Set value</string>
+    <string name="tool_app_type">Type in app</string>
+    <string name="tool_app_key">Press key</string>
+    <string name="tool_app_scroll">Scroll in app</string>
+    <string name="tool_app_action">App action</string>
+    <string name="tool_app_open">Open app</string>
+    <string name="tool_web_fetch">Fetch web page</string>
+    <string name="tool_system_info">System info</string>
+    <string name="tool_update_plan">Plan</string>
+    <string name="plan_title">Plan</string>
+    <string name="ai_continue">Continue</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>

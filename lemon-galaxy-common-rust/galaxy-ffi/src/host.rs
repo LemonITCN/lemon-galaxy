@@ -77,6 +77,9 @@ impl hp::HostPlatform for PlatformBridge {
     fn ui_tree(&self, display: u32, max_nodes: u32) -> Option<String> {
         self.0.ui_tree(display, max_nodes)
     }
+    fn computer_use(&self, request: &str) -> Option<(String, Option<pp::ImageData>)> {
+        self.0.computer_use(request.to_string()).map(|r| (r.text, r.image.map(Into::into)))
+    }
     fn clipboard_get(&self) -> Option<pp::ClipboardData> {
         self.0.clipboard_get().map(Into::into)
     }

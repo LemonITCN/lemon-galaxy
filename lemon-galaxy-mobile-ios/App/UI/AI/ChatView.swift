@@ -110,9 +110,11 @@ private struct ChatLayout: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
+                    let latestPlans = PlanChecklist.latestIds(items)
+                    let continueKey = ChatContinue.offerKey(items, running: state?.running ?? false)
                     ForEach(items) { item in
                         if let controller {
-                            ChatItemView(item: item, controller: controller).id(item.id)
+                            ChatItemView(item: item, controller: controller, latestPlans: latestPlans, continueKey: continueKey).id(item.id)
                         }
                     }
                     Color.clear.frame(height: 1).id("bottom")

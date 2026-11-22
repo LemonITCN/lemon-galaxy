@@ -440,6 +440,7 @@ enum SelfTest {
         }
         shot("\(prefix)-55-ai-gui", app, window: window, host: host, settle: 0.3)
         chat.stop()
+        checkAILocalAndPlan(prefix: prefix, zh: zh, app: app, chat: chat, window: window, host: host)
         // 设置记住上次的模型与档位
         if app.settings.aiMode != .confirmAll { problems.append("档位没有记到本机设置") }
         if !app.settings.aiLastModel.hasSuffix(chat.modelId) { problems.append("模型没有记到本机设置") }
@@ -455,6 +456,79 @@ enum SelfTest {
             shot("\(prefix)-56-ai-history", app, window: window, host: host, settle: 0.3)
         } else { problems.append("历史里找不到刚才的对话") }
         ai.newChat()
+    }
+
+    /// 本机目标、任务清单（update_plan）、应用操作确认（use_app）、应用工具行、连续执行暂停后的「继续」
+    static func checkAILocalAndPlan(prefix: String, zh: Bool, app: AppModel, chat: AIConversationModel, window: NSWindow, host: NSHostingView<RootView>) {
+        let ai = app.ai
+        // 本机排在 @ 候选与「设备或主机」第一位，引用为 Device / 空 target_id / "local"
+        let local = ai.candidates("").first
+        if local?.ref.id != AIHubModel.localId || local?.ref.kind != .device || local?.ref.targetId != "" || local?.online != true {
+            problems.append("@ 候选第一项应是本机：\(String(describing: local?.ref))")
+        }
+        if ai.targetName(AIHubModel.localId) != ai.localRef.label { problems.append("本机的显示名不对") }
+        if ai.candidates("build").contains(where: { $0.ref.id == AIHubModel.localId }) { problems.append("过滤后不应再有本机") }
+        if PlanCard.parse("[x] 查看磁盘\n[>] 清理日志\n[ ] 重启服务\n").map(\.status) != [.done, .active, .pending] { problems.append("任务清单解析不对") }
+
+        wait("AI 停止") { !chat.running }
+        func call(_ id: String, _ tool: String, _ summary: String, _ detail: String, risk: RiskLevel = .read, reasons: [String] = [], reason: String = "") -> ToolCallView {
+            ToolCallView(callId: id, tool: tool, targetId: AIHubModel.localId, targetName: ai.localRef.label, summary: summary, detail: detail,
+                         risk: risk, riskReasons: reasons, modelReason: reason, image: nil)
+        }
+        func finished(_ c: ToolCallView, _ summary: String, image: ImageData? = nil) -> ChatItem {
+            let card = ToolCardModel(call: c, needsApproval: false)
+            card.phase = .finished
+            card.result = ToolResultView(ok: true, summary: summary, output: "", image: image, denied: false)
+            return .tool(card)
+        }
+        let user = zh ? "帮我在 Safari 里打开公司内网，看看今天的值班表" : "Open the intranet in Safari and check today's on-call rota"
+        chat.items.append(.user(id: "st-u", text: user, refs: [ai.localRef]))
+        let plan1 = zh ? "[>] 打开 Safari\n[ ] 进入内网首页\n[ ] 找到值班表\n" : "[>] Open Safari\n[ ] Go to the intranet home page\n[ ] Find the on-call rota\n"
+        chat.items.append(finished(call("st-p1", "update_plan", zh ? "任务清单 0/3：打开 Safari" : "Task list 0/3: Open Safari", plan1), "0/3"))
+        chat.items.append(finished(call("st-a1", "app_open", zh ? "打开 Safari" : "Open Safari", "Safari"), zh ? "已打开" : "Opened"))
+        let shotImg = fakeWindowShot()
+        let state = ToolCardModel(call: call("st-a2", "app_state", zh ? "读取 Safari 界面" : "Read the Safari window", "Safari"), needsApproval: false)
+        state.phase = .finished
+        state.result = ToolResultView(ok: true, summary: zh ? "142 个控件" : "142 elements", output: "[1] AXWindow \"Safari\"\n  [2] AXTextField \"地址\"", image: shotImg, denied: false)
+        state.output = state.result?.output ?? ""
+        state.expanded = true
+        chat.items.append(.tool(state))
+        let plan2 = zh ? "[x] 打开 Safari\n[>] 进入内网首页\n[ ] 找到值班表\n" : "[x] Open Safari\n[>] Go to the intranet home page\n[ ] Find the on-call rota\n"
+        chat.items.append(finished(call("st-p2", "update_plan", zh ? "任务清单 1/3：进入内网首页" : "Task list 1/3: Go to the intranet home page", plan2), "1/3"))
+        chat.items.append(finished(call("st-w", "web_fetch", "https://intranet.example.com/oncall", ""), "200"))
+        chat.items.append(finished(call("st-s", "system_info", zh ? "查看系统信息" : "System info", ""), "macOS 26"))
+        let useApp = ToolCardModel(call: call("st-ua-app", "use_app", zh ? "AI 想操作「Safari」" : "AI wants to use “Safari”",
+                                              zh ? "允许后，本对话里 AI 可以读取「Safari」的界面并在里面点击、输入（不会占用你的鼠标键盘）" : "Once allowed, the agent can read Safari's window and click and type in it during this conversation (without taking over your mouse and keyboard)",
+                                              risk: .normal, reasons: [zh ? "本对话第一次操作这个应用" : "First time this conversation uses this app"],
+                                              reason: zh ? "要在地址栏输入内网地址" : "Needs to type the intranet address"), needsApproval: true)
+        chat.items.append(.tool(useApp))
+        chat.contentVersion += 1
+        if !chat.isPlanSuperseded(chat.items.compactMap({ if case .tool(let t) = $0, t.id == "st-p1" { return t }; return nil }).first!) { problems.append("前一份任务清单应收起") }
+        shot("\(prefix)-57-ai-local-plan-app", app, window: window, host: host, settle: 0.3)
+        useApp.decision = .approved
+        useApp.phase = .finished
+        useApp.result = ToolResultView(ok: true, summary: zh ? "已允许" : "Allowed", output: "", image: nil, denied: false)
+        chat.items.append(.error(id: "st-e", text: "已连续执行 40 步，先暂停一下。回复「继续」可以接着做"))
+        chat.contentVersion += 1
+        shot("\(prefix)-58-ai-continue", app, window: window, host: host, settle: 0.3)
+    }
+
+    /// 应用窗口截图的替身：浅色窗口 + 标题栏 + 地址栏
+    static func fakeWindowShot() -> ImageData? {
+        let w = 640, h = 400
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(gray: 0.97, alpha: 1)); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(CGColor(gray: 0.88, alpha: 1)); ctx.fill(CGRect(x: 0, y: h - 52, width: w, height: 52))
+        for (i, c) in [(1.0, 0.37, 0.34), (1.0, 0.74, 0.18), (0.16, 0.79, 0.25)].enumerated() {
+            ctx.setFillColor(CGColor(red: c.0, green: c.1, blue: c.2, alpha: 1))
+            ctx.fillEllipse(in: CGRect(x: 14 + i * 20, y: h - 32, width: 12, height: 12))
+        }
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1)); ctx.fill(CGRect(x: 120, y: h - 40, width: 400, height: 26))
+        ctx.setFillColor(CGColor(gray: 0.82, alpha: 1))
+        for i in 0..<6 { ctx.fill(CGRect(x: 40, y: h - 100 - i * 44, width: [520, 380, 460, 300, 500, 260][i], height: 16)) }
+        guard let img = ctx.makeImage(), let data = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) else { return nil }
+        return ImageData(mime: "image/png", data: data, width: UInt32(w), height: UInt32(h))
     }
 
     static func shot(_ name: String, _ app: AppModel, window: NSWindow, host: NSHostingView<RootView>, settle: Double = 0.2) {

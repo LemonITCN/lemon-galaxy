@@ -141,3 +141,81 @@ public extension Array where Element == ContextRef {
         if !contains(where: { $0.refKey == r.refKey }) { append(r) }
     }
 }
+
+// MARK: 任务清单（update_plan）
+
+/// update_plan 的任务清单：内核把清单放在 ToolCallView.detail 里，每行一项，前缀 `[x] ` 已完成、`[>] ` 进行中、`[ ] ` 未开始。
+public enum PlanChecklist {
+    public static let tool = "update_plan"
+
+    public enum Status: Equatable { case done, inProgress, pending }
+
+    public struct Item: Equatable {
+        public let text: String
+        public let status: Status
+        public init(text: String, status: Status) {
+            self.text = text
+            self.status = status
+        }
+    }
+
+    /// 解析清单；空行跳过，没有前缀的行当作未开始
+    public static func parse(_ detail: String) -> [Item] {
+        detail.split(whereSeparator: \.isNewline).compactMap { raw in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { return nil }
+            let marks: [(String, Status)] = [("[x]", .done), ("[X]", .done), ("[>]", .inProgress), ("[ ]", .pending)]
+            for (m, st) in marks where line.hasPrefix(m) {
+                let t = line.dropFirst(m.count).trimmingCharacters(in: .whitespaces)
+                return t.isEmpty ? nil : Item(text: t, status: st)
+            }
+            return Item(text: line, status: .pending)
+        }
+    }
+
+    /// 已完成数 / 总数
+    public static func progress(_ items: [Item]) -> (done: Int, total: Int) {
+        (items.filter { $0.status == .done }.count, items.count)
+    }
+
+    /// 每一轮（以用户消息分隔）里最后一个 update_plan 的 callId：只有它展开，前面的收成一行摘要
+    public static func latestIds(_ items: [ChatItem]) -> Set<String> {
+        var result = Set<String>()
+        var current: String?
+        for it in items {
+            switch it {
+            case .user:
+                if let c = current { result.insert(c) }
+                current = nil
+            case .tool(let t) where t.call.tool == tool:
+                current = t.call.callId
+            default:
+                break
+            }
+        }
+        if let c = current { result.insert(c) }
+        return result
+    }
+}
+
+// MARK: 只有「允许」「拒绝」的确认
+
+public enum SimpleApproval {
+    /// use_target（连接某设备）与 use_app（操作某个应用）的确认卡片只有允许与拒绝，拒绝不问理由
+    public static func applies(to tool: String) -> Bool { tool == "use_target" || tool == "use_app" }
+}
+
+// MARK: 连续执行太多步后暂停
+
+public enum ChatContinue {
+    /// 点「继续」时发出的消息（内核提示里要用户回复的原文）
+    public static let text = "继续"
+
+    public static func offered(by message: String) -> Bool { message.contains("「\(text)」") }
+
+    /// 要显示「继续」按钮的错误条目：只在它是最后一条、且任务已停下时显示
+    public static func offerKey(_ items: [ChatItem], running: Bool) -> String? {
+        guard !running, case .error(let k, let m)? = items.last, offered(by: m) else { return nil }
+        return k
+    }
+}

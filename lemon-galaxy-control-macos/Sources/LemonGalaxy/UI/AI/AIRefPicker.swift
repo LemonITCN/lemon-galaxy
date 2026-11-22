@@ -200,7 +200,10 @@ final class RefFileBrowser: ObservableObject {
         Task {
             do {
                 let s: FileSource
-                if t.kind == .device {
+                if t.id == AIHubModel.localId {
+                    // 本机：直接浏览这台电脑的文件，路径就是内核要的 POSIX 路径
+                    s = LocalFileSource()
+                } else if t.kind == .device {
                     let peer = try await app.peer(t.id)
                     s = RemoteFileSource(endpoint: .device(t.id), client: peer.session.files())
                 } else {

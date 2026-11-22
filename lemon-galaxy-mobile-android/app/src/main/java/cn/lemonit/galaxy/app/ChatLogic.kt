@@ -201,3 +201,61 @@ fun filterConversations(items: List<ConversationListItem>, query: String): List<
     val q = query.trim().lowercase()
     return if (q.isEmpty()) items else items.filter { it.title.lowercase().contains(q) }
 }
+
+// ---------- 任务清单（update_plan） ----------
+
+const val PLAN_TOOL = "update_plan"
+
+enum class PlanStatus { DONE, IN_PROGRESS, PENDING }
+
+data class PlanItem(val text: String, val status: PlanStatus)
+
+/** 内核把清单放在 ToolCallView.detail 里，每行一项：`[x] ` 已完成、`[>] ` 进行中、`[ ] ` 未开始；空行跳过，没有前缀的行当作未开始。 */
+fun parsePlan(detail: String): List<PlanItem> = detail.lines().mapNotNull { raw ->
+    val line = raw.trim()
+    if (line.isEmpty()) return@mapNotNull null
+    val marks = listOf("[x]" to PlanStatus.DONE, "[X]" to PlanStatus.DONE, "[>]" to PlanStatus.IN_PROGRESS, "[ ]" to PlanStatus.PENDING)
+    val hit = marks.firstOrNull { line.startsWith(it.first) }
+        ?: return@mapNotNull PlanItem(line, PlanStatus.PENDING)
+    val text = line.substring(hit.first.length).trim()
+    if (text.isEmpty()) null else PlanItem(text, hit.second)
+}
+
+/** 已完成数 to 总数。 */
+fun planProgress(items: List<PlanItem>): Pair<Int, Int> = items.count { it.status == PlanStatus.DONE } to items.size
+
+/** 每一轮（以用户消息分隔）里最后一个 update_plan 的 key：只有它展开，前面的收成一行摘要。 */
+fun latestPlanKeys(items: List<ChatItem>): Set<String> {
+    val result = mutableSetOf<String>()
+    var current: String? = null
+    for (it in items) {
+        when {
+            it is ChatItem.User -> {
+                current?.let(result::add)
+                current = null
+            }
+            it is ChatItem.Tool && it.call.tool == PLAN_TOOL -> current = it.key
+        }
+    }
+    current?.let(result::add)
+    return result
+}
+
+// ---------- 只有「允许」「拒绝」的确认 ----------
+
+/** use_target（连接某设备）与 use_app（操作某个应用）的确认卡片只有允许与拒绝，拒绝不问理由。 */
+fun isSimpleApproval(tool: String): Boolean = tool == "use_target" || tool == "use_app"
+
+// ---------- 连续执行太多步后暂停 ----------
+
+/** 点「继续」时发出的消息（内核提示里要用户回复的原文）。 */
+const val CONTINUE_TEXT = "继续"
+
+fun offersContinue(message: String): Boolean = message.contains("「$CONTINUE_TEXT」")
+
+/** 要显示「继续」按钮的错误条目：只在它是最后一条、且任务已停下时显示。 */
+fun continueOfferKey(items: List<ChatItem>, running: Boolean): String? {
+    if (running) return null
+    val last = items.lastOrNull() as? ChatItem.Error ?: return null
+    return if (offersContinue(last.message)) last.key else null
+}

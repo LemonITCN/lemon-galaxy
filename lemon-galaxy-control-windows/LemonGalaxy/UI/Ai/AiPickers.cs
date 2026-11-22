@@ -11,7 +11,7 @@ internal static class AiPickers
     /// <summary>引用的图标：设备按平台，SSH 主机、文件、文件夹、片段、端口映射、连接记录各一个</summary>
     public static string RefIcon(AppModel app, ContextRef r) => r.Kind switch
     {
-        ContextRefKind.Device => app.Device(r.Id) is { } d ? K.PlatformIcon(d.Platform) : "display",
+        ContextRefKind.Device => r.Id == AiHub.LocalId ? "display" : app.Device(r.Id) is { } d ? K.PlatformIcon(d.Platform) : "display",
         ContextRefKind.SshHost => "server",
         ContextRefKind.File => "fileText",
         ContextRefKind.Folder => "folder",
@@ -99,7 +99,9 @@ internal static class AiPickers
 
     private static List<Option> TargetOptions(AppModel app, bool onlyReachable)
     {
-        var list = new List<Option>();
+        // 本机排第一，总是在线
+        var local = app.Ai.LocalRef;
+        var list = new List<Option> { new(local, local.Label, null, "display", DotState.Online) };
         foreach (var d in app.Devices.Where(d => !d.IsSelf && d.Kind != DeviceKind.Mobile).OrderByDescending(d => d.Online || d.LanSeen).ThenBy(d => app.DeviceName(d.Id), StringComparer.CurrentCultureIgnoreCase))
         {
             var reachable = d.Online || d.LanSeen;
@@ -215,7 +217,12 @@ internal static class AiPickers
             {
                 try
                 {
-                    if (device)
+                    if (id == AiHub.LocalId)
+                    {
+                        // 本机：直接浏览这台电脑的文件，选中后路径换成内核的格式（/C:/Users/x）
+                        source = new LocalFileSource();
+                    }
+                    else if (device)
                     {
                         var p = await app.Peer(id);
                         source = new RemoteFileSource(FileEndpoint.ForDevice(id), p.Session.Files());
@@ -285,14 +292,17 @@ internal static class AiPickers
         public void ChooseFile()
         {
             if (selected == null || targetId == null) return;
-            Finish(new ContextRef(ContextRefKind.File, targetId, selected, NameOf(selected)));
+            Finish(new ContextRef(ContextRefKind.File, targetId, Wire(selected), NameOf(selected)));
         }
 
         public void ChooseFolder()
         {
             if (targetId == null || path.Length == 0) return;
-            Finish(new ContextRef(ContextRefKind.Folder, targetId, path, NameOf(path)));
+            Finish(new ContextRef(ContextRefKind.Folder, targetId, Wire(path), NameOf(path)));
         }
+
+        /// <summary>本机路径换成内核的格式（与 galaxy-host files.rs native_to_wire 一致）；远端路径本来就是</summary>
+        private string Wire(string p) => targetId == AiHub.LocalId ? WirePath(p) : p;
 
         private FrameworkElement Browser()
         {
@@ -343,6 +353,20 @@ internal static class AiPickers
             pickFile.IsEnabled = selected != null;
             return K.Col(12, pathBar, area, K.Row(8, K.SecondaryButton(L.T("common.cancel"), () => app.CloseModal(true)), K.Spacer(), pickFolder, pickFile));
         }
+    }
+
+    /// <summary>Windows 本机路径 → 内核路径：C:\Users\x → /C:/Users/x，C:\ → /C:/，\\server\share → //server/share</summary>
+    public static string WirePath(string p)
+    {
+        if (p.StartsWith(@"\\?\UNC\", StringComparison.Ordinal)) p = @"\\" + p.Substring(8);
+        else if (p.StartsWith(@"\\?\", StringComparison.Ordinal)) p = p.Substring(4);
+        if (p.StartsWith(@"\\", StringComparison.Ordinal)) return "//" + p.Substring(2).Replace('\\', '/');
+        if (p.Length >= 2 && p[1] == ':')
+        {
+            var rest = p.Substring(2).Replace('\\', '/');
+            return "/" + char.ToUpperInvariant(p[0]) + ":" + (rest.Length == 0 ? "/" : rest);
+        }
+        return p.Replace('\\', '/');
     }
 
     /// <summary>selftest：打开文件选择器并直接进入某台设备的主目录；返回「列表已加载」的判断</summary>

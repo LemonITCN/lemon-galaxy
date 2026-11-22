@@ -94,6 +94,11 @@ enum Icons {
         case "list_snippets": return "chevron.left.forwardslash.chevron.right"
         case "list_port_forwards": return "arrow.left.arrow.right"
         case "recent_activity": return "clock.arrow.circlepath"
+        case "use_app": return "macwindow"
+        case let t where t.hasPrefix("app_"): return "macwindow"
+        case "web_fetch": return "globe"
+        case "system_info": return "cpu"
+        case "update_plan": return "checklist"
         default: return "wrench.and.screwdriver"
         }
     }

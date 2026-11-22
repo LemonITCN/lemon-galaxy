@@ -172,6 +172,8 @@ pub enum MgmtReq {
     VirtualDisplayAdd { width: u32, height: u32, refresh: u32 },
     /// 删掉本会话加的虚拟屏
     VirtualDisplayRemove { display_id: u32 },
+    /// AI 应用操作（docs/computer-use.md）：请求是 JSON，需要控制权限，能力列表有 "computer_use"。放在最后，老版本的变体编号不变
+    ComputerUse { request: String, origin: Origin },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -185,7 +187,12 @@ pub enum MgmtResp {
     Error(PeerError),
     /// 新加的虚拟屏（应答 `VirtualDisplayAdd`）。放在最后，老版本的变体编号不变
     Display(DisplayInfo),
+    /// 应用操作的结果（应答 `ComputerUse`）：给模型看的文字 + 可选的窗口截图
+    ComputerUse { text: String, image: Option<ImageData> },
 }
+
+/// AI 应用操作能力（docs/computer-use.md）
+pub const CAP_COMPUTER_USE: &str = "computer_use";
 
 /// 虚拟屏能力：能力列表里有 "virtual_display"，另有 "virtual_display_max=N" 给出主控最多能加几块。
 pub const CAP_VIRTUAL_DISPLAY: &str = "virtual_display";

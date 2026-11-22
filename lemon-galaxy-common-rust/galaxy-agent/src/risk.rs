@@ -271,6 +271,7 @@ fn take_paren(c: &[char], mut i: usize) -> Option<(String, usize)> {
     None
 }
 
+#[derive(Clone)]
 struct SimpleCmd {
     words: Vec<String>,
     dynamic_cmd: bool,
@@ -462,6 +463,16 @@ fn assess_simple(cmd: &SimpleCmd, depth: u32, a: &mut Assessment) {
     if w.is_empty() {
         return;
     }
+    // shell 的流程关键字不是程序：循环头、结束符本身不执行任何东西；do / then 等后面跟的才是真正的命令
+    match w[0].as_str() {
+        "for" | "select" | "case" | "done" | "fi" | "esac" | "{" | "}" | ";;" => return,
+        "do" | "then" | "else" | "elif" | "while" | "until" | "if" | "!" | "time" => {
+            let rest = SimpleCmd { words: w[1..].to_vec(), ..cmd.clone() };
+            assess_simple(&rest, depth, a);
+            return;
+        }
+        _ => {}
+    }
     a.commands.push(w.clone());
     let name = base(&w[0]).to_string();
     let lname = name.to_ascii_lowercase();
@@ -523,7 +534,9 @@ fn assess_simple(cmd: &SimpleCmd, depth: u32, a: &mut Assessment) {
                 a.raise(Risk::Dangerous, "修改内核参数");
             }
         }
-        "top" | "htop" | "btop" | "atop" | "iotop" | "nload" | "iftop" => {}
+        "top" | "htop" | "btop" | "atop" | "iotop" | "nload" | "iftop" | "cd" | "pushd" | "popd" | "dirs" | "export" | "set" | "unset" | "local" | "read" | "shift" => {}
+        // 不带参数只是查看内存压力；-l / -S 会人为制造压力
+        "memory_pressure" if args.is_empty() || args == ["-Q"] => {}
         "find" | "fd" => {
             if any_arg(&|x| x == "-delete") {
                 a.raise(Risk::Dangerous, "find -delete 会删除文件");
@@ -910,6 +923,68 @@ pub fn assess_click(target_label: Option<&str>) -> Assessment {
     a
 }
 
+/// 绝对不让 AI 操作的应用（LemonGalaxy 自身、密码管理器、系统安全设置），返回原因。
+pub fn forbidden_app(app: &str) -> Option<String> {
+    let a = app.to_lowercase();
+    const LIST: &[(&str, &str)] = &[
+        ("lemongalaxy", "LemonGalaxy 自身"),
+        ("lemon galaxy", "LemonGalaxy 自身"),
+        ("cn.lemonit.galaxy", "LemonGalaxy 自身"),
+        ("keychain", "密码管理"),
+        ("钥匙串", "密码管理"),
+        ("com.apple.passwords", "密码管理"),
+        ("passwords", "密码管理"),
+        ("密码", "密码管理"),
+        ("1password", "密码管理"),
+        ("bitwarden", "密码管理"),
+        ("lastpass", "密码管理"),
+        ("keepass", "密码管理"),
+        ("dashlane", "密码管理"),
+        ("credential manager", "密码管理"),
+        ("凭据管理器", "密码管理"),
+        ("securityagent", "系统安全验证"),
+        ("coreservicesuiagent", "系统安全验证"),
+        ("consent.exe", "系统安全验证"),
+    ];
+    LIST.iter().find(|(k, _)| a.contains(k)).map(|(_, why)| format!("不允许 AI 操作{why}"))
+}
+
+/// 读取网页地址：普通公开地址只读；非 http(s)、超长查询串 / 路径段（可能夹带设备上的数据外传）要确认；
+/// 内网、本机地址算普通操作（危险操作确认档自动执行，每步确认档要问）。
+pub fn assess_url(url: &str) -> (Risk, Vec<String>) {
+    let mut reasons = vec![];
+    let lower = url.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("http://")) else {
+        return (Risk::Dangerous, vec!["不是 http / https 地址".into()]);
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host_only = host.split(':').next().unwrap_or(host).trim_matches(['[', ']']);
+    let mut level = Risk::Read;
+    if host.contains('@') || rest.split(['/', '?', '#']).next().unwrap_or("").contains('@') {
+        level = Risk::Dangerous;
+        reasons.push("地址里带了用户名或密码".into());
+    }
+    let query_len = url.find(['?', '#']).map(|i| url.len() - i).unwrap_or(0);
+    let long_seg = url.split(['/', '?', '&', '=', '#']).any(|seg| seg.len() > 80);
+    if query_len > 160 || long_seg {
+        level = Risk::Dangerous;
+        reasons.push("地址里有很长的参数，可能夹带数据".into());
+    }
+    let private = host_only == "localhost"
+        || host_only.ends_with(".local")
+        || host_only.ends_with(".lan")
+        || host_only.parse::<std::net::IpAddr>().map(|ip| match ip {
+            std::net::IpAddr::V4(v) => v.is_private() || v.is_loopback() || v.is_link_local(),
+            std::net::IpAddr::V6(v) => v.is_loopback() || (v.segments()[0] & 0xfe00) == 0xfc00,
+        }).unwrap_or(false);
+    if private && level < Risk::Normal {
+        level = Risk::Normal;
+        reasons.push("内网或本机地址".into());
+    }
+    (level, reasons)
+}
+
 pub fn assess_keys(combo: &str) -> Assessment {
     let mut a = Assessment::new();
     let c = combo.to_ascii_lowercase();
@@ -982,6 +1057,16 @@ mod tests {
 
     fn lv(c: &str) -> Risk {
         assess_command(c, ShellKind::Posix).level
+    }
+
+    #[test]
+    fn shell_keywords_and_cd_are_not_programs() {
+        assert_eq!(lv("for p in 1 2; do ps -p $p; done"), Risk::Read);
+        assert_eq!(lv("cd ~ && du -sh x | sort -h"), Risk::Read);
+        assert_eq!(lv("for f in *.log; do rm $f; done"), Risk::Dangerous);
+        assert_eq!(lv("if true; then shutdown -h now; fi"), Risk::Dangerous);
+        assert_eq!(lv("memory_pressure"), Risk::Read);
+        assert!(lv("memory_pressure -l critical") > Risk::Read);
     }
 
     #[test]

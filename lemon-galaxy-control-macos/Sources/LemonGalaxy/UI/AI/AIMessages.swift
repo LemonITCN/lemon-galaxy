@@ -35,15 +35,34 @@ struct ChatItemView: View {
         case .thinking(let id):
             ThinkingRow(id: id, conv: conv)
         case .tool(let card):
-            ToolRow(card: card, conv: conv)
+            if card.isPlan {
+                PlanCard(card: card, superseded: conv.isPlanSuperseded(card))
+            } else {
+                ToolRow(card: card, conv: conv)
+            }
         case .ask(let ask):
             AskCard(ask: ask, conv: conv)
         case .secret(let req):
             SecretCard(req: req, conv: conv)
-        case .error(_, let text):
+        case .error(let id, let text):
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: "exclamationmark.circle.fill").font(.system(size: 12)).padding(.top, 1)
                 Text(text).font(.system(size: 12.5)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                // 连续执行太多步暂停：提示里让回复「继续」，旁边直接给个按钮（只在最后一条、没在运行时）
+                if text.contains("「继续」"), conv.items.last?.id == id, !conv.running, conv.conversation != nil {
+                    Button { conv.sendQuick("继续") } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "play.fill").font(.system(size: 8.5))
+                            Text(loc("ai.continue")).font(.system(size: 12, weight: .medium))
+                        }
+                        .foregroundStyle(p.accent)
+                        .padding(.horizontal, 9).frame(height: 22)
+                        .background(Capsule().fill(p.accent.opacity(0.12)))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, -2)
+                }
             }
             .foregroundStyle(p.danger)
         }
@@ -145,7 +164,8 @@ struct ToolRow: View {
 
     static func title(_ card: ToolCardModel, _ loc: Strings) -> String {
         if card.isUseTarget { return loc("ai.useTarget.row", card.call.targetName) }
-        return card.call.summary.isEmpty ? loc("ai.tool." + card.call.tool) : card.call.summary
+        let s = card.call.summary.replacingOccurrences(of: "\n", with: " ")
+        return s.isEmpty ? loc("ai.tool." + card.call.tool) : s
     }
 
     static func icon(_ tool: String) -> String {
@@ -159,6 +179,11 @@ struct ToolRow: View {
         case "upload_file", "download_file": return "arrow.up.arrow.down"
         case "ui_tree": return "list.bullet.indent"
         case "use_target": return "link"
+        case "use_app", "app_list", "app_state", "app_click", "app_set_value", "app_type", "app_key", "app_scroll", "app_action", "app_open":
+            return "macwindow"
+        case "web_fetch": return "globe"
+        case "system_info": return "cpu"
+        case "update_plan": return "checklist"
         case "list_devices": return "server.rack"
         case "list_snippets": return ContextRefKind.snippet.icon
         case "list_port_forwards": return ContextRefKind.portForward.icon
@@ -182,8 +207,8 @@ struct ToolDetails: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             let command = card.decision.editedCommand ?? (card.call.detail.isEmpty ? card.call.summary : card.call.detail)
-            if !command.isEmpty && !card.isUseTarget { CommandBlock(text: command, diff: Self.looksLikeDiff(card.call.tool, command)) }
-            if card.isUseTarget && !card.call.detail.isEmpty {
+            if !command.isEmpty && !card.isSimpleApproval { CommandBlock(text: command, diff: Self.looksLikeDiff(card.call.tool, command)) }
+            if card.isSimpleApproval && !card.call.detail.isEmpty {
                 Text(card.call.detail).font(.system(size: 12)).foregroundStyle(p.secondaryText).textSelection(.enabled)
             }
             if !card.call.modelReason.isEmpty { ReasonLine(text: card.call.modelReason) }
@@ -351,13 +376,19 @@ struct ApprovalCard: View {
     @Environment(\.loc) var loc
 
     var risk: RiskLevel { card.call.risk }
-    var accent: Color { card.isUseTarget ? p.accent : risk.color(p) }
+    var accent: Color { card.isSimpleApproval ? p.accent : risk.color(p) }
+
+    private var heading: String {
+        if card.isUseTarget { return loc("ai.useTarget.ask", card.call.targetName) }
+        if card.isUseApp { return card.call.summary.isEmpty ? loc("ai.tool.use_app") : card.call.summary }
+        return loc("ai.tool." + card.call.tool)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 8) {
-                Image(systemName: card.isUseTarget ? "link" : ToolRow.icon(card.call.tool)).font(.system(size: 13)).foregroundStyle(accent)
-                Text(card.isUseTarget ? loc("ai.useTarget.ask", card.call.targetName) : loc("ai.tool." + card.call.tool))
+                Image(systemName: ToolRow.icon(card.call.tool)).font(.system(size: 13)).foregroundStyle(accent)
+                Text(heading)
                     .font(.system(size: 13, weight: .semibold))
                 if !card.isUseTarget && !card.call.targetName.isEmpty {
                     HStack(spacing: 4) {
@@ -367,9 +398,9 @@ struct ApprovalCard: View {
                     .foregroundStyle(p.secondaryText)
                 }
                 Spacer()
-                if !card.isUseTarget { RiskChip(risk: risk) }
+                if !card.isSimpleApproval { RiskChip(risk: risk) }
             }
-            if card.isUseTarget {
+            if card.isSimpleApproval {
                 if !card.call.detail.isEmpty {
                     Text(card.call.detail).font(.system(size: 12)).foregroundStyle(p.secondaryText).textSelection(.enabled)
                 }
@@ -380,7 +411,7 @@ struct ApprovalCard: View {
                 CommandBlock(text: command, diff: ToolDetails.looksLikeDiff(card.call.tool, command))
             }
             if let img = card.call.image { Thumbnail(img: img, conv: conv) }
-            if !card.call.riskReasons.isEmpty { RiskReasons(risk: card.isUseTarget ? .unknown : risk, reasons: card.call.riskReasons) }
+            if !card.call.riskReasons.isEmpty { RiskReasons(risk: card.isSimpleApproval ? .unknown : risk, reasons: card.call.riskReasons) }
             if !card.call.modelReason.isEmpty { ReasonLine(text: card.call.modelReason) }
             buttons
         }
@@ -406,7 +437,7 @@ struct ApprovalCard: View {
                 Button(loc("common.cancel")) { card.editing = false }.buttonStyle(SecondaryButtonStyle())
                 Button(loc("ai.approve.runEdited")) { conv.decide(card, .editAndRun(command: card.editText)) }.buttonStyle(PrimaryButtonStyle())
             }
-        } else if card.isUseTarget {
+        } else if card.isSimpleApproval {
             HStack(spacing: 8) {
                 Button(loc("ai.approve.allow")) { conv.decide(card, .allowOnce) }.buttonStyle(PrimaryButtonStyle())
                 Button(loc("ai.approve.deny")) { conv.decide(card, .deny(reason: nil)) }.buttonStyle(SecondaryButtonStyle(destructive: true))
@@ -428,6 +459,82 @@ struct ApprovalCard: View {
     private func deny() {
         let r = card.denyReason.trimmingCharacters(in: .whitespacesAndNewlines)
         conv.decide(card, .deny(reason: r.isEmpty ? nil : r))
+    }
+}
+
+// MARK: - 任务清单（update_plan）
+
+/// update_plan 的清单：detail 每行一项，前缀 "[x] " 已完成、"[>] " 进行中、"[ ] " 待做。
+/// 一轮里只有最新的一份展开，之前的收成一行摘要（点开可看）。
+struct PlanCard: View {
+    @ObservedObject var card: ToolCardModel
+    let superseded: Bool
+    @Environment(\.palette) var p
+    @Environment(\.loc) var loc
+
+    enum Status { case done, active, pending }
+    struct Item: Hashable { let status: Status; let text: String }
+
+    static func parse(_ detail: String) -> [Item] {
+        detail.split(whereSeparator: \.isNewline).compactMap { raw in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { return nil }
+            for (prefix, st) in [("[x]", Status.done), ("[X]", .done), ("[>]", .active), ("[ ]", .pending)] where line.hasPrefix(prefix) {
+                return Item(status: st, text: String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces))
+            }
+            return Item(status: .pending, text: line)
+        }
+    }
+
+    /// 最新的一份默认展开，被后面的清单取代的默认收起；点标题切换
+    var open: Bool { superseded ? card.expanded : !card.expanded }
+
+    var body: some View {
+        let items = Self.parse(card.call.detail)
+        VStack(alignment: .leading, spacing: 0) {
+            Button { card.expanded.toggle() } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "checklist").font(.system(size: 11.5)).foregroundStyle(p.secondaryText).frame(width: 16)
+                    Text(card.call.summary.isEmpty ? loc("ai.tool.update_plan") : card.call.summary)
+                        .font(.system(size: 12.5, weight: open ? .medium : .regular)).foregroundStyle(open ? p.text : p.secondaryText)
+                        .lineLimit(1).truncationMode(.tail)
+                    Spacer(minLength: 6)
+                    Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .bold)).foregroundStyle(p.tertiaryText)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                }
+                .padding(.horizontal, 10).frame(height: 32)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(loc("ai.tool.update_plan"))
+            if open && !items.isEmpty {
+                Rectangle().fill(p.separator).frame(height: 1)
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, it in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            icon(it.status).frame(width: 16)
+                            Text(it.text)
+                                .font(.system(size: 12.5, weight: it.status == .active ? .medium : .regular))
+                                .foregroundStyle(it.status == .pending ? p.secondaryText : it.status == .done ? p.tertiaryText : p.text)
+                                .strikethrough(it.status == .done, color: p.tertiaryText)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 10)
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 9).fill(p.card))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(p.border, lineWidth: 0.6))
+    }
+
+    @ViewBuilder private func icon(_ s: Status) -> some View {
+        switch s {
+        case .done: Image(systemName: "checkmark.circle.fill").font(.system(size: 12)).foregroundStyle(p.success)
+        case .active: Image(systemName: "circle.inset.filled").font(.system(size: 12)).foregroundStyle(p.accent)
+        case .pending: Image(systemName: "circle").font(.system(size: 12)).foregroundStyle(p.tertiaryText)
+        }
     }
 }
 

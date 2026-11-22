@@ -317,6 +317,14 @@ impl HostPlatform for WinPlatform {
         }
     }
 
+    fn computer_use(&self, req: &str) -> Option<(String, Option<ImageData>)> {
+        // 会话代理里单次最多等 15 秒，这里多留一点
+        match request(&self.inner, |id| ToAgent::ComputerUse { id, request: req.to_string() }, Duration::from_secs(20)) {
+            Some(FromAgent::ComputerUse { text, image, .. }) => Some((text, image)),
+            _ => Some(("错误：用户会话里的代理没有响应（可能没有用户登录，或正在切换会话），稍后再试".into(), None)),
+        }
+    }
+
     fn clipboard_get(&self) -> Option<ClipboardData> {
         match request(&self.inner, |id| ToAgent::ClipboardGet { id }, Duration::from_secs(5)) {
             Some(FromAgent::Clipboard { data, .. }) => data,
@@ -426,7 +434,7 @@ impl HostPlatform for WinPlatform {
     }
 
     fn capabilities(&self) -> Vec<String> {
-        let mut c: Vec<String> = vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into(), "client_cursor".into()];
+        let mut c: Vec<String> = vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into(), "client_cursor".into(), galaxy_proto::peer::CAP_COMPUTER_USE.into()];
         if self.virtual_display_max() > 0 {
             c.push("virtual_display".into());
         }
