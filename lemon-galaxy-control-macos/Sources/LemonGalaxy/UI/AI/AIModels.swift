@@ -672,8 +672,10 @@ final class AIConversationModel: ObservableObject, Identifiable {
             doneMessages.insert(id)
             updatedAt = Clock.nowMs
         case .thinking(let id, let text):
-            if texts[id] == nil { items.append(.thinking(id: id)) }
-            texts[id, default: ""] += text
+            // 思考与正文同属一条消息（编号相同）：思考另存一个键，否则先到的思考占了编号，正文会被拼进思考块
+            let key = id + "-thinking"
+            if texts[key] == nil { items.append(.thinking(id: key)) }
+            texts[key, default: ""] += text
         case .toolProposed(let call, let needs):
             if let c = card(call.callId) {
                 // 同一调用再次提出（例如连接设备后重新确认）：更新状态

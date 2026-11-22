@@ -314,7 +314,8 @@ struct TabBar: View {
             .foregroundStyle(active ? p.text : p.secondaryText)
             .padding(.horizontal, 14)
             .frame(height: 38)
-            .background(active ? p.tabActive : .clear)
+            // 颜色背景默认会铺进窗口顶部安全区，选中标签的底色会越过顶部高亮线一直到窗口上沿：限定在标签本身
+            .background(active ? p.tabActive : .clear, ignoresSafeAreaEdges: [])
             .overlay(Rectangle().fill(active ? p.accent : .clear).frame(height: 2), alignment: .top)
         }
         .buttonStyle(.plain)
@@ -348,7 +349,7 @@ struct TabItem: View {
         .foregroundStyle(active ? p.text : p.secondaryText)
         .padding(.leading, 12).padding(.trailing, 6)
         .frame(height: 38)
-        .background(active ? p.tabActive : (hover ? p.hover : .clear))
+        .background(active ? p.tabActive : (hover ? p.hover : .clear), ignoresSafeAreaEdges: [])
         .overlay(Rectangle().fill(active ? p.accent : .clear).frame(height: 2), alignment: .top)
         .overlay(Rectangle().fill(p.separator).frame(width: 1), alignment: .leading)
         .contentShape(Rectangle())

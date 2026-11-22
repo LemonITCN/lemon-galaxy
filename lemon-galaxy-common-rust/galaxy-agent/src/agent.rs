@@ -896,6 +896,12 @@ impl Agent {
                     finished = true;
                     continue;
                 }
+                if let Some(p) = std::env::var_os("GALAXY_AI_RAW_DUMP") {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                        let _ = writeln!(f, "{data}");
+                    }
+                }
                 let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
                 if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
                     let p = u["prompt_tokens"].as_u64().unwrap_or(0);
