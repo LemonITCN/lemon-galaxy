@@ -1551,4 +1551,143 @@ mod tests {
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
     }
+
+    // ---------- 聊天式对话：用到时才连接，没引用过的设备先请用户同意 ----------
+
+    /// 按顺序回放的模型：每次调用吐出一条预设的 SSE 回复。
+    struct ScriptLlm(Mutex<Vec<String>>);
+    impl Llm for ScriptLlm {
+        fn stream(&self, _body: Value) -> BoxFut<'_, anyhow::Result<BoxStream<'static, anyhow::Result<Bytes>>>> {
+            let next = { let mut v = self.0.lock(); if v.is_empty() { String::new() } else { v.remove(0) } };
+            Box::pin(async move { Ok(futures::stream::iter(vec![Ok(Bytes::from(next))]).boxed()) })
+        }
+    }
+    fn sse_text(t: &str) -> String {
+        format!("data: {}\n\ndata: [DONE]\n\n", json!({ "choices": [{ "delta": { "content": t }, "finish_reason": "stop" }] }))
+    }
+    fn sse_call(name: &str, args: Value) -> String {
+        format!("data: {}\n\ndata: [DONE]\n\n", json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "id": "c1", "function": { "name": name, "arguments": args.to_string() } }] }, "finish_reason": "tool_calls" }] }))
+    }
+
+    #[derive(Default)]
+    struct FakeExec {
+        connected: Mutex<Vec<String>>,
+        ran: Mutex<Vec<(String, String)>>,
+    }
+    impl Executor for FakeExec {
+        fn targets(&self) -> Vec<TargetInfo> {
+            self.connected.lock().iter().map(|id| TargetInfo { id: id.clone(), name: format!("名-{id}"), kind: TargetKind::Device, platform: Platform::Linux, os: "Linux".into(), user: "u".into(), shell: "sh".into(), gui: false, ai_cap: AiMode::FullTrust }).collect()
+        }
+        fn run_command(&self, target: &str, cmd: &str, _cwd: Option<String>, _t: u64, _sh: Option<String>, _o: Origin, _on: Box<dyn Fn(&str) + Send + Sync>, _c: watch::Receiver<bool>) -> BoxFut<'_, anyhow::Result<CmdResult>> {
+            self.ran.lock().push((target.to_string(), cmd.to_string()));
+            Box::pin(async { Ok(CmdResult { code: Some(0), stdout: "ok".into(), ..Default::default() }) })
+        }
+        fn read_file(&self, _: &str, _: &str, _: u64) -> BoxFut<'_, anyhow::Result<Vec<u8>>> { Box::pin(async { anyhow::bail!("x") }) }
+        fn exists(&self, _: &str, _: &str) -> BoxFut<'_, anyhow::Result<bool>> { Box::pin(async { Ok(false) }) }
+        fn write_file(&self, _: &str, _: &str, _: Vec<u8>, _: Option<Vec<u8>>, _: Origin) -> BoxFut<'_, anyhow::Result<Option<String>>> { Box::pin(async { Ok(None) }) }
+        fn list_dir(&self, _: &str, _: &str) -> BoxFut<'_, anyhow::Result<Vec<FileEntry>>> { Box::pin(async { Ok(vec![]) }) }
+        fn search(&self, _: &str, _: &str, _: &str, _: bool) -> BoxFut<'_, anyhow::Result<Vec<FileEntry>>> { Box::pin(async { Ok(vec![]) }) }
+        fn displays(&self, _: &str) -> BoxFut<'_, anyhow::Result<Vec<DisplayInfo>>> { Box::pin(async { Ok(vec![]) }) }
+        fn screenshot(&self, _: &str, _: u32, _: u32, _: u32) -> BoxFut<'_, anyhow::Result<ImageData>> { Box::pin(async { anyhow::bail!("x") }) }
+        fn ui_tree(&self, _: &str, _: u32, _: u32) -> BoxFut<'_, anyhow::Result<String>> { Box::pin(async { anyhow::bail!("x") }) }
+        fn inject(&self, _: &str, _: u32, _: Vec<InputEvent>, _: Origin) -> BoxFut<'_, anyhow::Result<()>> { Box::pin(async { Ok(()) }) }
+        fn terminal_open(&self, _: &str, _: Origin) -> BoxFut<'_, anyhow::Result<String>> { Box::pin(async { anyhow::bail!("x") }) }
+        fn terminal_send(&self, _: &str, _: Vec<u8>) -> BoxFut<'_, anyhow::Result<()>> { Box::pin(async { Ok(()) }) }
+        fn terminal_read(&self, _: &str) -> BoxFut<'_, anyhow::Result<String>> { Box::pin(async { Ok(String::new()) }) }
+        fn terminal_close(&self, _: &str) -> BoxFut<'_, anyhow::Result<()>> { Box::pin(async { Ok(()) }) }
+    }
+
+    struct FakeWs(Arc<FakeExec>);
+    impl Workspace for FakeWs {
+        fn catalog(&self) -> BoxFut<'_, anyhow::Result<Vec<CatalogItem>>> {
+            Box::pin(async { Ok(vec![CatalogItem { id: "dev1".into(), name: "服务器一".into(), kind: TargetKind::Device, platform: Platform::Linux, online: true, detail: String::new() }]) })
+        }
+        fn query(&self, kind: &str, _limit: u32) -> BoxFut<'_, anyhow::Result<String>> {
+            let k = kind.to_string();
+            Box::pin(async move { Ok(format!("查询 {k}")) })
+        }
+        fn connect(&self, target: &str) -> BoxFut<'_, anyhow::Result<()>> {
+            self.0.connected.lock().push(target.to_string());
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// 记录事件；遇到需要确认的步骤按预设回答。
+    struct AutoUi {
+        events: Mutex<Vec<AgentEvent>>,
+        agent: Mutex<Option<std::sync::Weak<Agent>>>,
+        allow: bool,
+    }
+    impl AgentUi for AutoUi {
+        fn event(&self, e: AgentEvent) {
+            if let AgentEvent::ToolProposed { call, needs_approval: true } = &e {
+                let id = call.call_id.clone();
+                let a = self.agent.lock().as_ref().and_then(|w| w.upgrade());
+                let allow = self.allow;
+                if let Some(a) = a {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        a.decide(&id, if allow { ApprovalDecision::AllowOnce } else { ApprovalDecision::Deny { reason: None } });
+                    });
+                }
+            }
+            self.events.lock().push(e);
+        }
+    }
+
+    fn chat_agent(allow: bool, replies: Vec<String>) -> (Arc<Agent>, Arc<FakeExec>, Arc<AutoUi>) {
+        let exec = Arc::new(FakeExec::default());
+        let ui = Arc::new(AutoUi { events: Mutex::new(vec![]), agent: Mutex::new(None), allow });
+        let cfg = AgentConfig { conversation_id: "c".into(), provider_id: 1, model_id: "m".into(), vision: false, context_length: 0, mode: AiMode::ConfirmDangerous, admin_cap: AiMode::FullTrust, plan_first: false, max_steps: 10, locale: "zh".into(), trust_minutes: None };
+        let a = Agent::new(cfg, Arc::new(ScriptLlm(Mutex::new(replies))), exec.clone(), Some(Arc::new(FakeWs(exec.clone()))), ui.clone());
+        *ui.agent.lock() = Some(Arc::downgrade(&a));
+        (a, exec, ui)
+    }
+
+    fn use_target_asked(ui: &AutoUi) -> bool {
+        ui.events.lock().iter().any(|e| matches!(e, AgentEvent::ToolProposed { call, needs_approval: true } if call.tool == "use_target"))
+    }
+
+    #[tokio::test]
+    async fn plain_chat_needs_no_device() {
+        let (a, exec, _ui) = chat_agent(true, vec![sse_text("你好")]);
+        a.send("你好".into()).await;
+        assert!(exec.connected.lock().is_empty());
+        assert!(matches!(a.messages().last(), Some(AgentMessage::Assistant { text, .. }) if text == "你好"));
+    }
+
+    #[tokio::test]
+    async fn unreferenced_device_asks_before_connecting() {
+        let (a, exec, ui) = chat_agent(true, vec![sse_call("run_command", json!({ "target": "dev1", "command": "uptime", "reason": "看负载" })), sse_text("负载正常")]);
+        a.send("服务器一负载怎么样".into()).await;
+        assert!(use_target_asked(&ui));
+        assert_eq!(exec.connected.lock().clone(), vec!["dev1".to_string()]);
+        assert_eq!(exec.ran.lock().clone(), vec![("dev1".to_string(), "uptime".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn denied_device_is_not_connected() {
+        let (a, exec, ui) = chat_agent(false, vec![sse_call("run_command", json!({ "target": "服务器一", "command": "uptime", "reason": "看负载" })), sse_text("好的")]);
+        a.send("看看负载".into()).await;
+        assert!(use_target_asked(&ui));
+        assert!(exec.connected.lock().is_empty());
+        assert!(exec.ran.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn referenced_device_connects_without_asking() {
+        let (a, exec, ui) = chat_agent(true, vec![sse_call("run_command", json!({ "target": "dev1", "command": "uptime", "reason": "看负载" })), sse_text("好")]);
+        a.send_input(UserInput { text: "看负载".into(), context: String::new(), refs: vec![RefView { kind: "device".into(), target_id: String::new(), id: "dev1".into(), label: "服务器一".into() }], targets: vec!["dev1".into()] }).await;
+        assert!(!use_target_asked(&ui));
+        assert_eq!(exec.ran.lock().len(), 1);
+        assert!(matches!(a.messages().first(), Some(AgentMessage::User { refs, .. }) if refs.len() == 1));
+    }
+
+    #[tokio::test]
+    async fn account_query_tool_runs_without_approval() {
+        let (a, _exec, ui) = chat_agent(true, vec![sse_call("recent_activity", json!({ "limit": 5 })), sse_text("最近没有异常")]);
+        a.send("最近谁连过".into()).await;
+        assert!(ui.events.lock().iter().any(|e| matches!(e, AgentEvent::ToolFinished { result, .. } if result.ok)));
+        assert!(!ui.events.lock().iter().any(|e| matches!(e, AgentEvent::ToolProposed { needs_approval: true, .. })));
+    }
 }
