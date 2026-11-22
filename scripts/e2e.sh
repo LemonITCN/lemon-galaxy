@@ -72,9 +72,9 @@ echo "$AUD" | grep "声音：" | sed -E 's/.*声音：([0-9.]+) 秒，均方根 
 
 step "文件上传下载（8MB）"
 head -c 8000000 /dev/urandom >"$WORK/big.bin"
-timeout 120 "$BIN/galaxy-dev" --data "$WORK/ctl" put "" "$WORK/big.bin" "$WORK/up.bin" >/dev/null 2>&1 || fail "上传失败"
+timeout 120 "$BIN/galaxy-dev" --data "$WORK/ctl" put "" "$WORK/big.bin" "$WORK/up.bin" >"$WORK/put.log" 2>&1 || fail "上传失败"
 cmp "$WORK/big.bin" "$WORK/up.bin" || fail "上传内容不一致"
-timeout 120 "$BIN/galaxy-dev" --data "$WORK/ctl" get "" "$WORK/up.bin" "$WORK/down.bin" >/dev/null 2>&1 || fail "下载失败"
+timeout 120 "$BIN/galaxy-dev" --data "$WORK/ctl" get "" "$WORK/up.bin" "$WORK/down.bin" >"$WORK/get.log" 2>&1 || fail "下载失败"
 cmp "$WORK/big.bin" "$WORK/down.bin" || fail "下载内容不一致"
 echo "上传下载内容一致"
 
