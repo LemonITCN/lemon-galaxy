@@ -171,6 +171,11 @@ impl ServeCtx {
 }
 
 fn main() {
+    // 输出接到管道、对方先关了（如 `status | head`）时按命令行惯例安静退出，不要 panic
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let _ = rustls::crypto::ring::default_provider().install_default();
     // Windows 上从资源管理器双击打开：控制台窗口是专门开的，出错时停住让人看清
     #[cfg(windows)]
