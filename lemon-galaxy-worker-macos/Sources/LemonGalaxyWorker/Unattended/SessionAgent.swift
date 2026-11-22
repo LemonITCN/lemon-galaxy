@@ -105,6 +105,8 @@ final class AgentClient: @unchecked Sendable {
     private var lastConsole: AgentConsoleState?
     private var capturing = Set<UInt32>()
     private var sinks: [UInt32: ForwardingFrameSink] = [:]
+    /// 主控端自己画光标的屏幕（画面里不画）。采集启动途中收到的也记着，启动成功后补设
+    private var cursorOff = Set<UInt32>()
     private var audioOn = false
     private var privacyOn = false
     private let wake = DispatchSemaphore(value: 0)
@@ -203,7 +205,7 @@ final class AgentClient: @unchecked Sendable {
 
     private func stopAll() {
         let (displays, audio, privacy) = lock.locked { () -> (Set<UInt32>, Bool, Bool) in
-            defer { capturing.removeAll(); sinks.removeAll(); audioOn = false; privacyOn = false }
+            defer { capturing.removeAll(); sinks.removeAll(); cursorOff.removeAll(); audioOn = false; privacyOn = false }
             return (capturing, audioOn, privacyOn)
         }
         for d in displays { platform.stopCapture(displayId: d) }
@@ -233,7 +235,13 @@ final class AgentClient: @unchecked Sendable {
                 guard let c = lock.locked({ conn }) else { reply.fail(.other("已断开")); return }
                 let sink = ForwardingFrameSink(display: p.display, conn: c, keyframe: keyframe)
                 let started = platform.startCapture(displayId: p.display, options: p.options, sink: sink)
-                if started != nil { lock.locked { capturing.insert(p.display); sinks[p.display] = sink } }
+                let cursorOff = started == nil ? false : lock.locked { () -> Bool in
+                    capturing.insert(p.display)
+                    sinks[p.display] = sink
+                    return self.cursorOff.contains(p.display)
+                }
+                // 启动途中已经要求不画光标（通知与请求在不同队列上处理）：补设
+                if cursorOff { platform.setCursorInVideo(displayId: p.display, show: false) }
                 reply.ok(PStarted(started: started))
             case IPCMethod.screenshot:
                 let p = try m.decode(PScreenshot.self)
@@ -272,13 +280,17 @@ final class AgentClient: @unchecked Sendable {
         switch m.method {
         case IPCMethod.stopCapture:
             guard let p = try? m.decode(PDisplay.self) else { return }
-            lock.locked { _ = capturing.remove(p.display); sinks[p.display] = nil }
+            lock.locked { _ = capturing.remove(p.display); sinks[p.display] = nil; cursorOff.remove(p.display) }
             platform.stopCapture(displayId: p.display)
             recycleIfIdle()
         case IPCMethod.keyframe:
             if let p = try? m.decode(PDisplay.self) { platform.requestKeyframe(displayId: p.display) }
         case IPCMethod.bitrate:
             if let p = try? m.decode(PBitrate.self) { platform.setBitrate(displayId: p.display, kbps: p.kbps) }
+        case IPCMethod.cursorInVideo:
+            guard let p = try? m.decode(PCursorInVideo.self) else { return }
+            lock.locked { if p.show { cursorOff.remove(p.display) } else { cursorOff.insert(p.display) } }
+            platform.setCursorInVideo(displayId: p.display, show: p.show)
         case IPCMethod.inject:
             if let p = try? m.decode(PInject.self) { platform.inject(displayId: p.display, event: p.event) }
         case IPCMethod.clipboardSet:
@@ -332,6 +344,11 @@ final class ForwardingFrameSink: EncodedFrameSink, @unchecked Sendable {
     override func setResolution(width: UInt32, height: UInt32) {
         conn?.notify(IPCMethod.agentResolution, AResolution(display: display, width: width, height: height))
     }
+
+    /// 光标位置很小、只在变化时发，不丢（丢了最后一次位置，光标停下后主控端就一直画在旧位置）
+    override func setCursor(x: Int32, y: Int32, visible: Bool) {
+        conn?.notify(IPCMethod.agentCursor, ACursor(display: display, x: x, y: y, visible: visible))
+    }
 }
 
 /// 声音样本 → 后台服务（积压时丢掉，声音晚到不如不到）
@@ -372,7 +389,8 @@ final class AgentPlatform: HostPlatform, @unchecked Sendable {
     func capabilities() -> [String] {
         guard loginWindow else { return mac.capabilities() }
         var c = ["clipboard"]
-        if screenAllowed { c += ["display", "screenshot"] }
+        // 登录界面的两种截屏（ScreenCaptureKit / CGDisplayStream）都能切换画面里的光标
+        if screenAllowed { c += ["display", "screenshot", "client_cursor"] }
         if inputAllowed { c.append("input") }
         if SystemPermissions.accessibilityGranted { c.append("ui_tree") }
         return c
@@ -440,6 +458,14 @@ final class AgentPlatform: HostPlatform, @unchecked Sendable {
         }
     }
 
+    func setCursorInVideo(displayId: UInt32, show: Bool) {
+        switch lock.locked({ own[displayId] }) {
+        case let c as ScreenCapture: c.setCursorInVideo(show)
+        case let d as DisplayStreamCapture: d.setCursorInVideo(show)
+        default: mac.setCursorInVideo(displayId: displayId, show: show)
+        }
+    }
+
     func inject(displayId: UInt32, event: InputEvent) { mac.inject(displayId: displayId, event: event) }
 
     func screenshot(displayId: UInt32, maxWidth: UInt32, maxHeight: UInt32) -> ImageData? {
@@ -470,6 +496,14 @@ final class DisplayStreamCapture: @unchecked Sendable {
     private var encoder: VideoEncoder?
     private let queue = DispatchQueue(label: "galaxy.displaystream", qos: .userInteractive)
     private var start0: UInt64?
+    /// 实际采集的屏幕、画面尺寸与帧率（重建流时用）
+    private var source: (id: CGDirectDisplayID, w: Int, h: Int, fps: Int)?
+    /// 画面里画不画光标。CGDisplayStream 不能中途改，切换时用新设置重建流（编码器不变，画面接着走）
+    private let lock = NSLock()
+    private var showCursor = true
+    private var reporter: CursorReporter?
+    private var stopped = false
+    private let cfgQueue = DispatchQueue(label: "galaxy.displaystream.cfg")
     private static let timebase: mach_timebase_info_data_t = {
         var t = mach_timebase_info_data_t()
         mach_timebase_info(&t)
@@ -502,8 +536,27 @@ final class DisplayStreamCapture: @unchecked Sendable {
         }
         guard let (enc, codec) = chosen else { return nil }
         encoder = enc
+        let show = lock.locked { showCursor }
+        guard let s = makeStream(id: id, w: w, h: h, fps: fps, showCursor: show) else {
+            enc.invalidate()
+            encoder = nil
+            return nil
+        }
+        let r = CursorReporter(displayId: id, width: w, height: h, sink: sink)
+        let changed = lock.locked { () -> Bool in
+            stream = s
+            source = (id, w, h, fps)
+            reporter = r
+            return showCursor != show
+        }
+        if !show { r.start() }
+        if changed { setCursorInVideo(lock.locked { showCursor }) }
+        return CaptureStarted(width: UInt32(w), height: UInt32(h), codec: codec)
+    }
+
+    private func makeStream(id: CGDirectDisplayID, w: Int, h: Int, fps: Int, showCursor: Bool) -> CGDisplayStream? {
         let props: [CFString: Any] = [
-            CGDisplayStream.showCursor: true,
+            CGDisplayStream.showCursor: showCursor,
             CGDisplayStream.minimumFrameTime: 1.0 / Double(fps),
             CGDisplayStream.queueDepth: 4,
         ]
@@ -513,13 +566,30 @@ final class DisplayStreamCapture: @unchecked Sendable {
             guard status == .frameComplete, let surface else { return }
             self?.frame(surface, time)
         }
-        guard let s, s.start() == .success else {
-            enc.invalidate()
-            encoder = nil
-            return nil
+        guard let s, s.start() == .success else { return nil }
+        return s
+    }
+
+    /// 画面里画不画光标：不画时开始上报光标位置。重建流在 cfgQueue 上串行进行，以最后一次要求为准
+    func setCursorInVideo(_ show: Bool) {
+        lock.locked { showCursor = show }
+        cfgQueue.async { [weak self] in
+            guard let self else { return }
+            let (want, src, r) = self.lock.locked { (self.showCursor, self.stopped ? nil : self.source, self.reporter) }
+            guard let src else { return }
+            if !want { r?.start() }
+            guard let s = self.makeStream(id: src.id, w: src.w, h: src.h, fps: src.fps, showCursor: want) else {
+                NSLog("LemonGalaxy 会话代理：切换画面里的光标时重建 CGDisplayStream 失败（屏幕 %u）", src.id)
+                return
+            }
+            let old = self.lock.locked { () -> CGDisplayStream? in
+                guard !self.stopped else { return s }
+                defer { self.stream = s }
+                return self.stream
+            }
+            old?.stop()
+            if want { r?.stop() }
         }
-        stream = s
-        return CaptureStarted(width: UInt32(w), height: UInt32(h), codec: codec)
     }
 
     private func frame(_ surface: IOSurfaceRef, _ time: UInt64) {
@@ -532,8 +602,13 @@ final class DisplayStreamCapture: @unchecked Sendable {
     }
 
     func stop() {
-        stream?.stop()
-        stream = nil
+        let (s, r) = lock.locked { () -> (CGDisplayStream?, CursorReporter?) in
+            stopped = true
+            defer { stream = nil; reporter = nil }
+            return (stream, reporter)
+        }
+        r?.stop()
+        s?.stop()
         encoder?.invalidate()
         encoder = nil
     }

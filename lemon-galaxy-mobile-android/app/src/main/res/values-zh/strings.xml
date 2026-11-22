@@ -291,7 +291,7 @@
     <string name="rd_mode">操作方式</string>
     <string name="rd_mode_touch">触控</string>
     <string name="rd_mode_mouse">鼠标</string>
-    <string name="rd_mode_info">触控：点哪里就点击哪里，长按为右键，拖动为按住拖拽。\n鼠标：像触控板一样移动光标；单指轻点为左键，双指轻点为右键，双指拖动为滚轮，长按后移动为拖拽。\n双指捏合缩放画面，双指双击在适应屏幕与放大之间切换。放大后，触控模式下双指拖动平移画面，鼠标模式下画面跟随光标。\n在右侧菜单上上下滑动切换显示器。\n声音（设备支持时）：在本机播放被控端的声音，开关状态会被记住。</string>
+    <string name="rd_mode_info">触控：点哪里就点击哪里，长按为右键，拖动为按住拖拽。\n鼠标（默认）：像触控板一样移动光标；单指轻点为左键，双指轻点为右键，双指拖动为滚轮，长按后移动为拖拽。\n双指捏合缩放画面，双指双击在适应屏幕与放大之间切换。放大后，触控模式下双指拖动平移画面，鼠标模式下画面跟随光标。\n在右侧菜单上上下滑动切换显示器。\n声音（设备支持时）：在本机播放被控端的声音。\n操作方式与声音开关的选择会被记住。</string>
     <string name="rd_display">显示器</string>
     <string name="rd_quality">画质</string>
     <string name="quality_auto">自动</string>

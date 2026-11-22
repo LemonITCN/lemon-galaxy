@@ -17,11 +17,16 @@ final class RemoteSession: ObservableObject, Identifiable {
     let deviceId: String
     let title: String
     let platform: Platform
-    @Published private(set) var status: Status = .connecting
+    @Published private(set) var status: Status = .connecting { didSet { canvas.streaming = status == .streaming } }
     @Published private(set) var displays: [DisplayInfo] = []
     @Published private(set) var displayId: UInt32?
     @Published private(set) var quality: VideoQuality
-    @Published var mouseMode: Bool { didSet { canvas.mouseMode = mouseMode } }
+    @Published var mouseMode: Bool {
+        didSet {
+            canvas.mouseMode = mouseMode
+            applyClientCursor()
+        }
+    }
     @Published private(set) var videoSize = CGSize.zero
     @Published private(set) var codec: VideoCodec = .h264
     @Published private(set) var peer: PeerConnection?
@@ -110,6 +115,16 @@ final class RemoteSession: ObservableObject, Identifiable {
         }
     }
     var viewOnly: Bool { !(peer?.info.permissions.control ?? true) }
+
+    /// 对端能力里有 "client_cursor"：鼠标模式下被控端画面里不画光标，由本机画（跟手）
+    var supportsClientCursor: Bool { peer?.info.capabilities.contains("client_cursor") ?? false }
+
+    /// 鼠标模式本机画光标、被控端画面里不画；触控模式画回画面里。
+    /// 每路画面各自记着（默认画），打开画面后要再发一次。只对支持的被控端发（老版本收到不认识的消息会关流）
+    private func applyClientCursor() {
+        guard supportsClientCursor, let channel else { return }
+        channel.setClientCursor(on: mouseMode)
+    }
 
     /// 对端能力里有 "audio"（对方给了听声音的权限且系统能采集）才显示声音开关
     var supportsAudio: Bool { peer?.info.capabilities.contains("audio") ?? false }
@@ -211,9 +226,13 @@ final class RemoteSession: ObservableObject, Identifiable {
         stopRecording(.reopen)
         channel?.stop()
         channel = nil
+        let switched = id != displayId
         displayId = id
         status = .connecting
         if let d = display { canvas.setRemoteSize(Int(d.width), Int(d.height)) }
+        // 换了屏幕：光标先放屏幕中心
+        if switched { canvas.resetPointer() }
+        canvas.clientCursor = supportsClientCursor
         let adapter = VideoSinkAdapter()
         let decoder = self.decoder
         adapter.onConfigure = { [weak self] codec, w, h in
@@ -232,7 +251,13 @@ final class RemoteSession: ObservableObject, Identifiable {
         }
         adapter.onData = { data, pts, key in decoder.decode(data, ptsUs: pts, keyframe: key) }
         adapter.onCursorMove = { [weak self] x, y, visible in
-            DispatchQueue.main.async { self?.canvas.remoteCursor(x, y, visible: visible) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // 回报是画面像素，输入与界面用被控屏幕像素：画面被缩放过时换算一下（相等时原样）
+                let v = self.canvas.viewport
+                let (rx, ry) = LocalPointer.videoToRemote(x, y, video: self.videoSize, remoteW: v.remoteW, remoteH: v.remoteH)
+                self.canvas.remoteCursor(rx, ry, visible: visible)
+            }
         }
         adapter.onClose = { [weak self, weak adapter] reason in
             DispatchQueue.main.async {
@@ -248,6 +273,7 @@ final class RemoteSession: ObservableObject, Identifiable {
                                                                                  codecs: VideoDecoder.supportedCodecs, viewOnly: viewOnly),
                                                          sink: adapter)
             canvas.viewOnly = viewOnly
+            applyClientCursor()
             startAudioIfWanted()
         } catch {
             status = .failed(describeError(error))

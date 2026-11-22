@@ -87,6 +87,8 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
 
     override func requestKeyframe() { encoder?.requestKeyframe() }
     override func setBitrate(kbps: UInt32) { encoder?.setBitrate(kbps: Int(kbps)) }
+    /// 模拟画面本来就不画光标、移动时总是报位置，主控端自己画光标时这里不用变
+    override func setClientCursor(on: Bool) {}
 
     override func isRecording() -> Bool { recLock.locked { rec != nil } }
 

@@ -500,7 +500,11 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
             override fun onInput(events: List<InputEvent>) = controller.sendAll(events)
             override fun onDisplay(id: UInt) = controller.switchDisplay(id)
             override fun onQuality(q: VideoQuality) = controller.setQuality(q)
-            override fun onMouseMode(on: Boolean) = controller.setMouseMode(on)
+            override fun onMouseMode(on: Boolean) {
+                // 记住选择，下次打开远程桌面沿用
+                container.settings.update { it.copy(remoteMouseMode = on) }
+                controller.setMouseMode(on)
+            }
             override fun onPrivacy(on: Boolean) {
                 scope.launch {
                     try {

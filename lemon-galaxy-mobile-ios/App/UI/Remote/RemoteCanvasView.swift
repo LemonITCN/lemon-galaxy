@@ -8,7 +8,8 @@ import GalaxyKit
 /// 鼠标（触控板）模式：单指移动光标，单指轻点左键，双指轻点右键，双指拖动滚轮，长按后移动是拖拽。
 /// 两种模式都能双指捏合缩放（以双指中心为准，画面始终保持被控屏幕比例），双指双击在适应屏幕与放大之间切换；
 /// 放大后触控模式双指拖动平移，鼠标模式画面跟随光标。单指双击不拦截，照常发两次单击（被控端收到的就是双击）。
-/// 光标由被控端画进画面里，这里不再叠加本地箭头，只记住光标位置（鼠标模式相对移动、画面跟随用）。
+/// 光标位置由本机记（LocalPointer，手指一动立即更新）。鼠标模式且被控端支持 "client_cursor" 时，
+/// 被控端画面里不画光标，箭头在这里本地画（跟手）；其余情况光标在画面里，这里不再叠加。
 final class RemoteCanvasView: UIView, UIKeyInput {
     /// 画面摆放变化的原因：捏合 / 双指双击要提示倍数，其余（布局、菜单里的适应屏幕等）不提示
     enum ViewportChange { case gesture, other }
@@ -16,11 +17,18 @@ final class RemoteCanvasView: UIView, UIKeyInput {
     let displayLayer = AVSampleBufferDisplayLayer()
     var send: (([InputEvent]) -> Void)?
     var onViewportChange: ((Viewport, ViewportChange) -> Void)?
-    var mouseMode = false
+    var mouseMode = false { didSet { updatePointerLayer() } }
+    /// 被控端支持 "client_cursor"（鼠标模式下画面里不画光标，由这里画）
+    var clientCursor = false { didSet { updatePointerLayer() } }
+    /// 画面在出图（连接中、断开时不画箭头）
+    var streaming = false { didSet { updatePointerLayer() } }
     var viewOnly = false
     var platform: Platform = .windows
     private(set) var viewport = Viewport(containerW: 1, containerH: 1, remoteW: 1, remoteH: 1)
-    private var cursor: (Int32, Int32) = (0, 0)
+    private var pointer = LocalPointer()
+    private var cursor: (Int32, Int32) { (pointer.x, pointer.y) }
+    /// 本地画的箭头（尖端 = 热点）。大小固定、不随画面缩放
+    private let pointerLayer = CAShapeLayer()
 
     // 键盘上方特殊键的粘滞修饰键
     private var mods: [String: Bool] = [:]
@@ -35,6 +43,14 @@ final class RemoteCanvasView: UIView, UIKeyInput {
         displayLayer.videoGravity = .resize
         displayLayer.backgroundColor = UIColor.black.cgColor
         layer.addSublayer(displayLayer)
+        pointerLayer.path = PointerArrow.path()
+        pointerLayer.fillColor = UIColor.white.cgColor
+        pointerLayer.strokeColor = UIColor.black.cgColor
+        pointerLayer.lineWidth = PointerArrow.strokeWidth * PointerArrow.unit
+        pointerLayer.lineJoin = .round
+        pointerLayer.bounds = .zero
+        pointerLayer.isHidden = true
+        layer.addSublayer(pointerLayer)
         // iPad 外接鼠标 / 触控板：悬停移动光标、右键、双指滚动
         addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:))))
         let right = UITapGestureRecognizer(target: self, action: #selector(secondaryClick(_:)))
@@ -69,7 +85,7 @@ final class RemoteCanvasView: UIView, UIKeyInput {
     /// 被控屏幕分辨率（换屏、对方改分辨率时回到适应屏幕；同一分辨率重开画面保持缩放）
     func setRemoteSize(_ w: Int, _ h: Int) {
         let changed = w != viewport.remoteW || h != viewport.remoteH
-        if changed { cursor = (Int32(w / 2), Int32(h / 2)) }
+        if changed { pointer.reset(Int32(w / 2), Int32(h / 2)) }
         setViewport(viewport.resized(containerW: bounds.width, containerH: bounds.height, remoteW: w, remoteH: h), .other)
     }
 
@@ -96,12 +112,30 @@ final class RemoteCanvasView: UIView, UIKeyInput {
             displayLayer.frame = v.contentRect
             CATransaction.commit()
         }
+        if v != old { updatePointerLayer() }
         if v != old || reason == .gesture { onViewportChange?(v, reason) }
     }
 
-    /// 被控端报来的光标位置（画面里已经画了光标，这里只记位置）
+    /// 换屏幕：光标先放屏幕中心（被控端有回报后以回报为准）
+    func resetPointer() {
+        pointer.reset(Int32(viewport.remoteW / 2), Int32(viewport.remoteH / 2))
+        updatePointerLayer()
+    }
+
+    /// 被控端报来的光标位置（被控屏幕像素）：本机刚动过时是自己移动的回声，不采用（见 LocalPointer）
     func remoteCursor(_ x: Int32, _ y: Int32, visible: Bool) {
-        cursor = (x, y)
+        pointer.hostReport(x, y, visible: visible, now: CACurrentMediaTime())
+        updatePointerLayer()
+    }
+
+    /// 摆放本地箭头：尖端对准光标所在被控像素的中心，随画面缩放平移换算
+    private func updatePointerLayer() {
+        let show = mouseMode && clientCursor && streaming && pointer.visible
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pointerLayer.isHidden = !show
+        if show { pointerLayer.position = viewport.toView(pointer.x, pointer.y) }
+        CATransaction.commit()
     }
 
     // MARK: 输入事件
@@ -112,13 +146,19 @@ final class RemoteCanvasView: UIView, UIKeyInput {
         [.mouseMove(x: x, y: y), .mouseButton(button: b, down: true, x: x, y: y), .mouseButton(button: b, down: false, x: x, y: y)]
     }
 
+    /// 本机先记下光标位置（不等被控端回报）并立即挪箭头，再发出去
     private func emit(_ events: [InputEvent]) {
+        let now = CACurrentMediaTime()
+        var moved = false
         for e in events {
             switch e {
-            case .mouseMove(let x, let y), .mouseButton(_, _, let x, let y): cursor = (x, y)
+            case .mouseMove(let x, let y), .mouseButton(_, _, let x, let y):
+                pointer.moved(x, y, now: now)
+                moved = true
             default: break
             }
         }
+        if moved { updatePointerLayer() }
         send?(events)
     }
 

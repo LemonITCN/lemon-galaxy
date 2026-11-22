@@ -39,7 +39,7 @@ class RemoteGestureTest {
     private val events = mutableListOf<InputEvent>()
     private val switched = mutableListOf<UInt>()
 
-    private fun ui(mouse: Boolean) = RemoteUi(
+    private fun ui(mouse: Boolean, clientCursor: Boolean = false) = RemoteUi(
         title = "PC",
         platform = Platform.WINDOWS,
         status = RemoteStatus.STREAMING,
@@ -51,13 +51,14 @@ class RemoteGestureTest {
         displayId = 1u,
         quality = VideoQuality.AUTO,
         mouseMode = mouse,
+        clientCursor = clientCursor,
         cursorX = 100,
         cursorY = 200,
         videoW = 1920,
         videoH = 1080,
     )
 
-    private fun show(mouse: Boolean = false): RemoteViewState {
+    private fun show(mouse: Boolean = false, clientCursor: Boolean = false): RemoteViewState {
         val state = RemoteViewState()
         val actions = object : RemoteActions {
             override fun onInput(events: List<InputEvent>) {
@@ -73,7 +74,7 @@ class RemoteGestureTest {
             override fun onDisconnect() = Unit
         }
         compose.setContent {
-            RemoteDesktopScreen(ui(mouse), actions, video = { m -> Box(m.background(Color.Gray)) }, state = state)
+            RemoteDesktopScreen(ui(mouse, clientCursor), actions, video = { m -> Box(m.background(Color.Gray)) }, state = state)
         }
         compose.waitForIdle()
         return state
@@ -186,5 +187,36 @@ class RemoteGestureTest {
         }
         compose.waitForIdle()
         compose.onNodeWithTag("remote-notice").assertExists()
+    }
+
+    @Test
+    fun mouseModeTracksPointerLocallyAndDrawsArrow() {
+        val state = show(mouse = true, clientCursor = true)
+        compose.onNodeWithTag("remote-local-pointer").assertExists()
+        // 连着两次滑动：第二次从第一次结束处接着走（本机记位置，不等被控端回报）
+        repeat(2) {
+            compose.onNodeWithTag("remote-surface").performTouchInput { swipe(Offset(600f, 400f), Offset(700f, 400f), 200) }
+            compose.waitForIdle()
+        }
+        val moves = events.filterIsInstance<InputEvent.MouseMove>()
+        assertTrue(moves.isNotEmpty())
+        val last = moves.last()
+        assertEquals(state.pointer.x to state.pointer.y, last.x to last.y)
+        // 两次各移动约 100 视图像素 × 1.6 加速 × 每视图像素的被控像素
+        val expected = 100 + 2 * 100f * 1.6f * state.viewport.remotePerViewPx()
+        assertEquals(expected, last.x.toFloat(), 40f)
+        assertEquals(200, last.y)
+    }
+
+    @Test
+    fun noLocalArrowWhenHostDrawsCursor() {
+        show(mouse = true, clientCursor = false)
+        compose.onNodeWithTag("remote-local-pointer").assertDoesNotExist()
+    }
+
+    @Test
+    fun noLocalArrowInTouchMode() {
+        show(mouse = false, clientCursor = true)
+        compose.onNodeWithTag("remote-local-pointer").assertDoesNotExist()
     }
 }

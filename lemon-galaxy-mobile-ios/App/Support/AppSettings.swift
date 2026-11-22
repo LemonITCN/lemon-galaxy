@@ -27,7 +27,13 @@ final class AppSettings: ObservableObject {
     @Published var appLock: Bool { didSet { d.set(appLock, forKey: "appLock") } }
     @Published var defaultQuality: VideoQuality { didSet { d.set(defaultQuality.rawValue, forKey: "defaultQuality") } }
     @Published var defaultAiMode: AiMode { didSet { d.set(defaultAiMode.key, forKey: "defaultAiMode") } }
-    @Published var remoteMouseMode: Bool { didSet { d.set(remoteMouseMode, forKey: "remoteMouseMode") } }
+    /// 远程桌面操作方式：鼠标（触控板式，默认）或触控；菜单里切换后记住
+    @Published var remoteMouseMode: Bool {
+        didSet {
+            d.set(remoteMouseMode ? "mouse" : "touch", forKey: "remoteInputMode")
+            d.removeObject(forKey: "remoteMouseMode")
+        }
+    }
     /// 远程桌面播放被控端声音（默认开，记住用户的选择）
     @Published var remoteAudio: Bool { didSet { d.set(remoteAudio, forKey: "remoteAudio") } }
     @Published var terminalInputBox: Bool { didSet { d.set(terminalInputBox, forKey: "terminalInputBox") } }
@@ -51,7 +57,8 @@ final class AppSettings: ObservableObject {
         appLock = d.bool(forKey: "appLock")
         defaultQuality = VideoQuality(rawValue: d.string(forKey: "defaultQuality") ?? "") ?? .auto
         defaultAiMode = AiMode.fromKey(d.string(forKey: "defaultAiMode")) ?? .confirmDangerous
-        remoteMouseMode = d.bool(forKey: "remoteMouseMode")
+        // 新键（与安卓一致）：旧键 remoteMouseMode 默认是触控，沿用它就改不成默认鼠标
+        remoteMouseMode = d.string(forKey: "remoteInputMode").map { $0 != "touch" } ?? true
         remoteAudio = d.object(forKey: "remoteAudio") as? Bool ?? true
         terminalInputBox = d.bool(forKey: "terminalInputBox")
         showHiddenFiles = d.bool(forKey: "showHiddenFiles")

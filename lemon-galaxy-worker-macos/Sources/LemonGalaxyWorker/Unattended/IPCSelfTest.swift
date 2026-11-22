@@ -282,6 +282,8 @@ enum IPCSelfTest {
         dp.setBitrate(displayId: 1, kbps: 2500)
         dp.requestKeyframe(displayId: 1)
         check("码率与关键帧请求转给代理", wait { fa.bitrates == [2500] && fa.keyframes >= 1 })
+        dp.setCursorInVideo(displayId: 1, show: false)
+        check("画面里不画光标转给代理、光标位置回到内核", wait { fa.cursorInVideo[1] == false && sink.cursors.last == CursorReport(x: 0xA1, y: 7, visible: true) })
 
         var sent: [InputEvent] = []
         for i in 0..<300 { sent.append(.mouseMove(x: Int32(i), y: Int32(i * 2))) }
@@ -340,6 +342,8 @@ enum IPCSelfTest {
         let sink = (fb.sinkFor(1) as? ForwardingFrameSink)
         check("新会话的画面帧到达同一个内核输出", wait { (dp.debugSink(1) as? TestSink)?.count(tag: 0xB2) ?? 0 >= 10 }, sink == nil ? "没有转发对象" : "")
         check("换会话后告诉内核新分辨率", (dp.debugSink(1) as? TestSink)?.resolutions.contains { $0 == (2560, 1600) } == true)
+        check("换会话后新代理同样不画光标、位置照常回来",
+              wait { fb.cursorInVideo[1] == false && (dp.debugSink(1) as? TestSink)?.cursors.last == CursorReport(x: 0xB2, y: 7, visible: true) })
         let before = fa.injected.count
         dp.inject(displayId: 1, event: .mouseMove(x: 5, y: 5))
         check("键鼠改发给用户会话", wait { fb.injected.last == .mouseMove(x: 5, y: 5) } && fa.injected.count == before)
@@ -545,6 +549,7 @@ final class FakePlatform: HostPlatform, @unchecked Sendable {
     private var _sinks: [UInt32: EncodedFrameSink] = [:]
     private var _keyframes = 0
     private var _bitrates: [UInt32] = []
+    private var _cursorInVideo: [UInt32: Bool] = [:]
     private var _exit: [Bool] = []
 
     init(tag: UInt8) {
@@ -564,6 +569,7 @@ final class FakePlatform: HostPlatform, @unchecked Sendable {
     var capturing: Set<UInt32> { lock.locked { Set(_sinks.keys) } }
     var keyframes: Int { lock.locked { _keyframes } }
     var bitrates: [UInt32] { lock.locked { _bitrates } }
+    var cursorInVideo: [UInt32: Bool] { lock.locked { _cursorInVideo } }
     var exitRequests: [Bool] {
         get { lock.locked { _exit } }
         set { lock.locked { _exit = newValue } }
@@ -599,7 +605,15 @@ final class FakePlatform: HostPlatform, @unchecked Sendable {
         s.push(data: d, ptsUs: 1, keyframe: true)
     }
 
-    func stopCapture(displayId: UInt32) { lock.locked { _ = _sinks.removeValue(forKey: displayId) } }
+    func stopCapture(displayId: UInt32) { lock.locked { _ = _sinks.removeValue(forKey: displayId); _cursorInVideo[displayId] = nil } }
+    /// 不画光标时报一次位置（x 为本代理的标记）
+    func setCursorInVideo(displayId: UInt32, show: Bool) {
+        let sink = lock.locked { () -> EncodedFrameSink? in
+            _cursorInVideo[displayId] = show
+            return _sinks[displayId]
+        }
+        if !show { sink?.setCursor(x: Int32(tag), y: 7, visible: true) }
+    }
     func requestKeyframe(displayId: UInt32) { lock.locked { _keyframes += 1 } }
     func setBitrate(displayId: UInt32, kbps: UInt32) { lock.locked { _bitrates.append(kbps) } }
     func inject(displayId: UInt32, event: InputEvent) { lock.locked { _injected.append(event) } }
@@ -626,7 +640,9 @@ final class FakePlatform: HostPlatform, @unchecked Sendable {
     func stopAudio() { lock.locked { _audio = nil } }
 }
 
-/// 内核那一侧的画面输出（记录帧与分辨率）
+struct CursorReport: Equatable { var x: Int32; var y: Int32; var visible: Bool }
+
+/// 内核那一侧的画面输出（记录帧、分辨率与光标位置）
 final class TestSink: EncodedFrameSink, @unchecked Sendable {
     required init(unsafeFromHandle handle: UInt64) { fatalError() }
     private let lock = NSLock()
@@ -634,6 +650,7 @@ final class TestSink: EncodedFrameSink, @unchecked Sendable {
     private var corrupt = false
     private var big = false
     private var res: [(UInt32, UInt32)] = []
+    private var cur: [CursorReport] = []
     init() { super.init(noHandle: NoHandle()) }
 
     override func push(data: Data, ptsUs: UInt64, keyframe: Bool) {
@@ -653,6 +670,8 @@ final class TestSink: EncodedFrameSink, @unchecked Sendable {
     }
 
     override func setResolution(width: UInt32, height: UInt32) { lock.locked { res.append((width, height)) } }
+    override func setCursor(x: Int32, y: Int32, visible: Bool) { lock.locked { cur.append(CursorReport(x: x, y: y, visible: visible)) } }
+    var cursors: [CursorReport] { lock.locked { cur } }
 
     func count(tag: UInt8) -> Int { lock.locked { frames[tag]?.count ?? 0 } }
     func inOrder(tag: UInt8) -> Bool {

@@ -41,7 +41,7 @@ pub trait VideoSink: Send + Sync {
     fn on_config(&self, codec: VideoCodec, width: u32, height: u32);
     /// Annex B 码流（关键帧前带参数集）
     fn on_frame(&self, data: Vec<u8>, pts_us: u64, keyframe: bool);
-    /// 光标位置，被控屏幕像素
+    /// 光标位置（编码画面像素，光标热点）
     fn on_cursor(&self, x: i32, y: i32, visible: bool);
     fn on_closed(&self, reason: String);
 }

@@ -57,7 +57,7 @@ internal object AnnexB {
 
 /**
  * 模拟远程画面：循环推送 assets 里预先编码好的 1280x720 H.264 片段（假桌面），
- * 鼠标移动时回报光标位置（被控屏幕像素）。录像把推出去的帧原样写成 MP4（见 [MockRecorder]）。
+ * 鼠标移动时回报光标位置（和真内核一样按画面像素）。录像把推出去的帧原样写成 MP4（见 [MockRecorder]）。
  */
 internal class MockDisplayChannel(
     private val display: DisplayInfo,
@@ -74,8 +74,8 @@ internal class MockDisplayChannel(
     init {
         val interval = (1000 / fps.coerceIn(1, 60)).toLong()
         job = scope.launch {
-            sink.onConfig(VideoCodec.H264, 1280u, 720u)
-            sink.onCursor((display.width / 2u).toInt(), (display.height / 2u).toInt(), true)
+            sink.onConfig(VideoCodec.H264, STREAM_W.toUInt(), STREAM_H.toUInt())
+            sink.onCursor(STREAM_W / 2, STREAM_H / 2, true)
             var pts = 0L
             while (isActive && !stopped) {
                 val au = frames[next]
@@ -90,10 +90,16 @@ internal class MockDisplayChannel(
 
     override fun sendInput(event: InputEvent) {
         when (event) {
-            is InputEvent.MouseMove -> sink.onCursor(event.x, event.y, true)
-            is InputEvent.MouseButton -> sink.onCursor(event.x, event.y, true)
+            is InputEvent.MouseMove -> cursor(event.x, event.y)
+            is InputEvent.MouseButton -> cursor(event.x, event.y)
             else -> Unit
         }
+    }
+
+    private fun cursor(x: Int, y: Int) {
+        val w = display.width.toLong().coerceAtLeast(1)
+        val h = display.height.toLong().coerceAtLeast(1)
+        sink.onCursor((x * STREAM_W / w).toInt(), (y * STREAM_H / h).toInt(), true)
     }
 
     override fun requestKeyframe() {
@@ -102,6 +108,8 @@ internal class MockDisplayChannel(
     }
 
     override fun setBitrate(kbps: UInt) = Unit
+
+    override fun setClientCursor(on: Boolean) = Unit
 
     override fun stop() {
         // 与真内核一样：关画面时顺带结束录像
@@ -116,7 +124,7 @@ internal class MockDisplayChannel(
             if (stopped) throw GalaxyException.Other("画面已关闭")
             if (recorder != null) throw GalaxyException.Other("已经在录像了")
             recorder = try {
-                MockRecorder(File(path), 1280, 720)
+                MockRecorder(File(path), STREAM_W, STREAM_H)
             } catch (e: Exception) {
                 throw GalaxyException.Other(e.message ?: "无法创建录像文件")
             }
@@ -131,4 +139,10 @@ internal class MockDisplayChannel(
     }
 
     override fun isRecording(): Boolean = recorder != null
+
+    private companion object {
+        /** 预先编码好的片段尺寸 */
+        const val STREAM_W = 1280
+        const val STREAM_H = 720
+    }
 }

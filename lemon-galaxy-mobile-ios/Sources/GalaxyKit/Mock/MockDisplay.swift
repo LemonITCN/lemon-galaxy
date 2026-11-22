@@ -78,8 +78,10 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
             guard let self else { return }
             switch event {
             case .mouseMove(let x, let y):
-                self.renderer.cursor = self.toStream(x, y)
-                self.sink?.onCursor(x: x, y: y, visible: true)
+                let p = self.toStream(x, y)
+                self.renderer.cursor = p
+                // 和真内核一样按画面像素回报
+                self.sink?.onCursor(x: Int32(p.x), y: Int32(p.y), visible: true)
             case .mouseButton(_, let down, let x, let y):
                 if down { self.renderer.clicks.append((self.toStream(x, y), Date())) }
             case .touch(_, let phase, let x, let y):
@@ -97,6 +99,8 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
 
     override func requestKeyframe() { encoder?.requestKeyframe() }
     override func setBitrate(kbps: UInt32) { encoder?.setBitrate(kbps: Int(kbps == 0 ? 4000 : kbps)) }
+    /// 模拟内核不报 "client_cursor"，界面不会调用；画面里一直画光标
+    override func setClientCursor(on: Bool) {}
 
     // 录像：和真内核一样，关画面时自动结束（不返回结果）
 

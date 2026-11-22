@@ -140,4 +140,11 @@ data class Viewport(
 @Stable
 class RemoteViewState {
     var viewport by mutableStateOf(Viewport(1f, 1f, 1, 1))
+
+    /** 本机记的光标（见 [LocalPointer]）。 */
+    val pointer = LocalPointer()
+
+    /** [pointer] 按哪块屏幕放的位置；换屏幕时重新放到控制器给的初始位置。 */
+    internal var pointerDisplay: UInt? = null
+    internal var pointerSeq = 0
 }

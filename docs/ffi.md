@@ -99,11 +99,12 @@ async wake_on_lan(mac)
 - `FileClient`：`home`、`list`、`stat`、`realpath`、`mkdir`、`rename`、`remove(path, recursive)`、`chmod`、`search(root, pattern, content)`、`read_text`、`write_text`、
   `download(remote, local, TransferListener) -> Transfer`、`upload(local, remote, TransferListener) -> Transfer`（都支持断点续传；只接受本机文件路径）。
   `Transfer`：`cancel()`、`pause()`、`resume()`。
-- `DisplayChannel`：`send_input(InputEvent)`、`request_keyframe()`、`set_bitrate(kbps)`、`stop()`；
+- `DisplayChannel`：`send_input(InputEvent)`、`request_keyframe()`、`set_bitrate(kbps)`、`stop()`、
+  `set_client_cursor(on)`（能力列表有 "client_cursor" 才调用：画面里不再画光标，界面自己画，被控端光标移动经 `on_cursor` 告知）；
   录像 `async start_recording(path, with_audio)`、`stop_recording() -> RecordingInfo{paths, duration_ms, bytes}`、`is_recording()`。
   录像在内核里把收到的 H.264 与 Opus 直接封装成分片 MP4（不重新编码，边录边写，异常退出已写部分仍可播放）；
   被控端分辨率变化时自动分段为 `名字-2.mp4` 等。Opus 音轨在 VLC、浏览器、ffmpeg 里能播，部分系统自带播放器可能只出画面。
-  `VideoSink`：`on_config(codec, width, height)`（分辨率变化时会再次调用）、`on_frame(annexb, pts_us, keyframe)`、`on_cursor(x, y, visible)`（被控屏幕像素）、`on_closed(reason)`。
+  `VideoSink`：`on_config(codec, width, height)`（分辨率变化时会再次调用）、`on_frame(annexb, pts_us, keyframe)`、`on_cursor(x, y, visible)`（画面像素，光标热点；开了 set_client_cursor 才有）、`on_closed(reason)`。
 - `AudioPlayback`：`set_volume(0..1)`、`set_muted(Bool)`、`is_active()`、`stop()`。内核收 Opus 数据报、解码（丢包补偿）后直接用本机默认输出设备播放
   （macOS / iOS CoreAudio、Windows WASAPI、安卓 AAudio），界面层只放开关与音量。iOS 播放前要把 AVAudioSession 设成 playback；
   Mac 应用要链接 AudioToolbox 并弱链接 CoreAudio（内核引用了 macOS 14.2 才有的接口，弱链接后 macOS 13 照样能启动）。
@@ -170,9 +171,10 @@ recent_events(limit) -> [HostEvent]
 
 `HostPlatform`（界面层实现）：`list_displays`、`start_capture(display_id, CaptureOptions, EncodedFrameSink) -> CaptureStarted?`、`stop_capture`、`request_keyframe`、`set_bitrate`、
 `inject(InputEvent)`、`screenshot(display_id, max_w, max_h) -> ImageData?`、`ui_tree(display_id, max_nodes) -> String?`、`clipboard_get/set`、
-`set_privacy(on) -> Bool`、`start_audio(AudioPcmSink) -> Bool`、`stop_audio()`、`capabilities() -> [String]`
+`set_privacy(on) -> Bool`、`set_cursor_in_video(display_id, show)`、`start_audio(AudioPcmSink) -> Bool`、`stop_audio()`、`capabilities() -> [String]`
+（支持 `set_cursor_in_video` 的平台在 capabilities 里列 "client_cursor"；show 为 false 时画面里不画光标，并用 `EncodedFrameSink.set_cursor` 报光标位置）
 （已获得系统授权的能力：`display`、`screenshot`、`input`、`ui_tree`、`clipboard`、`privacy`、`audio`）。
-`EncodedFrameSink`（内核实现）：`push(annexb, pts_us, keyframe)`、`set_resolution(width, height)`。
+`EncodedFrameSink`（内核实现）：`push(annexb, pts_us, keyframe)`、`set_resolution(width, height)`、`set_cursor(x, y, visible)`（画面像素，变化时调用）。
 `AudioPcmSink`（内核实现）：`push(pcm, sample_rate, channels)`，`pcm` 是交错排列的 32 位浮点样本（小端），格式随系统；内核统一转成 48 kHz 立体声、Opus 编码一次后分发给所有在听的会话。
 
 `HostListener`：`on_status`、`on_assist_request(request_id, from_user, from_device)`（弹窗后调 `respond_assist`）、`on_session_started`、`on_session_ended`、`on_ai_activity`。

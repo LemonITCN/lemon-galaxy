@@ -24,6 +24,8 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
     private struct Capture {
         let sink: EncodedFrameSink
         var options: CaptureOptions
+        /// 画面里画不画光标（新开的采集总是画；换会话后按它重新设置）
+        var cursorInVideo = true
     }
 
     private let lock = NSLock()
@@ -92,6 +94,10 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
             guard let r = try? m.decode(AResolution.self) else { return }
             let sink = lock.locked { activeId == id ? captures[r.display]?.sink : nil }
             sink?.setResolution(width: r.width, height: r.height)
+        case IPCMethod.agentCursor:
+            guard let c = try? m.decode(ACursor.self) else { return }
+            let sink = lock.locked { activeId == id && captures[c.display]?.cursorInVideo == false ? captures[c.display]?.sink : nil }
+            sink?.setCursor(x: c.x, y: c.y, visible: c.visible)
         case IPCMethod.agentAudio:
             guard let a = try? m.decode(AAudio.self) else { return }
             let sink = lock.locked { activeId == id ? audioSink : nil }
@@ -148,6 +154,9 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
         for (display, c) in caps {
             if let s = startOnActive(display, c.options) {
                 c.sink.setResolution(width: s.width, height: s.height)
+                // 新会话的代理按默认画光标，主控端自己画时再关掉
+                let show = lock.locked { captures[display]?.cursorInVideo ?? true }
+                if !show { notifyActive(IPCMethod.cursorInVideo, PCursorInVideo(display: display, show: false)) }
             } else {
                 NSLog("LemonGalaxy: 换会话后屏幕 %u 重新采集失败", display)
             }
@@ -249,6 +258,11 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
     func setBitrate(displayId: UInt32, kbps: UInt32) {
         lock.locked { captures[displayId]?.options.bitrateKbps = kbps }
         notifyActive(IPCMethod.bitrate, PBitrate(display: displayId, kbps: kbps))
+    }
+
+    func setCursorInVideo(displayId: UInt32, show: Bool) {
+        lock.locked { captures[displayId]?.cursorInVideo = show }
+        notifyActive(IPCMethod.cursorInVideo, PCursorInVideo(display: displayId, show: show))
     }
 
     func inject(displayId: UInt32, event: InputEvent) {

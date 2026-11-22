@@ -335,6 +335,8 @@ struct PDisplay: Codable { var display: UInt32 }
 struct PStartCapture: Codable { var display: UInt32; var options: CaptureOptions }
 struct PStarted: Codable { var started: CaptureStarted? }
 struct PBitrate: Codable { var display: UInt32; var kbps: UInt32 }
+/// 画面里画不画光标（主控端自己画时为 false）
+struct PCursorInVideo: Codable { var display: UInt32; var show: Bool }
 struct PInject: Codable { var display: UInt32; var event: InputEvent }
 struct PScreenshot: Codable { var display: UInt32; var maxWidth: UInt32; var maxHeight: UInt32 }
 struct PImageMeta: Codable { var mime: String; var width: UInt32; var height: UInt32 }
@@ -346,6 +348,8 @@ struct PBool: Codable { var value: Bool }
 struct PStrings: Codable { var values: [String] }
 struct AFrame: Codable { var display: UInt32; var pts: UInt64; var key: Bool }
 struct AResolution: Codable { var display: UInt32; var width: UInt32; var height: UInt32 }
+/// 光标热点位置（这块屏幕画面的像素）
+struct ACursor: Codable { var display: UInt32; var x: Int32; var y: Int32; var visible: Bool }
 struct AAudio: Codable { var rate: UInt32; var channels: UInt32 }
 struct ALog: Codable { var text: String; var error: Bool }
 
@@ -434,6 +438,7 @@ enum IPCMethod {
     static let agentConsole = "a.console"
     static let agentFrame = "a.frame"
     static let agentResolution = "a.resolution"
+    static let agentCursor = "a.cursor"
     static let agentAudio = "a.audio"
     static let agentLog = "a.log"
     // 后台服务 → 代理
@@ -442,6 +447,7 @@ enum IPCMethod {
     static let stopCapture = "p.stopCapture"
     static let keyframe = "p.keyframe"
     static let bitrate = "p.bitrate"
+    static let cursorInVideo = "p.cursorInVideo"
     static let inject = "p.inject"
     static let screenshot = "p.screenshot"
     static let uiTree = "p.uiTree"

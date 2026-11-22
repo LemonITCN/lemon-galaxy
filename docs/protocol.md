@@ -176,7 +176,7 @@ HelloAck {
 | `Files(op)` | 一次文件操作一条流：`List{path}`、`Stat{path}`、`Read{path, offset, len}`（被控端回多个 `Chunk` + `End`）、`Write{path, offset, truncate, mode, expect_sha256}`（主控端发多个 `Chunk` + `End`，被控端回结果）、`Mkdir{path, parents}`、`Remove{path, recursive}`、`Rename{from, to, overwrite}`、`Chmod{path, mode}`、`Home`、`Realpath{path}`、`Search{root, pattern, max}` |
 | `Exec { command, shell, cwd, env, timeout_ms, origin, max_output }` | 被控端流式回 `Stdout(bytes)` / `Stderr(bytes)`，最后 `Done { code, signal, timed_out, truncated, duration_ms }`；主控端可发 `Stdin(bytes)` / `Cancel` |
 | `PortForward { host, port }` | 被控端回 `Ok` 后双向透传字节 |
-| `Display { display_id, codecs, max_fps, bitrate_kbps }` | 被控端回 `Started { width, height, codec, channel }`；画面走 DATAGRAM；本流上 主控→被控 `Input(InputEvent)` / `RequestKeyframe` / `SetBitrate` / `Stop`，被控→主控 `Cursor{...}` / `Resized{...}` |
+| `Display { display_id, codecs, max_fps, bitrate_kbps }` | 被控端回 `Started { width, height, codec, channel }`；画面走 DATAGRAM；本流上 主控→被控 `Input(InputEvent)` / `RequestKeyframe` / `SetBitrate` / `Stop` / `ClientCursor(bool)`，被控→主控 `Cursor{x, y, visible}` / `Resized{...}`。`ClientCursor(true)` 表示主控端在本地画光标（跟手）：只有这块屏的所有观看者都要求时，被控端发出的画面才不画光标，并在光标变化时发 `Cursor`（画面像素，光标热点）；主控端只在能力列表有 `client_cursor` 时发 |
 | `Clipboard` | 双向 `Update { kind, data }` |
 | `Audio { codecs, bitrate_kbps }` | 被控端回 `Started { codec, sample_rate, channels, channel }` 或 `Error`；声音走 DATAGRAM（8.5）；主控端发 `Stop` 或关流即停止 |
 

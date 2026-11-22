@@ -39,10 +39,17 @@ data class RemoteUi(
     val displays: List<DisplayInfo> = emptyList(),
     val displayId: UInt? = null,
     val quality: VideoQuality = VideoQuality.AUTO,
-    val mouseMode: Boolean = false,
+    val mouseMode: Boolean = true,
+    /** 对端能力里有 "client_cursor"：鼠标模式下被控端画面里不画光标，由本机画（跟手） */
+    val clientCursor: Boolean = false,
+    /**
+     * 光标的初始位置（打开 / 换屏幕时为屏幕中心）与被控端最近一次回报（已换算成被控屏幕像素）。
+     * 每次回报 [cursorSeq] 加一；本机移动不改这里，界面自己记（见 [LocalPointer]）。
+     */
     val cursorX: Int = 0,
     val cursorY: Int = 0,
-    val cursorVisible: Boolean = false,
+    val cursorVisible: Boolean = true,
+    val cursorSeq: Int = 0,
     val videoW: Int = 0,
     val videoH: Int = 0,
     val path: PathInfo? = null,
@@ -63,6 +70,9 @@ data class RemoteUi(
     val recordingBusy: Boolean = false,
 ) {
     val recording: Boolean get() = recordingSince != null
+
+    /** 本机画光标：鼠标模式且被控端支持。 */
+    val localCursor: Boolean get() = mouseMode && clientCursor
     val display: DisplayInfo? get() = displays.firstOrNull { it.id == displayId }
     val remoteW: Int get() = display?.width?.toInt() ?: videoW
     val remoteH: Int get() = display?.height?.toInt() ?: videoH
@@ -125,7 +135,14 @@ class RemoteDesktopController(
             // 画面中途变了尺寸（对方改分辨率）：重新取屏幕信息，输入坐标和画面比例跟着更新
             if (before.status == RemoteStatus.STREAMING && (before.videoW != w || before.videoH != h)) refreshDisplays()
         },
-        onCursorChanged = { x, y, v -> _ui.update { it.copy(cursorX = x, cursorY = y, cursorVisible = v) } },
+        onCursorChanged = { x, y, v ->
+            // 回报是画面像素，输入与界面用被控屏幕像素：画面被缩放过时换算一下（相等时原样）
+            _ui.update {
+                val sx = if (it.videoW > 0 && it.remoteW > 0) x.toLong() * it.remoteW / it.videoW else x.toLong()
+                val sy = if (it.videoH > 0 && it.remoteH > 0) y.toLong() * it.remoteH / it.videoH else y.toLong()
+                it.copy(cursorX = sx.toInt(), cursorY = sy.toInt(), cursorVisible = v, cursorSeq = it.cursorSeq + 1)
+            }
+        },
         onClosedByRemote = { reason ->
             _ui.update { it.copy(status = RemoteStatus.FAILED, error = reason) }
             // 画面断了：录像到此为止（界面还在，弹保存提示）
@@ -143,6 +160,7 @@ class RemoteDesktopController(
                         privacySupported = "privacy" in peer.info.capabilities,
                         privacyAllowed = peer.info.permissions.control,
                         audioSupported = "audio" in peer.info.capabilities,
+                        clientCursor = "client_cursor" in peer.info.capabilities,
                     )
                 }
                 scope.launch { peer.path.collect { p -> _ui.update { it.copy(path = p) } } }
@@ -159,7 +177,7 @@ class RemoteDesktopController(
                 val displays = peer.session.listDisplays()
                 val first = displays.firstOrNull { it.primary } ?: displays.firstOrNull()
                     ?: throw IllegalStateException("no display")
-                _ui.update { it.copy(displays = displays, cursorX = (first.width / 2u).toInt(), cursorY = (first.height / 2u).toInt()) }
+                _ui.update { it.copy(displays = displays) }
                 open(first.id)
             } catch (e: Exception) {
                 _ui.update { it.copy(status = RemoteStatus.FAILED, error = e.userMessage()) }
@@ -172,13 +190,24 @@ class RemoteDesktopController(
         stopRecording(auto = false)
         channel?.stop()
         channel = null
-        _ui.update { it.copy(displayId = displayId, status = RemoteStatus.CONNECTING, error = null) }
+        _ui.update {
+            // 光标先放屏幕中心（被控端有回报后以回报为准）
+            val d = it.displays.firstOrNull { x -> x.id == displayId }
+            it.copy(
+                displayId = displayId, status = RemoteStatus.CONNECTING, error = null,
+                cursorX = d?.let { x -> (x.width / 2u).toInt() } ?: it.cursorX,
+                cursorY = d?.let { x -> (x.height / 2u).toInt() } ?: it.cursorY,
+                cursorVisible = true,
+            )
+        }
         val q = _ui.value.quality
         val peer = conn.peer(deviceId)
         channel = peer.session.openDisplay(
             DisplayOptions(displayId, q.maxFps, q.bitrateKbps, VideoDecoder.supportedCodecs(), viewOnly = false),
             decoder,
         )
+        // 每路画面各自记着要不要画光标（默认画）：鼠标模式由本机画，告诉被控端别画
+        applyClientCursor()
         // 画面打开后按设置开始播放声音（已在播放时不重复开）
         if (audioWanted) startAudio()
     }
@@ -208,7 +237,16 @@ class RemoteDesktopController(
         channel?.setBitrate(q.bitrateKbps)
     }
 
-    fun setMouseMode(on: Boolean) = _ui.update { it.copy(mouseMode = on) }
+    fun setMouseMode(on: Boolean) {
+        _ui.update { it.copy(mouseMode = on) }
+        applyClientCursor()
+    }
+
+    /** 鼠标模式本机画光标、被控端画面里不画；触控模式画回画面里。只对支持 "client_cursor" 的被控端发（老版本收到会关流）。 */
+    private fun applyClientCursor() {
+        val s = _ui.value
+        if (s.clientCursor) channel?.setClientCursor(s.mouseMode)
+    }
 
     /** 切换隐私屏，失败时抛出（界面提示原因）。 */
     suspend fun setPrivacy(on: Boolean) {
@@ -328,14 +366,9 @@ class RemoteDesktopController(
 
     fun setSurface(s: Surface?) = decoder.setSurface(s)
 
+    /** 光标位置由界面本机记（[LocalPointer]），这里只管发出去。 */
     fun send(e: InputEvent) {
         channel?.sendInput(e)
-        // 本地先更新光标，减少等待回报的拖影
-        when (e) {
-            is InputEvent.MouseMove -> _ui.update { it.copy(cursorX = e.x, cursorY = e.y) }
-            is InputEvent.MouseButton -> _ui.update { it.copy(cursorX = e.x, cursorY = e.y) }
-            else -> Unit
-        }
     }
 
     fun sendAll(events: List<InputEvent>) = events.forEach(::send)

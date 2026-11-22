@@ -334,6 +334,7 @@ internal class UniffiDisplay(private val d: FDisplayChannel) : DisplayChannelInt
     override fun sendInput(event: InputEvent) = d.sendInput(event.toFfi())
     override fun requestKeyframe() = d.requestKeyframe()
     override fun setBitrate(kbps: UInt) = d.setBitrate(kbps)
+    override fun setClientCursor(on: Boolean) = d.setClientCursor(on)
     override fun stop() = d.stop()
     override suspend fun startRecording(path: String, withAudio: Boolean) = ffi { d.startRecording(path, withAudio) }
     override fun stopRecording(): RecordingInfo = ffi { d.stopRecording().toBridge() }

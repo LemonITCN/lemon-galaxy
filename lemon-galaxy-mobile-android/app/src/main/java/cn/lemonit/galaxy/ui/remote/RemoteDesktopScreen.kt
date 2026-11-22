@@ -126,7 +126,8 @@ private data class Notice(val title: String, val subtitle: String? = null)
 /**
  * 远程桌面：画面（硬件解码 SurfaceView，测试时为占位图）+ 手势 + 右侧贴边菜单。
  * [video] 由调用方提供，传入的 Modifier 已带好位置与尺寸（始终按被控屏幕比例，放大后可以超出屏幕）。
- * 光标由被控端画进画面里，这里不再叠加本地箭头。
+ * 光标位置由本机记（[RemoteViewState.pointer]，手指一动立即更新）。鼠标模式且被控端支持 "client_cursor" 时，
+ * 被控端画面里不画光标，箭头在这里本地画（跟手）；其余情况光标在画面里，这里不再叠加。
  */
 @Composable
 fun RemoteDesktopScreen(
@@ -170,13 +171,37 @@ fun RemoteDesktopScreen(
         val old = Snapshot.withoutReadObservation { state.viewport }
         val synced = old.resized(cw, ch, ui.remoteW, ui.remoteH)
         if (synced != old) state.viewport = synced
+        // 换屏幕（含第一次打开）：光标放到控制器给的初始位置
+        if (Snapshot.withoutReadObservation { state.pointerDisplay } != ui.displayId) {
+            state.pointerDisplay = ui.displayId
+            state.pointerSeq = ui.cursorSeq
+            state.pointer.reset(ui.cursorX, ui.cursorY)
+        }
+        // 被控端回报了光标（对面有人动了鼠标，或自己移动的回声）：按本机停手规则决定采不采用
+        LaunchedEffect(ui.cursorSeq) {
+            if (ui.cursorSeq != state.pointerSeq) {
+                state.pointerSeq = ui.cursorSeq
+                state.pointer.hostReport(ui.cursorX, ui.cursorY, ui.cursorVisible, Clock.now())
+            }
+        }
 
         val sink = remember {
             object : RemoteGestureSink {
                 var dragButtonDown = false
                 fun remote(o: Offset) = state.viewport.toRemote(o.x, o.y)
-                fun cursor() = currentUi.cursorX to currentUi.cursorY
-                fun send(e: List<InputEvent>) = currentActions.onInput(e)
+                fun cursor() = state.pointer.x to state.pointer.y
+                fun send(e: List<InputEvent>) {
+                    // 本机先记下光标位置（不等被控端回报），再发出去
+                    val now = Clock.now()
+                    e.forEach { ev ->
+                        when (ev) {
+                            is InputEvent.MouseMove -> state.pointer.moved(ev.x, ev.y, now)
+                            is InputEvent.MouseButton -> state.pointer.moved(ev.x, ev.y, now)
+                            else -> Unit
+                        }
+                    }
+                    currentActions.onInput(e)
+                }
 
                 override fun tap(at: Offset) {
                     val (x, y) = if (currentUi.mouseMode) cursor() else remote(at)
@@ -271,6 +296,9 @@ fun RemoteDesktopScreen(
                         }
                         .testTag("remote-video"),
                 )
+            }
+            if (ui.localCursor && ui.status == RemoteStatus.STREAMING) {
+                LocalPointerArrow(state.pointer, { state.viewport }, Modifier.fillMaxSize())
             }
             if (ui.status != RemoteStatus.STREAMING) {
                 Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {

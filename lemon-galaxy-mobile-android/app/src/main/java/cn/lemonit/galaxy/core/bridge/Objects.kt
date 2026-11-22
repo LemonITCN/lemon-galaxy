@@ -248,6 +248,12 @@ interface DisplayChannelInterface {
     fun requestKeyframe()
     fun setBitrate(kbps: UInt)
 
+    /**
+     * 主控端本地画光标：开着时被控端画面里不画光标，只经 [VideoSink.onCursor] 报位置（每路画面各自记，默认关）。
+     * 只在对端能力里有 "client_cursor" 时调用（老版本被控端收到不认识的消息会关流）。
+     */
+    fun setClientCursor(on: Boolean)
+
     /** 关画面；正在录像时内核会顺带结束录像（但不返回信息，要信息先调 [stopRecording]）。 */
     fun stop()
 

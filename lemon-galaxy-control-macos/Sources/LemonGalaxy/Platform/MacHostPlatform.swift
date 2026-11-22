@@ -11,6 +11,7 @@ import Carbon.HIToolbox
 ///   - 截图、辅助功能控件树（JSON）、剪贴板（文字 / 图片 / 文件）
 ///   - 系统声音：ScreenCaptureKit 只采声音（画面部分最小化后丢弃）→ 交错浮点 PCM → AudioPcmSink
 ///   - 隐私屏：每块屏幕盖一个黑色无边框窗口（从截屏里排除）+ 会话级事件拦截丢掉本地键鼠，只放行自己注入的事件
+///   - 主控端自己画光标：画面里不画光标（只是不录进去，本机照常看到），改为约 30 次/秒上报光标位置（CursorReporter）
 /// 内核在自己的线程上调用这些方法；需要「屏幕录制」「辅助功能」授权，见 Permissions。
 final class MacHostPlatform: HostPlatform, @unchecked Sendable {
     private let lock = NSLock()
@@ -52,7 +53,8 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
         let screen = SystemPermissions.screenRecordingGranted
         let ax = SystemPermissions.accessibilityGranted
         // 系统声音也走 ScreenCaptureKit，只要「屏幕录制」授权
-        if screen { caps += ["display", "screenshot", "audio"] }
+        // client_cursor：画面里可以不画光标、单独报位置（主控端在本地画，跟手）
+        if screen { caps += ["display", "screenshot", "audio", "client_cursor"] }
         if ax { caps += ["input", "ui_tree"] }
         // 隐私屏：拦截本地键鼠要「辅助功能」；没有画面时开隐私屏没有意义
         if screen && ax { caps.append("privacy") }
@@ -123,6 +125,7 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
 
     func requestKeyframe(displayId: UInt32) { lock.locked { captures[displayId] }?.requestKeyframe() }
     func setBitrate(displayId: UInt32, kbps: UInt32) { lock.locked { captures[displayId] }?.setBitrate(Int(kbps)) }
+    func setCursorInVideo(displayId: UInt32, show: Bool) { lock.locked { captures[displayId] }?.setCursorInVideo(show) }
 
     // MARK: 输入
 
@@ -270,6 +273,15 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var encoder: VideoEncoder?
     private let queue = DispatchQueue(label: "galaxy.capture", qos: .userInteractive)
     private var startTime: CMTime?
+    /// 画面里画不画光标：要求的（cursorWanted）与已经生效的（cursorApplied）。更新配置在 cfgQueue 上串行进行，
+    /// 连续切换时以最后一次为准
+    private let cursorLock = NSLock()
+    private var cursorWanted = true
+    private var cursorApplied = true
+    private var config: SCStreamConfiguration?
+    private var reporter: CursorReporter?
+    private var stopped = false
+    private let cfgQueue = DispatchQueue(label: "galaxy.capture.cfg")
 
     init(displayId: UInt32, options: CaptureOptions, sink: EncodedFrameSink) {
         self.displayId = displayId
@@ -293,8 +305,9 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             cfg.height = h
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, min(options.maxFps, 144))))
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            // 光标画进画面（HostPlatform 没有单独上报光标的通道）
-            cfg.showsCursor = true
+            // 默认光标画进画面；主控端自己画时由 setCursorInVideo(false) 关掉、改为单独上报位置
+            let showCursor = cursorLock.locked { cursorWanted }
+            cfg.showsCursor = showCursor
             cfg.queueDepth = 4
             cfg.colorSpaceName = CGColorSpace.sRGB
             // 按主控端给的顺序挑第一个本机能硬件编码的格式
@@ -313,6 +326,14 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
             try await s.startCapture()
             stream = s
+            let r = CursorReporter(displayId: displayId, width: w, height: h, sink: sink)
+            cursorLock.locked {
+                config = cfg
+                cursorApplied = showCursor
+                reporter = r
+            }
+            // 启动期间要求改过：补上
+            applyCursor()
             return CaptureStarted(width: UInt32(w), height: UInt32(h), codec: codec)
         } catch {
             NSLog("LemonGalaxy: 截屏启动失败 %@", String(describing: error))
@@ -343,6 +364,12 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() {
         let s = stream
         stream = nil
+        let r = cursorLock.locked { () -> CursorReporter? in
+            stopped = true
+            defer { reporter = nil }
+            return reporter
+        }
+        r?.stop()
         Task { try? await s?.stopCapture() }
         encoder?.invalidate()
         encoder = nil
@@ -350,6 +377,43 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func requestKeyframe() { encoder?.requestKeyframe() }
     func setBitrate(_ kbps: Int) { encoder?.setBitrate(kbps: kbps) }
+
+    /// 画面里画不画光标。不画时同时开始上报光标位置，画时停止上报
+    func setCursorInVideo(_ show: Bool) {
+        cursorLock.locked { cursorWanted = show }
+        applyCursor()
+    }
+
+    /// 把要求的光标设置同步到正在进行的截屏（还没启动完时由 start() 末尾补）
+    private func applyCursor() {
+        cfgQueue.async { [weak self] in
+            guard let self else { return }
+            let (want, cfg, r, s) = self.cursorLock.locked { () -> (Bool, SCStreamConfiguration?, CursorReporter?, SCStream?) in
+                (self.cursorWanted, self.stopped ? nil : self.config, self.reporter, self.stream)
+            }
+            guard let cfg, let s else { return }
+            // 先开始上报再去掉画面里的光标；恢复时先画回光标再停止上报，中间不会两边都没有
+            if !want { r?.start() }
+            if want != self.cursorLock.locked({ self.cursorApplied }) {
+                cfg.showsCursor = want
+                let done = DispatchSemaphore(value: 0)
+                nonisolated(unsafe) var failure: Error?
+                s.updateConfiguration(cfg) { err in
+                    failure = err
+                    done.signal()
+                }
+                done.wait()
+                if let failure {
+                    cfg.showsCursor = !want
+                    NSLog("LemonGalaxy: 切换画面里的光标失败 %@", String(describing: failure))
+                } else {
+                    self.cursorLock.locked { self.cursorApplied = want }
+                }
+            }
+            // 画回光标没成功时继续上报，主控端至少还能画
+            if want && self.cursorLock.locked({ self.cursorApplied }) { r?.stop() }
+        }
+    }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, sampleBuffer.isValid, let pb = sampleBuffer.imageBuffer else { return }
@@ -364,6 +428,75 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         NSLog("LemonGalaxy: 截屏中断 %@", String(describing: error))
+    }
+}
+
+// MARK: - 光标位置上报
+
+/// 主控端自己画光标时：约 30 次/秒读光标热点位置，换算成这块屏幕画面（编码后）的像素，变了才报给内核。
+/// 光标在别的屏幕上时报 visible = false。读的是全局位置（CGEvent，与 CGDisplayBounds 同一坐标系：
+/// 主屏左上角为原点、单位是点），不需要 AppKit，登录界面的会话代理里也能用。
+final class CursorReporter: @unchecked Sendable {
+    let displayId: CGDirectDisplayID
+    let width: Int
+    let height: Int
+    private let sink: EncodedFrameSink
+    private let lock = NSLock()
+    private var timer: DispatchSourceTimer?
+    private var last: (Int32, Int32, Bool)?
+    private static let queue = DispatchQueue(label: "galaxy.cursor", qos: .userInteractive)
+
+    init(displayId: CGDirectDisplayID, width: Int, height: Int, sink: EncodedFrameSink) {
+        self.displayId = displayId
+        self.width = max(1, width)
+        self.height = max(1, height)
+        self.sink = sink
+    }
+
+    deinit { timer?.cancel() }
+
+    func start() {
+        lock.locked {
+            guard timer == nil else { return }
+            // 重新开始时第一次一定报（主控端刚切过来，需要当前位置）
+            last = nil
+            let t = DispatchSource.makeTimerSource(queue: Self.queue)
+            t.schedule(deadline: .now(), repeating: .milliseconds(33), leeway: .milliseconds(5))
+            t.setEventHandler { [weak self] in self?.tick() }
+            timer = t
+            t.resume()
+        }
+    }
+
+    func stop() {
+        lock.locked {
+            timer?.cancel()
+            timer = nil
+        }
+    }
+
+    private func tick() {
+        guard let p = Self.position(display: displayId, width: width, height: height) else { return }
+        let changed = lock.locked { () -> Bool in
+            guard timer != nil else { return false }
+            if let l = last, l == p { return false }
+            last = p
+            return true
+        }
+        if changed { sink.setCursor(x: p.0, y: p.1, visible: p.2) }
+    }
+
+    /// 光标热点在画面里的像素位置（左上角为原点）；不在这块屏幕上时 visible 为 false，坐标夹到画面边上
+    static func position(display: CGDirectDisplayID, width: Int, height: Int) -> (Int32, Int32, Bool)? {
+        guard let loc = CGEvent(source: nil)?.location else { return nil }
+        let b = CGDisplayBounds(display)
+        guard b.width > 0, b.height > 0 else { return nil }
+        let inside = b.contains(loc)
+        let fx = (loc.x - b.minX) / b.width * CGFloat(width)
+        let fy = (loc.y - b.minY) / b.height * CGFloat(height)
+        let x = Int32(min(max(fx.rounded(.down), 0), CGFloat(width - 1)))
+        let y = Int32(min(max(fy.rounded(.down), 0), CGFloat(height - 1)))
+        return (x, y, inside)
     }
 }
 

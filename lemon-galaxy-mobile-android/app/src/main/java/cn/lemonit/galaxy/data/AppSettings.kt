@@ -42,7 +42,8 @@ data class Prefs(
     val appLock: Boolean = false,
     val defaultQuality: VideoQuality = VideoQuality.AUTO,
     val defaultAiMode: AiMode = AiMode.CONFIRM_DANGEROUS,
-    val remoteMouseMode: Boolean = false,
+    /** 远程桌面操作方式：鼠标（触控板式，默认）或触控；菜单里切换后记住 */
+    val remoteMouseMode: Boolean = true,
     /** 远程桌面播放被控端声音（默认开，记住用户的选择） */
     val remoteAudio: Boolean = true,
     val terminalInputBox: Boolean = false,
@@ -70,7 +71,12 @@ class AppSettings(private val sp: SharedPreferences?) {
             appLock = p.getBoolean("app_lock", d.appLock),
             defaultQuality = VideoQuality.of(p.getString("default_quality", null)),
             defaultAiMode = runCatching { AiMode.valueOf(p.getString("default_ai_mode", null) ?: "") }.getOrDefault(d.defaultAiMode),
-            remoteMouseMode = p.getBoolean("remote_mouse_mode", d.remoteMouseMode),
+            // 新键：旧版 remote_mouse_mode 默认是触控且每次存设置都会写进去，沿用它就改不成默认鼠标
+            remoteMouseMode = when (p.getString("remote_input_mode", null)) {
+                "mouse" -> true
+                "touch" -> false
+                else -> d.remoteMouseMode
+            },
             remoteAudio = p.getBoolean("remote_audio", d.remoteAudio),
             terminalInputBox = p.getBoolean("terminal_input_box", d.terminalInputBox),
             lastServer = p.getString("last_server", null) ?: "",
@@ -90,7 +96,8 @@ class AppSettings(private val sp: SharedPreferences?) {
             putBoolean("app_lock", n.appLock)
             putString("default_quality", n.defaultQuality.key)
             putString("default_ai_mode", n.defaultAiMode.name)
-            putBoolean("remote_mouse_mode", n.remoteMouseMode)
+            putString("remote_input_mode", if (n.remoteMouseMode) "mouse" else "touch")
+            remove("remote_mouse_mode")
             putBoolean("remote_audio", n.remoteAudio)
             putBoolean("terminal_input_box", n.terminalInputBox)
             putString("last_server", n.lastServer)

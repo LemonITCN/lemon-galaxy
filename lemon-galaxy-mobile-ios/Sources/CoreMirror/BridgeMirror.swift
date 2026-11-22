@@ -1842,6 +1842,17 @@ public protocol ClientListener: AnyObject, Sendable {
     
 }
 
+public protocol ClipboardTransferProtocol: AnyObject, Sendable {
+    
+    func cancel() 
+    
+    /**
+     * 完成后的路径：推送时是被控端上的路径，拉取时是本机路径。
+     */
+    func paths()  -> [String]
+    
+}
+
 public protocol DisplayChannelProtocol: AnyObject, Sendable {
     
     func isRecording()  -> Bool
@@ -1851,6 +1862,12 @@ public protocol DisplayChannelProtocol: AnyObject, Sendable {
     func sendInput(event: InputEvent) 
     
     func setBitrate(kbps: UInt32) 
+    
+    /**
+     * 主控端在本地画光标（跟手）：被控端画面里不再画光标，位置变化经 VideoSink.on_cursor 告知。
+     * 只在对端能力列表有 "client_cursor" 时调用。
+     */
+    func setClientCursor(on: Bool) 
     
     /**
      * 开始录像到 `path`（.mp4，分片 MP4，H.264 原样写入不重新编码）。`with_audio` 为真时正在收听的声音也一起录。
@@ -1870,6 +1887,11 @@ public protocol DisplayChannelProtocol: AnyObject, Sendable {
 public protocol EncodedFrameSinkProtocol: AnyObject, Sendable {
     
     func push(data: Data, ptsUs: UInt64, keyframe: Bool) 
+    
+    /**
+     * 光标位置（这块屏的画面像素）变了，位置变化时调用即可（约 30 次/秒以内）。
+     */
+    func setCursor(x: Int32, y: Int32, visible: Bool) 
     
     func setResolution(width: UInt32, height: UInt32) 
     
@@ -2070,6 +2092,11 @@ public protocol HostPlatform: AnyObject, Sendable {
     func setBitrate(displayId: UInt32, kbps: UInt32) 
     
     /**
+     * 画面里要不要画光标（主控端在本地画时关掉）；支持时在 capabilities 里报 "client_cursor"。
+     */
+    func setCursorInVideo(displayId: UInt32, show: Bool) 
+    
+    /**
      * 坐标是 `display_id` 这块屏幕的像素。
      */
     func inject(displayId: UInt32, event: InputEvent) 
@@ -2162,7 +2189,25 @@ public protocol PeerListener: AnyObject, Sendable {
 
 public protocol PeerSessionProtocol: AnyObject, Sendable {
     
+    /**
+     * 在被控端加一块虚拟屏（扩展桌面），返回它的屏幕信息（is_virtual 为真），之后用它的 id 调 open_display。
+     * `refresh` 为 0 时用 60 Hz。虚拟屏属于本会话，断开时被控端自动删掉。需要控制权限。
+     */
+    func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32) async throws  -> DisplayInfo
+    
     func clipboardGet() async throws  -> ClipboardData?
+    
+    /**
+     * 复制粘贴文件（远端 → 本机）：把远端剪贴板里的文件（clipboard_get 得到的路径）下载到 `local_dir`。
+     * 完成后 ClipboardTransfer.paths() 是本机上的顶层路径，界面把本机剪贴板设成它们。
+     */
+    func clipboardPullFiles(remotePaths: [String], localDir: String, listener: TransferListener)  -> ClipboardTransfer
+    
+    /**
+     * 复制粘贴文件（本机 → 远端）：把本机文件 / 文件夹传到被控端暂存区，再把被控端剪贴板设成它们。
+     * 进度与结果经 listener；超过 4 GB 或 1 万个文件时报错（请改用文件管理）。需要剪贴板与文件权限。
+     */
+    func clipboardPushFiles(localPaths: [String], listener: TransferListener)  -> ClipboardTransfer
     
     func clipboardSet(data: ClipboardData) async throws 
     
@@ -2193,6 +2238,11 @@ public protocol PeerSessionProtocol: AnyObject, Sendable {
     
     func path()  -> PathInfo
     
+    /**
+     * 删掉本会话加的虚拟屏。
+     */
+    func removeVirtualDisplay(displayId: UInt32) async throws 
+    
     func screenshot(displayId: UInt32, maxWidth: UInt32) async throws  -> ImageData
     
     func setListener(listener: PeerListener) 
@@ -2206,6 +2256,11 @@ public protocol PeerSessionProtocol: AnyObject, Sendable {
      * 开始收听被控端的系统声音，用本机默认输出设备播放。能力列表里有 "audio" 才支持。`volume` 0..1。
      */
     func startAudio(volume: Float) async throws  -> AudioPlayback
+    
+    /**
+     * 主控最多能在被控端加几块虚拟屏（能力列表 "virtual_display" + "virtual_display_max=N"）；不支持或没有控制权限时为 0。
+     */
+    func virtualDisplayMax()  -> UInt32
     
     func wakeOnLan(mac: String) async throws 
     
@@ -2437,6 +2492,14 @@ open class AudioPlayback: AudioPlaybackProtocol, @unchecked Sendable {
     open func stop() { bridgeUnimplemented() }
 }
 
+open class ClipboardTransfer: ClipboardTransferProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func cancel() { bridgeUnimplemented() }
+    open func paths()  -> [String] { bridgeUnimplemented() }
+}
+
 open class DisplayChannel: DisplayChannelProtocol, @unchecked Sendable {
     public struct NoHandle { public init() {} }
     public init(noHandle: NoHandle) {}
@@ -2445,6 +2508,7 @@ open class DisplayChannel: DisplayChannelProtocol, @unchecked Sendable {
     open func requestKeyframe() { bridgeUnimplemented() }
     open func sendInput(event: InputEvent) { bridgeUnimplemented() }
     open func setBitrate(kbps: UInt32) { bridgeUnimplemented() }
+    open func setClientCursor(on: Bool) { bridgeUnimplemented() }
     open func startRecording(path: String, withAudio: Bool) async throws { bridgeUnimplemented() }
     open func stop() { bridgeUnimplemented() }
     open func stopRecording() throws  -> RecordingInfo { bridgeUnimplemented() }
@@ -2455,6 +2519,7 @@ open class EncodedFrameSink: EncodedFrameSinkProtocol, @unchecked Sendable {
     public init(noHandle: NoHandle) {}
     required public init(unsafeFromHandle handle: UInt64) {}
     open func push(data: Data, ptsUs: UInt64, keyframe: Bool) { bridgeUnimplemented() }
+    open func setCursor(x: Int32, y: Int32, visible: Bool) { bridgeUnimplemented() }
     open func setResolution(width: UInt32, height: UInt32) { bridgeUnimplemented() }
 }
 
@@ -2545,7 +2610,10 @@ open class PeerSession: PeerSessionProtocol, @unchecked Sendable {
     public struct NoHandle { public init() {} }
     public init(noHandle: NoHandle) {}
     required public init(unsafeFromHandle handle: UInt64) {}
+    open func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32) async throws  -> DisplayInfo { bridgeUnimplemented() }
     open func clipboardGet() async throws  -> ClipboardData? { bridgeUnimplemented() }
+    open func clipboardPullFiles(remotePaths: [String], localDir: String, listener: TransferListener)  -> ClipboardTransfer { bridgeUnimplemented() }
+    open func clipboardPushFiles(localPaths: [String], listener: TransferListener)  -> ClipboardTransfer { bridgeUnimplemented() }
     open func clipboardSet(data: ClipboardData) async throws { bridgeUnimplemented() }
     open func disconnect() { bridgeUnimplemented() }
     open func exec(request: ExecRequest) async throws  -> ExecResult { bridgeUnimplemented() }
@@ -2559,10 +2627,12 @@ open class PeerSession: PeerSessionProtocol, @unchecked Sendable {
     open func openDisplay(options: DisplayOptions, sink: VideoSink) async throws  -> DisplayChannel { bridgeUnimplemented() }
     open func openTerminal(options: TerminalOptions, sink: TerminalSink) async throws  -> TerminalChannel { bridgeUnimplemented() }
     open func path()  -> PathInfo { bridgeUnimplemented() }
+    open func removeVirtualDisplay(displayId: UInt32) async throws { bridgeUnimplemented() }
     open func screenshot(displayId: UInt32, maxWidth: UInt32) async throws  -> ImageData { bridgeUnimplemented() }
     open func setListener(listener: PeerListener) { bridgeUnimplemented() }
     open func setPrivacy(on: Bool) async throws { bridgeUnimplemented() }
     open func startAudio(volume: Float) async throws  -> AudioPlayback { bridgeUnimplemented() }
+    open func virtualDisplayMax()  -> UInt32 { bridgeUnimplemented() }
     open func wakeOnLan(mac: String) async throws { bridgeUnimplemented() }
 }
 
