@@ -32,7 +32,16 @@ step "主控端首次登录（改密码、生成账号密钥）"
 "$BIN/galaxy-dev" --data "$WORK/ctl" login "$ADDR" alice init-pass-123 alice-new-pass-456 | tail -1
 
 step "被控端登录并运行"
-LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" login --server "$ADDR" --user alice --system-user "$(id -un)" | tail -2
+# CI 上偶发连接级错误（请求没发出去）：重试几次，仍失败时 fail 会带上各日志
+for i in 1 2 3; do
+  if LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" login --server "$ADDR" --user alice --system-user "$(id -un)" >"$WORK/worker-login.log" 2>&1; then
+    tail -2 "$WORK/worker-login.log"
+    break
+  fi
+  cat "$WORK/worker-login.log"
+  [ "$i" = 3 ] && fail "被控端登录失败"
+  sleep 1
+done
 LEMON_GALAXY_TEST_TONE=1 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" run >"$WORK/worker.log" 2>&1 &
 WPID=$!
 PIDS+=($WPID)
