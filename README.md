@@ -84,3 +84,9 @@ cargo build -p lemon-galaxy-server -p lemon-galaxy-worker-linux -p galaxy-dev &&
 ## 许可
 
 MIT
+
+## 代码签名
+
+Windows 发布文件申请由 SignPath Foundation 免费签名，签名范围、审批人与隐私说明见 [代码签名策略](CODE_SIGNING_POLICY.md)。
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
