@@ -657,6 +657,12 @@ jobs:
               echo "macOS 首次打开如果提示无法验证开发者，到「系统设置 → 隐私与安全性」底部点「仍要打开」。"
               echo
             fi
+            echo "## 代码签名"
+            echo
+            echo "Windows 发布文件申请由 SignPath Foundation 免费签名，开通前暂不签名。详见 [代码签名策略](https://github.com/$GITHUB_REPOSITORY/blob/main/CODE_SIGNING_POLICY.md)。"
+            echo
+            echo "Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)."
+            echo
             echo "## 更新内容"
             echo
             if [ -n "$PREV" ]; then
