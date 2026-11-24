@@ -13,7 +13,7 @@ Until signing is approved and active, Windows release files are published unsign
 
 Only files built by GitHub Actions on GitHub-hosted runners, from source in this repository, are submitted for signing:
 
-- Windows worker executables (`lemon-galaxy-worker-windows`, x86_64, aarch64 and the Windows 7 build)
+- Windows worker executables (`lemon-galaxy-worker-windows`, x86_64, aarch64, and the legacy builds for Windows 7 x64, Vista / 7 32-bit and XP 32-bit)
 - Windows control client executables inside the release archives (`lemon-galaxy-control-windows`)
 - Windows server executables inside the release archives (`lemon-galaxy-server`)
 - LemonGalaxy virtual display driver package (`lemon-galaxy-worker-windows/driver`, x64)

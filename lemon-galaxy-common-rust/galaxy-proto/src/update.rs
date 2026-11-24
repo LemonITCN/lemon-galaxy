@@ -38,6 +38,11 @@ pub fn classify_asset(name: &str) -> Option<(&'static str, &'static str, String)
     if lower.starts_with("lemon-galaxy-worker-") && lower.contains("-linux-") {
         return Some(("worker", "linux", arch_of(&lower)));
     }
+    // Windows XP 兼容版（32 位）与 Windows 7 兼容版（Vista / 7 / 8，x64 与 32 位）各算一个平台，
+    // 不能和 Windows 10 起的正式版互相更新
+    if lower.starts_with("lemon-galaxy-worker-") && lower.contains("-windowsxp-") && lower.ends_with(".exe") {
+        return Some(("worker", "windowsxp", arch_of(&lower)));
+    }
     if lower.starts_with("lemon-galaxy-worker-") && lower.contains("-windows7-") && lower.ends_with(".exe") {
         return Some(("worker", "windows7", arch_of(&lower)));
     }
@@ -63,7 +68,7 @@ pub fn classify_asset(name: &str) -> Option<(&'static str, &'static str, String)
     None
 }
 
-/// 本机架构在发布文件里的写法。
+/// 本机架构在发布文件里的写法（32 位 x86 写作 `x86`）。
 pub fn this_arch() -> &'static str {
     match std::env::consts::ARCH {
         "x86_64" => "x86_64",
@@ -116,6 +121,9 @@ mod tests {
         assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-linux-x86_64.tar.gz"), Some(("server", "linux", "x86_64".into())));
         assert_eq!(classify_asset("lemon-galaxy-worker-0.1.0.5-windows7-x86_64.exe"), Some(("worker", "windows7", "x86_64".into())));
         assert_eq!(classify_asset("LemonGalaxy-0.1.0.12-windows7-x64.zip"), Some(("control", "windows7", "x86_64".into())));
+        // 32 位：Vista / 7 / 8 与 XP 各一份，架构都是 x86，平台名不同
+        assert_eq!(classify_asset("lemon-galaxy-worker-0.1.0.40-windows7-x86.exe"), Some(("worker", "windows7", "x86".into())));
+        assert_eq!(classify_asset("lemon-galaxy-worker-0.1.0.40-windowsxp-x86.exe"), Some(("worker", "windowsxp", "x86".into())));
         assert_eq!(classify_asset("LemonGalaxy-0.1.0.12-windows-x64.zip"), Some(("control", "windows", "x86_64".into())));
         assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-linux-aarch64.tar.gz"), Some(("server", "linux", "aarch64".into())));
         assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-windows-x86_64.zip"), Some(("server", "windows", "x86_64".into())));

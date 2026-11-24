@@ -22,8 +22,9 @@ use galaxy_worker::t;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use windows::core::{GUID, PCWSTR};
+use super::compat::win7::DiUninstallDevice;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    DiUninstallDevice, SetupDiCallClassInstaller, SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW,
+    SetupDiCallClassInstaller, SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW,
     SetupDiGetINFClassW, SetupDiOpenDevRegKey, SetupDiSetDeviceRegistryPropertyW, SetupUninstallOEMInfW, UpdateDriverForPlugAndPlayDevicesW, DICD_GENERATE_ID, DICS_FLAG_GLOBAL, DIF_REGISTERDEVICE, DIGCF_ALLCLASSES, DIREG_DRV, HDEVINFO,
     INSTALLFLAG_FORCE, SPDRP_HARDWAREID, SP_DEVINFO_DATA, SUOI_FORCEDELETE,
 };

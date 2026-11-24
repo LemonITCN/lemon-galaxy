@@ -11,6 +11,8 @@
 
 pub mod gpu;
 mod mft;
+// NVENC 的结构体按 64 位布局；NVIDIA 2018 年起不再出 32 位系统驱动，32 位版不带
+#[cfg(target_pointer_width = "64")]
 mod nvenc;
 mod soft;
 
@@ -194,7 +196,10 @@ impl VideoEncoder {
                 }
             };
             let enc: anyhow::Result<Box<dyn HwEncoder>> = match kind {
+                #[cfg(target_pointer_width = "64")]
                 Backend::Nvenc => nvenc::Nvenc::new(&device, g.width, g.height, fps, kbps, &adapter.name).map(|e| Box::new(e) as _),
+                #[cfg(not(target_pointer_width = "64"))]
+                Backend::Nvenc => Err(anyhow::anyhow!("32 位版不带 NVENC")),
                 _ => mft::Mft::new(&device, &adapter, g.width, g.height, fps, kbps, req.backend == Some(Backend::Mft)).map(|e| Box::new(e) as _),
             };
             let enc = enc.and_then(|mut e| e.probe(&g.any_output()).map(|_| e));

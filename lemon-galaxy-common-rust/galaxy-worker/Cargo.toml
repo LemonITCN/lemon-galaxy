@@ -28,3 +28,7 @@ nix = { version = "0.29", features = ["user"] }
 # polkit（本机控制接口鉴权）：纯 Rust 的 D-Bus，不链接 libdbus
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[lints.rust]
+# Windows XP 兼容版构建时加 --cfg lemon_galaxy_xp（见 scripts/build-windows-legacy.sh）
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lemon_galaxy_xp)'] }

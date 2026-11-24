@@ -52,10 +52,14 @@
 - 服务进程（LocalSystem，开机自启，失败自动重启）：联网、账号、终端、文件、命令执行，与 Linux 被控端共用 galaxy-worker 命令行与 galaxy-host 内核。
 - 画面代理：服务把自己的令牌复制一份、放进当前控制台会话启动（`__lg-session-agent`），负责 DXGI 桌面复制截屏（不可用时退回 GDI）、openh264 编码、SendInput 键鼠、剪贴板；锁屏与 UAC 安全桌面也能看到和操作。控制台会话切换时自动换到新会话重启，进行中的画面续上。
 - 以指定账号运行：终端、命令、文件子进程用该账号的令牌启动——已登录则取会话令牌，否则 S4U 登录（无需密码，只能访问本机资源）；管理员账号用提升后的完整令牌（与 Windows 自带 OpenSSH 一致）。
-- 终端用 ConPTY（Windows 10 1809 / Server 2019 起），更老的系统退回按行发送的简化终端。
+- 终端用 ConPTY（Windows 10 1809 / Server 2019 起），更老的系统退回按行发送的简化终端（输出按控制台代码页转成 UTF-8）；没有 PowerShell 的系统（XP、Vista）默认 shell 用 cmd。
 - 协议里的路径一律用「/」：Windows 写成 `/C:/Users/x`，`/` 列出各个盘。
 - 数据目录：管理员为 `%ProgramData%\LemonGalaxy\worker`（只给 SYSTEM 与管理员组），普通用户为 `%LOCALAPPDATA%\LemonGalaxy\worker`。
-- 正式包要求 Windows 10 / Server 2016 起（Rust 标准库的要求）；另用 win7 编译目标出一份 Windows 7 SP1 / 8 兼容版（`windows7` 发布文件，截屏退回 GDI）。
+- 正式包要求 Windows 10 / Server 2016 起（Rust 标准库的要求）；另用 win7 编译目标出老系统兼容版（`scripts/build-windows-legacy.sh`，调研见 [research/windows-xp-32bit.md](research/windows-xp-32bit.md)），截屏退回 GDI：
+  - `windows7-x86_64`：Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2；
+  - `windows7-x86`：Vista SP2 / 7 / 8 / 8.1 / 10 的 32 位系统（YY-Thunks 补 Win7 起的接口）；
+  - `windowsxp-x86`（实验）：XP SP3 / Server 2003 SP2 的 32 位系统（YY-Thunks 补 Vista 起的接口，VC-LTL5 改用系统自带的 msvcrt.dll）。XP 上没有声音、隐私屏、虚拟屏、显卡编码，远程发不了 Ctrl+Alt+Del。
+  - 老系统只做被控（主控端要 .NET Framework 4.8）。CI 逐个核对导入表：每个导入的函数目标系统都要有。
 
 ### 3.0.1 macOS 被控端的无人值守
 
@@ -83,7 +87,7 @@
 
 ### 3.2 终端与文件（所有被控端）
 
-- 终端：Linux / macOS（用户默认 shell）、Windows（PowerShell / cmd，Win7 用 winpty 兼容层）。
+- 终端：Linux / macOS（用户默认 shell）、Windows（PowerShell / cmd；Windows 10 1809 之前的系统没有 ConPTY，是按行发送的简化终端）。
   - 多会话并存；断线后会话保留在被控端，重连接续；全屏程序（vim / htop / TUI）正常；移动端输入框 + 语音输入。
 - 文件管理（Termius SFTP 式）：双栏（本地 ↔ 远端、远端 ↔ 远端）、拖拽、传输队列、断点续传、改权限、新建 / 重命名 / 删除、在线编辑。
   走 LemonGalaxy 自己的端到端加密通道，不依赖 SSH，因此 Windows / macOS 被控端同样可用。
@@ -137,7 +141,9 @@
 
 | 平台 | 被控 | 主控 | 备注 |
 |---|---|---|---|
-| Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2 | 是（worker） | 是（control, WPF） | 截屏用 GDI（7）或桌面复制（8+）；无虚拟屏；终端用 winpty |
+| Windows XP SP3 / Server 2003 SP2（32 位） | 是（worker，实验） | 否 | GDI 截屏 + 软件编码；无声音、隐私屏、虚拟屏；简化终端；CPU 要支持 SSE2 |
+| Windows Vista SP2（32 位）、Windows 7 / 8 / 8.1 / 10（32 位） | 是（worker） | 否 | 截屏用 GDI（Vista / 7）或桌面复制（8+）；无虚拟屏；简化终端（10 1809 起 ConPTY） |
+| Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2 | 是（worker） | 是（control, WPF） | 截屏用 GDI（7）或桌面复制（8+）；无虚拟屏；简化终端 |
 | Windows 10 / 11 / Server 2016+ | 是 | 是 | 全功能；10 1607 起支持虚拟屏；ARM64 原生 |
 | macOS 13+ | 是 | 是 | 首次需本人授权「屏幕录制」「辅助功能」；Apple 芯片 + Intel 通用 |
 | Linux（x86_64 / ARM64，glibc 2.17 起；musl 精简版任意发行版） | 是（远程桌面、终端、文件、端口映射、AI） | 否 | X11 全支持（含登录界面）；GNOME Wayland 走 Mutter（无人值守），其他 Wayland 走桌面门户（首次本人点允许）；没人登录时开虚拟桌面；NVENC / VA-API 显卡编码；有 root 装系统服务，无 root 装用户级服务 |

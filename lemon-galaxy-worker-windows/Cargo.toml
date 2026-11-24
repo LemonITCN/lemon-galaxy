@@ -61,3 +61,6 @@ windows = { version = "0.62", features = [
   "Win32_Globalization",
 ] }
 
+[lints.rust]
+# Windows XP 兼容版构建时加 --cfg lemon_galaxy_xp（见 scripts/build-windows-legacy.sh）
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lemon_galaxy_xp)'] }

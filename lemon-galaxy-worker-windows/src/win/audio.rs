@@ -10,7 +10,8 @@ use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
     WAVEFORMATEXTENSIBLE,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
+use super::compat::co_task_mem_free;
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
 
 const WAVE_FORMAT_PCM: u16 = 1;
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
@@ -44,7 +45,7 @@ fn device_id(d: &IMMDevice) -> String {
         match d.GetId() {
             Ok(p) => {
                 let s = p.to_string().unwrap_or_default();
-                CoTaskMemFree(Some(p.0 as _));
+                co_task_mem_free(p.0 as _);
                 s
             }
             Err(_) => String::new(),
@@ -96,7 +97,7 @@ impl Loopback {
                 client.Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 2_000_000, 0, fmt, None).map_err(|e| format!("开始声音采集失败：{e}"))?;
                 Ok((kind, wf.nSamplesPerSec, wf.nChannels))
             })();
-            CoTaskMemFree(Some(fmt as _));
+            co_task_mem_free(fmt as _);
             let (kind, rate, channels) = r?;
             let capture: IAudioCaptureClient = client.GetService().map_err(|e| format!("开始声音采集失败：{e}"))?;
             client.Start().map_err(|e| format!("开始声音采集失败：{e}"))?;

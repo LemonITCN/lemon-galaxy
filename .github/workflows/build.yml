@@ -6,7 +6,8 @@
 #                  macOS 13 起 Apple 芯片 + Intel 通用单文件（内嵌 Web 管理后台，可装成系统服务；终端里不带参数运行进交互菜单）
 #   Linux 被控端   lemon-galaxy-worker  Linux x86_64 / ARM64：glibc 2.17 起单文件（含远程桌面、显卡编码）、musl 静态精简版（只有终端与文件）、
 #                  .deb / .rpm（内核 + GTK 界面 + 系统服务，界面在 Debian 10 容器里编，Ubuntu 20.04 / Debian 10 / RHEL 8 起可用）
-#   Windows 被控端 lemon-galaxy-worker.exe  Windows 10 / Server 2016 起，x64 / ARM64 单文件（系统服务 + 画面代理）
+#   Windows 被控端 lemon-galaxy-worker.exe  Windows 10 / Server 2016 起，x64 / ARM64 单文件（系统服务 + 画面代理）；
+#                  老系统兼容版（scripts/build-windows-legacy.sh）：Windows 7 SP1 / 8 x64、Vista SP2 / 7 / 8 32 位、XP SP3 32 位（实验）
 #   Mac 客户端     LemonGalaxy.dmg      macOS 13 起，Apple 芯片 + Intel 通用（主控 + 被控）
 #   安卓客户端     LemonGalaxy.apk      Android 8.0 起
 #
@@ -269,9 +270,11 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: windows-${{ matrix.arch }}
+          # galaxy-dev 不进发布，给老系统兼容版跑端到端测试用
           path: |
             dist/lemon-galaxy-worker.exe
             dist/lemon-galaxy-server.exe
+            dist/galaxy-dev.exe
           if-no-files-found: error
 
   windows-control:
@@ -318,57 +321,83 @@ jobs:
           if-no-files-found: error
 
   windows7:
-    name: Windows 7 兼容版被控端
-    needs: web
+    name: Windows 老系统兼容版被控端 (${{ matrix.flavor }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { flavor: win7-x64, artifact: windows7-x86_64 }
+          - { flavor: win7-x86, artifact: windows7-x86 }
+          - { flavor: xp, artifact: windowsxp-x86 }
     runs-on: windows-2025
-    # 用 nightly 的 win7 目标（Rust 标准目标要求 Windows 10），先不挡发布
+    # 用 nightly 的 win7 目标（Rust 标准目标要求 Windows 10）自己编标准库，32 位再链 YY-Thunks / VC-LTL5，先不挡发布
     continue-on-error: true
     defaults:
       run:
         shell: bash
     env:
-      RUSTFLAGS: -C target-feature=+crt-static
+      LEGACY_NIGHTLY: nightly-2026-11-20
     steps:
       - uses: actions/checkout@v7
       - name: 准备 nightly
         run: |
-          rustup toolchain install nightly --profile minimal --component rust-src
-          rustc +nightly -vV
+          rustup toolchain install "$LEGACY_NIGHTLY" --profile minimal --component rust-src
+          rustc "+$LEGACY_NIGHTLY" -vV
       - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: rust-win7-${{ hashFiles('Cargo.lock') }}
-          restore-keys: rust-win7-
-      - name: 编译
-        run: |
-          cargo +nightly build -Z build-std=std,panic_abort --release --target x86_64-win7-windows-msvc -p lemon-galaxy-worker-windows
-          # 主控端内核库也出一份 Win7 版（发布时换进主控端压缩包，另出兼容版）
-          cargo +nightly build -Z build-std=std,panic_abort --release --target x86_64-win7-windows-msvc -p galaxy-ffi --features decoder --lib
-          mkdir -p dist && cp target/x86_64-win7-windows-msvc/release/lemon-galaxy-worker.exe target/x86_64-win7-windows-msvc/release/galaxy_ffi.dll dist/
-          ls -l dist
-      - name: 检查没有导入 Windows 8 / 10 才有的函数
-        run: |
-          DUMPBIN="$(ls /c/Program\ Files/Microsoft\ Visual\ Studio/*/*/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe 2>/dev/null | tail -1)"
-          [ -n "$DUMPBIN" ] || { echo "找不到 dumpbin"; exit 1; }
-          "$DUMPBIN" -nologo -imports dist/lemon-galaxy-worker.exe dist/galaxy_ffi.dll > imports.txt
-          grep -E "\.dll$" imports.txt | sort -u
-          BAD="ProcessPrng|WaitOnAddress|WakeByAddress|GetSystemTimePreciseAsFileTime|SetThreadDescription|GetDpiForMonitor|SetProcessDpiAwarenessContext|CreatePseudoConsole|ResizePseudoConsole|ClosePseudoConsole|api-ms-win-core-synch-l1-2-0|bcryptprimitives"
-          if grep -E "$BAD" imports.txt; then echo "导入了 Windows 7 没有的函数"; exit 1; fi
-          echo "导入表检查通过"
+            target/legacy-${{ matrix.flavor }}
+            target/legacy-tools
+          key: rust-legacy-${{ matrix.flavor }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-legacy-${{ matrix.flavor }}-
+      - name: 编译并核对导入表（每个导入的函数目标系统都要有）
+        run: scripts/build-windows-legacy.sh ${{ matrix.flavor }}
       - name: 冒烟测试（在新系统上跑一下）
         run: |
           dist/lemon-galaxy-worker.exe version
           dist/lemon-galaxy-worker.exe selftest-capture || true
       - uses: actions/upload-artifact@v7
         with:
-          name: windows7-x86_64
+          name: ${{ matrix.artifact }}
           path: |
             dist/lemon-galaxy-worker.exe
             dist/galaxy_ffi.dll
-          if-no-files-found: error
+            dist/imports.txt
+          if-no-files-found: warn
+
+  windows-legacy-test:
+    name: 老系统兼容版端到端测试 (${{ matrix.artifact }})
+    needs: [windows, windows7]
+    # 在 Windows Server 2025 上跑：验证功能链路（老系统缺的接口由 YY-Thunks 转给真接口），不代表老系统实机；不挡发布
+    if: always()
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        artifact: [windows7-x86_64, windows7-x86, windowsxp-x86]
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-x86_64
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: legacy
+      - name: 换上兼容版被控端
+        run: |
+          cp legacy/lemon-galaxy-worker.exe dist/lemon-galaxy-worker.exe
+          dist/lemon-galaxy-worker.exe version
+          dist/lemon-galaxy-worker.exe selftest-capture || true
+      - name: 端到端测试（服务器 + 兼容版被控端 + 主控，含系统服务）
+        run: scripts/e2e.sh dist
 
   windows-display-driver:
     name: Windows 虚拟屏驱动（未签名包）
@@ -652,9 +681,12 @@ jobs:
           if [ -f art/windows-control/LemonGalaxy-Windows-x64.zip ]; then
             cp art/windows-control/LemonGalaxy-Windows-x64.zip "out/LemonGalaxy-$V-windows-x64.zip"
           fi
-          if [ -f art/windows7-x86_64/lemon-galaxy-worker.exe ]; then
-            cp art/windows7-x86_64/lemon-galaxy-worker.exe "out/lemon-galaxy-worker-$V-windows7-x86_64.exe"
-          fi
+          # 老系统兼容版被控端：Win7 x64、Vista / 7 32 位、XP 32 位（自动更新按平台名 windows7 / windowsxp 与架构区分）
+          for f in windows7-x86_64 windows7-x86 windowsxp-x86; do
+            if [ -f "art/$f/lemon-galaxy-worker.exe" ]; then
+              cp "art/$f/lemon-galaxy-worker.exe" "out/lemon-galaxy-worker-$V-$f.exe"
+            fi
+          done
           # Windows 主控端兼容版：同一个界面程序，换上 Win7 目标编的内核库与被控端
           # 主控端压缩包由 PowerShell 打包，路径里是反斜杠（unzip 会报错），用 Python 逐个条目改写
           if [ -f art/windows-control/LemonGalaxy-Windows-x64.zip ] && [ -f art/windows7-x86_64/galaxy_ffi.dll ]; then
@@ -718,6 +750,8 @@ jobs:
               echo "| Windows 被控端 | Windows 10 / Server 2016 及以上，$W | [lemon-galaxy-worker-$V-windows-$a.exe]($DL/lemon-galaxy-worker-$V-windows-$a.exe) |"
             done
             [ -f "out/lemon-galaxy-worker-$V-windows7-x86_64.exe" ] && echo "| Windows 被控端（兼容版） | Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2，x64 | [lemon-galaxy-worker-$V-windows7-x86_64.exe]($DL/lemon-galaxy-worker-$V-windows7-x86_64.exe) |"
+            [ -f "out/lemon-galaxy-worker-$V-windows7-x86.exe" ] && echo "| Windows 被控端（32 位兼容版） | Windows Vista SP2 / 7 / 8 / 8.1 / 10 32 位，Server 2008 | [lemon-galaxy-worker-$V-windows7-x86.exe]($DL/lemon-galaxy-worker-$V-windows7-x86.exe) |"
+            [ -f "out/lemon-galaxy-worker-$V-windowsxp-x86.exe" ] && echo "| Windows 被控端（XP 兼容版，实验） | Windows XP SP3 / Server 2003 SP2 32 位（只做被控，没有声音、隐私屏、虚拟屏） | [lemon-galaxy-worker-$V-windowsxp-x86.exe]($DL/lemon-galaxy-worker-$V-windowsxp-x86.exe) |"
             for a in "${WINS[@]}"; do
               case $a in x86_64) W="x64" ;; *) W="ARM64" ;; esac
               [ -f "out/lemon-galaxy-server-$V-windows-$a.zip" ] && echo "| 服务器（内嵌管理后台） | Windows 10 / 11 / Server 2016 及以上，$W | [lemon-galaxy-server-$V-windows-$a.zip]($DL/lemon-galaxy-server-$V-windows-$a.zip) |"

@@ -23,7 +23,7 @@ use windows::Win32::Media::MediaFoundation::{
     MFT_REGISTER_TYPE_INFO, MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MF_E_NOTACCEPTING, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
     MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
-use windows::Win32::System::Com::CoTaskMemFree;
+use super::super::compat::co_task_mem_free;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
@@ -119,7 +119,7 @@ fn attr_string(a: &IMFAttributes, key: &GUID) -> String {
             return String::new();
         }
         let s = p.to_string().unwrap_or_default();
-        CoTaskMemFree(Some(p.0 as _));
+        co_task_mem_free(p.0 as _);
         s
     }
 }
@@ -163,7 +163,7 @@ fn find(luid: &LUID, vendor: u32) -> anyhow::Result<Vec<Candidate>> {
             v.push(Candidate { activate: a, name, vendor: vendor_id });
         }
         if !list.is_null() {
-            CoTaskMemFree(Some(list as _));
+            co_task_mem_free(list as _);
         }
         Ok(v)
     }

@@ -11,6 +11,8 @@ mod platform;
 mod privacy;
 mod service;
 mod vdisplay;
+#[cfg(lemon_galaxy_xp)]
+mod xp;
 
 use galaxy_host::platform::HostPlatform;
 use galaxy_proto::Platform;

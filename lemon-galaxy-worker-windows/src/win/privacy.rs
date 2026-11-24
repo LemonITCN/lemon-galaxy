@@ -51,6 +51,12 @@ pub struct Privacy {
 impl Privacy {
     /// 开启。不支持（系统太老、建不了窗口）时返回 Err。
     pub fn start() -> Result<Self, String> {
+        // 黑窗不进截屏要 Windows 10 2004（19041）起。XP / Vista 兼容版里 YY-Thunks 会让设置「假装成功」，
+        // 黑窗就会出现在远端画面里，所以先按版本号挡掉
+        let (major, _, build) = galaxy_host::win::os_version();
+        if major < 10 || build < 19041 {
+            return Err("这台电脑的系统太老（需要 Windows 10 2004 或更新），不支持隐私屏".into());
+        }
         let (tx, rx) = mpsc::channel::<Result<u32, String>>();
         let join = std::thread::spawn(move || unsafe { run(tx) });
         match rx.recv_timeout(std::time::Duration::from_secs(5)) {

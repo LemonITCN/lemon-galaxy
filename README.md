@@ -26,7 +26,7 @@
 |---|---|---|
 | 服务器 | Linux 任意发行版（静态单文件）；Windows 10 / 11 / Server 2016 起；macOS 13 起。都内嵌管理后台，可装成系统服务 | x86_64、ARM64（macOS 为 Apple 芯片、Intel 通用包） |
 | Linux 被控端 | 桌面版 .deb / .rpm：Ubuntu 20.04、Debian 10、CentOS / RHEL 8 起；单文件：glibc 2.17 起（CentOS 7 起）；musl 精简版：任意发行版（只有终端与文件）。X11 与 Wayland（GNOME、KDE 等）都能远程桌面，没人登录时开虚拟桌面，NVIDIA / Intel / AMD 显卡硬件编码 | x86_64、ARM64 |
-| Windows 被控端 | Windows 10 / 11 / Server 2016 起；另有 Windows 7 SP1 兼容版 | x64、ARM64 |
+| Windows 被控端 | Windows 10 / 11 / Server 2016 起；另有兼容版：Windows 7 SP1 / 8 / 8.1（x64），Vista SP2 / 7 / 8 / 10（32 位），XP SP3 / Server 2003 SP2（32 位，实验；没有声音、隐私屏、虚拟屏，终端为按行发送的简化终端）。老系统只做被控 | x64、ARM64、x86（32 位） |
 | Mac 客户端 | macOS 13 起 | Apple 芯片、Intel（通用包） |
 | 安卓 | 8.0 起 | arm64、armv7、x86_64 |
 
@@ -47,7 +47,7 @@
    - 有桌面的机器：装 `.deb`（`sudo apt install ./lemon-galaxy-worker_<版本>_amd64.deb`）或 `.rpm`（`sudo dnf install ./lemon-galaxy-worker-<版本>.x86_64.rpm`），从应用菜单打开「LemonGalaxy 被控端」登录。服务开机自启，托盘显示状态。
    - 服务器：单文件 `./lemon-galaxy-worker login`，再 `sudo ./lemon-galaxy-worker install-service`。想远程看桌面就装 Xvfb 和一个桌面环境（如 `sudo apt install xvfb xfce4`），连上时自动开虚拟桌面。
    - Ubuntu 22.04 起默认是 Wayland：GNOME 不用额外设置；KDE 等第一次连接要有人在被控机上点一次「允许」。Wayland 锁屏时系统禁止远程桌面：远程期间被控端会阻止自动锁屏；无人值守的电脑可在被控端设置里打开「远程连入时自动解锁」（`sudo lemon-galaxy-worker unlock-on-connect on`，远程结束后自动重新锁上）。没人登录时自动开虚拟桌面（有 Xvfb 用 Xvfb，没有就用系统自带的 GNOME 无头桌面）。GNOME 48 及更早的 GDM 登录界面可用 `sudo lemon-galaxy-worker login-screen x11 on` 改成 X11，远程就能看到。
-4. Windows 被控端：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service`。服务以 SYSTEM 运行，锁屏和 UAC 界面也能远程操作。
+4. Windows 被控端：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service`。服务以 SYSTEM 运行，锁屏和 UAC 界面也能远程操作。XP / Vista 没有 PowerShell 时用管理员身份的命令提示符，命令相同；老系统用哪个文件见 [docs/research/windows-xp-32bit.md](docs/research/windows-xp-32bit.md)。
 5. 在 Mac、Windows 或手机上用同一个服务器地址和账号登录。
 
 被控端命令一览：`lemon-galaxy-worker help`。
@@ -80,7 +80,7 @@ cargo build -p lemon-galaxy-server -p lemon-galaxy-worker-linux -p galaxy-dev &&
 
 - Mac：`scripts/build-ffi-apple.sh` 编内核，再 `lemon-galaxy-control-macos/scripts/build.sh [--dmg]`。
 - 安卓：`cd lemon-galaxy-mobile-android && ./gradlew assembleRelease`（会自动编内核并生成绑定）。
-- Windows：在 Mac 上可用 `scripts/check-windows.sh` 交叉检查；正式包由 GitHub Actions 在 Windows 上用 MSVC 编译。
+- Windows：在 Mac 上可用 `scripts/check-windows.sh` 交叉检查（`TARGET=i686-pc-windows-gnullvm` 查 32 位）；正式包由 GitHub Actions 在 Windows 上用 MSVC 编译，老系统兼容版用 `scripts/build-windows-legacy.sh`（nightly 的 win7 目标 + YY-Thunks / VC-LTL5，并核对导入表）。
 
 每次推送到 main，GitHub Actions 构建并测试全部工程，通过后自动发布 Release。发布文件附 SHA-256 清单与发布签名，客户端自动更新只安装签名有效的版本。
 

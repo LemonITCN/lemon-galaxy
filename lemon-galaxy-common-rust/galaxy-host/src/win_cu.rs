@@ -866,11 +866,13 @@ fn launch_shell(q: &str) -> Result<u32, String> {
     };
     unsafe { ShellExecuteExW(&mut info) }.map_err(|e| err(&format!("启动 {q} 失败：{e}（请给可执行文件名或完整路径）")))?;
     let mut pid = 0u32;
-    if !info.hProcess.is_invalid() {
+    // 32 位系统上这个结构是 1 字节对齐的，先把字段拷出来再用
+    let hp = info.hProcess;
+    if !hp.is_invalid() {
         unsafe {
-            let _ = WaitForInputIdle(info.hProcess, 5000);
-            pid = windows::Win32::System::Threading::GetProcessId(info.hProcess);
-            let _ = CloseHandle(info.hProcess);
+            let _ = WaitForInputIdle(hp, 5000);
+            pid = windows::Win32::System::Threading::GetProcessId(hp);
+            let _ = CloseHandle(hp);
         }
     }
     Ok(pid)

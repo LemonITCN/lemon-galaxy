@@ -24,6 +24,7 @@ use windows_sys::Win32::Security::{
     TokenLinkedToken, TokenPrimary, TokenSessionId, TokenUser, LUID_AND_ATTRIBUTES, QUOTA_LIMITS, SE_PRIVILEGE_ENABLED, SID_NAME_USE, TOKEN_ALL_ACCESS, TOKEN_ELEVATION, TOKEN_LINKED_TOKEN, TOKEN_PRIVILEGES, TOKEN_QUERY,
     TOKEN_SOURCE, TOKEN_USER, SECURITY_ATTRIBUTES, TOKEN_ADJUST_PRIVILEGES, TOKEN_DUPLICATE,
 };
+use windows_sys::Win32::Globalization::{GetOEMCP, IsDBCSLeadByteEx, MultiByteToWideChar, WideCharToMultiByte};
 use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -31,7 +32,7 @@ use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::RemoteDesktop::{WTSActive, WTSDomainName, WTSEnumerateSessionsW, WTSFreeMemory, WTSQuerySessionInformationW, WTSQueryUserToken, WTSUserName, WTS_SESSION_INFOW};
 use windows_sys::Win32::System::Threading::{
     CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_sys::Win32::UI::Shell::{LoadUserProfileW, UnloadUserProfile, PROFILEINFOW};
 
@@ -39,6 +40,34 @@ const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x20002;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x20016;
 const PI_NOUI: u32 = 1;
 const SYSTEM_SID: &str = "S-1-5-18";
+
+/// 系统版本（主版本、次版本、构建号），用 RtlGetVersion 取，不受程序兼容性清单影响。XP 是 5.1，Vista 6.0，Win7 6.1。
+pub fn os_version() -> (u32, u32, u32) {
+    #[repr(C)]
+    struct Osvi {
+        size: u32,
+        major: u32,
+        minor: u32,
+        build: u32,
+        platform: u32,
+        csd: [u16; 128],
+    }
+    static V: std::sync::OnceLock<(u32, u32, u32)> = std::sync::OnceLock::new();
+    *V.get_or_init(|| unsafe {
+        let m = GetModuleHandleW(wide("ntdll.dll").as_ptr());
+        if !m.is_null() {
+            if let Some(f) = GetProcAddress(m, b"RtlGetVersion\0".as_ptr()) {
+                let f: unsafe extern "system" fn(*mut Osvi) -> i32 = std::mem::transmute(f);
+                let mut v: Osvi = std::mem::zeroed();
+                v.size = std::mem::size_of::<Osvi>() as u32;
+                if f(&mut v) == 0 {
+                    return (v.major, v.minor, v.build);
+                }
+            }
+        }
+        (10, 0, 0)
+    })
+}
 
 pub fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
@@ -190,6 +219,10 @@ pub fn is_system() -> bool {
 
 /// 当前进程是否以管理员身份（已提升）运行。
 pub fn is_elevated() -> bool {
+    // XP 没有 UAC，也没有 TokenElevation：看是不是管理员组成员
+    if os_version().0 < 6 {
+        return unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0 };
+    }
     let Some(t) = process_token(TOKEN_QUERY) else { return false };
     unsafe { token_info(t.raw(), TokenElevation).map(|b| (*(b.as_ptr() as *const TOKEN_ELEVATION)).TokenIsElevated != 0).unwrap_or(false) }
 }
@@ -569,6 +602,16 @@ pub fn cmd_exe() -> String {
     format!("{}\\cmd.exe", system_dir())
 }
 
+/// 默认 shell：PowerShell；没装的（XP、Vista 默认都没有）用 cmd。
+pub fn default_shell() -> String {
+    let ps = powershell_exe();
+    if std::path::Path::new(&ps).exists() {
+        ps
+    } else {
+        cmd_exe()
+    }
+}
+
 // ---------------- 管道 ----------------
 
 /// 创建匿名管道，返回 (读端, 写端)；`child_side` 指定哪一端要被子进程继承。
@@ -717,30 +760,37 @@ pub fn spawn(s: Spawn) -> io::Result<Child> {
         if !inherit.is_empty() {
             attr_count += 1;
         }
-        let mut size = 0usize;
-        InitializeProcThreadAttributeList(null_mut(), attr_count, 0, &mut size);
-        let mut attr_buf = vec![0u8; size.max(64)];
-        let attrs = attr_buf.as_mut_ptr() as *mut c_void;
-        if InitializeProcThreadAttributeList(attrs, attr_count, 0, &mut size) == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        // 进程属性表（只继承指定句柄、伪终端）是 Vista 起才有的；XP 上不用，可继承的句柄只有这里建的管道端
+        let use_attrs = attr_count > 0 && os_version().0 >= 6;
         struct AttrGuard(*mut c_void);
         impl Drop for AttrGuard {
             fn drop(&mut self) {
                 unsafe { DeleteProcThreadAttributeList(self.0) }
             }
         }
-        let _guard = AttrGuard(attrs);
-        let hpc_holder = s.pseudo_console.unwrap_or(null_mut());
-        if s.pseudo_console.is_some() && UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hpc_holder as *const c_void, std::mem::size_of::<*mut c_void>(), null_mut(), null()) == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if !inherit.is_empty() && UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.as_ptr() as *const c_void, inherit.len() * std::mem::size_of::<HANDLE>(), null_mut(), null()) == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let mut attr_buf = Vec::new();
+        let mut _guard = None;
         let mut si: STARTUPINFOEXW = std::mem::zeroed();
-        si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-        si.lpAttributeList = attrs;
+        si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        if use_attrs {
+            let mut size = 0usize;
+            InitializeProcThreadAttributeList(null_mut(), attr_count, 0, &mut size);
+            attr_buf = vec![0u8; size.max(64)];
+            let attrs = attr_buf.as_mut_ptr() as *mut c_void;
+            if InitializeProcThreadAttributeList(attrs, attr_count, 0, &mut size) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            _guard = Some(AttrGuard(attrs));
+            let hpc_holder = s.pseudo_console.unwrap_or(null_mut());
+            if s.pseudo_console.is_some() && UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hpc_holder as *const c_void, std::mem::size_of::<*mut c_void>(), null_mut(), null()) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if !inherit.is_empty() && UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.as_ptr() as *const c_void, inherit.len() * std::mem::size_of::<HANDLE>(), null_mut(), null()) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+            si.lpAttributeList = attrs;
+        }
         let mut desktop_w = s.desktop.map(wide);
         if let Some(d) = desktop_w.as_mut() {
             si.StartupInfo.lpDesktop = d.as_mut_ptr();
@@ -760,7 +810,10 @@ pub fn spawn(s: Spawn) -> io::Result<Child> {
         let mut cmd = wide(&s.cmdline);
         let cwd = s.cwd.as_deref().filter(|c| std::path::Path::new(c).is_dir()).map(wide);
         let cwd_ptr = cwd.as_ref().map(|c| c.as_ptr()).unwrap_or(null());
-        let mut flags = CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED;
+        let mut flags = CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED;
+        if use_attrs {
+            flags |= EXTENDED_STARTUPINFO_PRESENT;
+        }
         if s.no_window {
             flags |= CREATE_NO_WINDOW;
         }
@@ -795,6 +848,8 @@ pub fn spawn(s: Spawn) -> io::Result<Child> {
         };
         ResumeThread(thread.raw());
         drop(desktop_w);
+        drop(_guard);
+        drop(attr_buf);
         Ok(Child { process, pid: pi.dwProcessId, job })
     }
 }
@@ -934,7 +989,7 @@ impl PtyProc {
                     echo: Mutex::new(Some(tx.clone())),
                 });
                 let _ = tx.send("此系统不支持伪终端（需要 Windows 10 1809 / Server 2019 或更新），终端为简化模式：按行发送，不支持全屏程序。\r\n".as_bytes().to_vec());
-                spawn_output_reader(out_r, tx);
+                spawn_output_reader_oem(out_r, tx);
                 let p2 = p.clone();
                 std::thread::spawn(move || {
                     p2.child.wait_blocking();
@@ -967,8 +1022,18 @@ impl PtyProc {
                         line.clear();
                     }
                     0x7f | 0x08 => {
-                        if line.pop().is_some() {
-                            echo.extend_from_slice(b"\x08 \x08");
+                        // 删掉整个 UTF-8 字符；中日韩等宽字符占两格
+                        let mut start = line.len();
+                        while start > 0 {
+                            start -= 1;
+                            if line[start] & 0xc0 != 0x80 {
+                                break;
+                            }
+                        }
+                        if start < line.len() {
+                            let wide = std::str::from_utf8(&line[start..]).ok().and_then(|c| c.chars().next()).map(|c| c as u32 >= 0x1100).unwrap_or(false);
+                            line.truncate(start);
+                            echo.extend_from_slice(if wide { b"\x08\x08  \x08\x08" } else { b"\x08 \x08" });
                         }
                     }
                     0x03 => {
@@ -989,6 +1054,8 @@ impl PtyProc {
             }
         }
         if !send.is_empty() {
+            // 程序按控制台代码页读输入（中文系统是 GBK）
+            let send = utf8_to_oem(&send);
             let mut g = self.input.lock();
             if let Some(f) = g.as_mut() {
                 f.write_all(&send)?;
@@ -1018,6 +1085,74 @@ impl PtyProc {
 
     pub fn kill(&self) {
         self.child.kill();
+    }
+}
+
+/// 简化终端（没有 ConPTY 的 Windows 7 / Vista / XP）：程序往管道里写的是控制台代码页（中文系统是 GBK），转成 UTF-8。
+fn spawn_output_reader_oem(h: Handle, tx: std::sync::mpsc::Sender<Vec<u8>>) {
+    std::thread::spawn(move || {
+        let cp = unsafe { GetOEMCP() };
+        let mut f = h.into_file();
+        let mut buf = vec![0u8; 32 * 1024];
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    pending.extend_from_slice(&buf[..n]);
+                    // 末尾不完整的双字节字符留到下次
+                    let mut i = 0;
+                    let mut cut = pending.len();
+                    while i < pending.len() {
+                        if pending[i] >= 0x80 && cp != 65001 && unsafe { IsDBCSLeadByteEx(cp, pending[i]) } != 0 {
+                            if i + 1 >= pending.len() {
+                                cut = i;
+                                break;
+                            }
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    let chunk: Vec<u8> = pending.drain(..cut).collect();
+                    if !chunk.is_empty() && tx.send(oem_to_utf8(cp, &chunk)).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn oem_to_utf8(cp: u32, b: &[u8]) -> Vec<u8> {
+    if cp == 65001 || b.is_ascii() {
+        return b.to_vec();
+    }
+    unsafe {
+        let n = MultiByteToWideChar(cp, 0, b.as_ptr(), b.len() as i32, null_mut(), 0);
+        if n <= 0 {
+            return String::from_utf8_lossy(b).into_owned().into_bytes();
+        }
+        let mut w = vec![0u16; n as usize];
+        MultiByteToWideChar(cp, 0, b.as_ptr(), b.len() as i32, w.as_mut_ptr(), n);
+        String::from_utf16_lossy(&w).into_bytes()
+    }
+}
+
+fn utf8_to_oem(b: &[u8]) -> Vec<u8> {
+    let cp = unsafe { GetOEMCP() };
+    if cp == 65001 || b.is_ascii() {
+        return b.to_vec();
+    }
+    let w: Vec<u16> = String::from_utf8_lossy(b).encode_utf16().collect();
+    unsafe {
+        let n = WideCharToMultiByte(cp, 0, w.as_ptr(), w.len() as i32, null_mut(), 0, null(), null_mut());
+        if n <= 0 {
+            return b.to_vec();
+        }
+        let mut out = vec![0u8; n as usize];
+        WideCharToMultiByte(cp, 0, w.as_ptr(), w.len() as i32, out.as_mut_ptr(), n, null(), null_mut());
+        out
     }
 }
 

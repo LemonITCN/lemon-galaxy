@@ -1,0 +1,138 @@
+# Windows 32 位被控端（XP / Vista / 7）调研与实现
+
+- 日期：2026-11-24
+- 范围：lemon-galaxy-worker-windows 出 32 位版本，Windows XP SP3（重点）、Vista、Windows 7 的 32 位系统装成被控端，能被远程桌面、终端、文件控制。**只做被控，不做主控**（WPF 主控端要 .NET Framework 4.8，XP 装不了）。
+- 方法：读依赖源码（tokio / mio / quinn-udp / socket2 / getrandom / windows 0.62 / Rust 标准库 win7 分支）；下载 YY-Thunks 1.2.3、VC-LTL5 5.3.1 的发布包核对（SHA-256 与 GitHub 发布页一致）；本机用 llvm-mingw 交叉编 32 位程序，列出导入表，对照 YY-Thunks 包里带的 XP / Vista / Win7 系统 DLL 导出表。**还没有在 XP / Vista / Win7 实机或虚拟机上跑过。**
+- 标记：【已核实】= 源码、发布包或本机实验直接看到；【推测】= 按机制推断；【待验证】= 必须上实机测。
+
+---
+
+## 0. 结论
+
+1. **能做，已做成两份 32 位发布文件**（CI 构建，导入表逐个核对）：
+   - `lemon-galaxy-worker-<版本>-windows7-x86.exe`：Vista SP2 / 7 / 8 / 8.1 / 10 的 32 位系统。Rust 的 `i686-win7-windows-msvc` 目标 + YY-Thunks 的 Vista 版补 Win7 起才有的接口。
+   - `lemon-galaxy-worker-<版本>-windowsxp-x86.exe`（实验）：XP SP3 / Server 2003 SP2 的 32 位系统，也能在更新的 32 位、64 位系统上跑。同一目标 + YY-Thunks 的 XP 版 + VC-LTL5 的 XP 运行库 + 子系统版本 5.01 + 自己补一个 YY-Thunks 没有的 `WSASendMsg`。
+2. **QUIC 在 XP 上可行，不需要退到「只走服务器 TCP 中转」**：LemonGalaxy 的 QUIC 跑在自己的 UDP 套接字（MagicSock，tokio 的 UdpSocket）上，不用 quinn-udp 的收发；tokio 在 XP 上缺的接口 YY-Thunks 都有补，连 mio 必需的 `SIO_BASE_HANDLE` 它也专门处理了。万一 XP 上 UDP 有问题，现有的「强制 TCP 中转」照样可用（同一份代码）。【已核实（源码、YY-Thunks 说明）；能否跑通待验证】
+3. **顺带发现现有 Windows 7 兼容版很可能在 Win7 上根本启动不了**：`windows` 0.62 把 `CoTaskMemFree` 指到 Windows 8 才有的 `combase.dll`，被控端的声音、硬件编码代码用了它。已改成从 `ole32.dll` 导入，CI 改成按 Win7 导出表核对。主控端兼容版压缩包里的 `galaxy_ffi.dll` 也导入了 Win8 才有的 `api-ms-win-core-winrt-error-l1-1-0.dll`、`mmdevapi.dll` 里的函数，同样可能起不来，CI 会列出来但不挡发布（主控端不在这次范围）。【导入表已核实；起不来是按系统 DLL 导出表推断，待 Win7 实机确认】
+4. XP / Vista 上缺的功能：声音（WASAPI 是 Vista 起，XP 没有）、隐私屏（要 Win10 2004）、虚拟屏（要 Win10）、显卡编码（XP 没有 Media Foundation，32 位不带 NVENC）、伪终端（ConPTY 要 Win10 1809，老系统一直是简化终端）、远程发 Ctrl+Alt+Del（`SendSAS` 是 Win7 起）、AI 的「应用操作」（UI Automation 在 XP 上要另装）。远程桌面（GDI 截屏 + openh264）、键鼠、剪贴板、终端、文件、命令、端口映射、自动更新都在。
+5. 需要拍板的见第 8 节：给 ISO 实测；简化终端要不要换成 winpty；CPU 要求 SSE2。
+
+---
+
+## 1. Rust 在老系统上的现状
+
+- Rust 标准目标（`*-pc-windows-msvc`）从 1.78 起要求 Windows 10；`i686-win7-windows-msvc` / `x86_64-win7-windows-msvc` 是 tier 3 目标，没有预编译的标准库，要 nightly + `-Z build-std` 自己编。win7 目标的标准库避开了 Win8 / Win10 接口（`WaitOnAddress`、`ProcessPrng`、`GetSystemTimePreciseAsFileTime` 等），锁用 SRWLock、线程停放用 keyed event、随机数用 `RtlGenRandom`。【已核实（nightly-2026-11-20 标准库源码）】
+- 但 win7 目标仍然直接导入 Vista 才有的接口：SRWLock、条件变量、`GetFileInformationByHandleEx`、`CreateWaitableTimerExW`、`CompareStringOrdinal`、`InitializeProcThreadAttributeList` 等；创建套接字带 `WSA_FLAG_NO_HANDLE_INHERIT`（Win7 SP1 起才认）、列目录用 `FindExInfoBasic`（Win7 起）。所以 XP 必须补接口，Vista 也要补 Win7 的。【已核实】
+- 其他路线：rust9x（改过的 rustc，能到 9x / XP）版本落后、要换整套工具链，不考虑。thunk-rs、oldwin 两个 crate 做的事与下面相同（加 VC-LTL 库路径、链 YY-Thunks 目标文件、设子系统版本），但 thunk-rs 在构建时用 `curl -k` 下载且不校验摘要，oldwin 钉死某个 nightly；我们把同样三步写进 CI 脚本，固定版本与 SHA-256，`Cargo.toml` 不加只给 XP 用的依赖。【已核实（两者源码 / 文档）】
+
+### 1.1 YY-Thunks（补系统接口）
+
+- 原理：链接时把它的目标文件（`objs/x86/YY_Thunks_for_WinXP.obj`）放进去。它定义了 `__imp__函数名@N`（导入表指针）这批符号，链接器就不再从系统 DLL 导入这些函数；运行时先 `GetProcAddress` 找真的，没有就用它的替代实现（比如 SRWLock / 条件变量用 XP 已有的 keyed event 实现，`BCryptGenRandom` 改调 `RtlGenRandom`，`D3D11CreateDevice` 返回失败）。【已核实（目标文件符号、说明表）】
+- 版本 1.2.3（2026-10-09），`YY-Thunks-Objs.zip` SHA-256 `4dc68ec8…5b81`。XP 版补 677 个接口、Vista 版 298 个、Win7 版 225 个。包里还带各版本系统 DLL 的导出表（`Config/x86/5.1.2600.txt` 是 XP，`6.0.6000.txt` 是 Vista，`6.1.7600.txt` 是 Win7），正好拿来核对导入表。【已核实】
+- 对本工程关键的几条（说明表原文要点）【已核实】：
+  - `WSAIoctl`：「低于 6.0 时，`SIO_BASE_HANDLE` 代码返回 SOCKET 自身」——mio 注册套接字第一步就是它，XP 原本不支持会让 tokio 的所有套接字注册失败。
+  - `WSASocketW`：「低于 6.1.7601 时自动去除 `WSA_FLAG_NO_HANDLE_INHERIT`」——标准库与 socket2 建套接字都带这个标志。
+  - `GetQueuedCompletionStatusEx`：XP 上调 `GetQueuedCompletionStatus`（1.1.7 起一次取多个）；`SetFileCompletionNotificationModes`：XP 上什么都不做。
+  - `NtCancelIoFileEx` / `CancelIoEx`：调 `NtCancelIoFile`，会取消这个句柄上全部 I/O（标「不推荐」）。mio 一个 AFD 句柄管多个套接字，改关注事件时会把同句柄上其他套接字的等待也取消掉；mio 收到「已取消」会重新投递，【推测】只是多一点开销，【待验证】。
+  - `UpdateProcThreadAttribute`：`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 被忽略。
+  - `SetWindowDisplayAffinity`、`AddClipboardFormatListener`：什么都不做、假装成功（所以隐私屏要按版本号自己挡，见 4.6）。
+  - `QueryDisplayConfig`：报告没有驱动；`DwmGetWindowAttribute`：报告 DWM 已关闭。
+
+### 1.2 VC-LTL5（C 运行库）
+
+- 把静态 C 运行库（`libvcruntime.lib`、`libucrt.lib`）换成转调系统自带 `msvcrt.dll` 的版本，XP 上不需要装 VC++ 运行库、也不用 UCRT。XP 版 32 位库在 `TargetPlatform/5.1.2600.0/lib/Win32`，另有两个头文件目录（msvcrt 的区域设置结构与 UCRT 不同）。版本 5.3.1（2025-12-12），`VC-LTL-Binary.7z` SHA-256 `7a18799e…31ad`。5.3.1 起不再自带 YY-Thunks，XP 要自己加（本工程本来就加）。【已核实（发布包、config.cmake）】
+- 用法：Rust 用 `crt-static`（相当于 /MT），`-L native=` 指到上面的库目录让链接器先找到它的 `libvcruntime` / `libucrt`；C 依赖（openh264、opus、ring）经 `CFLAGS_i686_win7_windows_msvc` 加它的头文件目录。【按 config.cmake 做法，待 CI 验证】
+- Vista / Win7 32 位版不用 VC-LTL，与现有 Win7 x64 版一样用 VS 自带的静态运行库，缺的 Win7 接口由 YY-Thunks Vista 版补，导入表核对保证。
+
+### 1.3 其他链接细节
+
+- XP 的加载器只认子系统版本 5.x，VS 2012 起默认 6.0：XP 版链接加 `/SUBSYSTEM:CONSOLE,5.01`。【已核实（YY-Thunks、thunk-rs 都这么做）】
+- 32 位 Rust 目标默认 `/SAFESEH`，openh264 的 NASM 汇编目标文件没有 SAFESEH 表，32 位版设 `OPENH264_NO_ASM=1` 不编汇编（runner 上没装 nasm 时本来也不编）。【已核实（目标规格）】
+- 32 位目标默认 `target-cpu=pentium4`，ring 也要求 SSE2：**CPU 要支持 SSE2**（奔腾 4、奔腾 M、速龙 64 起；更早的奔腾 III、速龙 XP 跑不了）。【已核实】
+
+---
+
+## 2. 依赖逐项核对
+
+| 项 | XP 上的情况 | 处理 |
+|---|---|---|
+| tokio / mio（IOCP + AFD） | `GetQueuedCompletionStatusEx`、`SetFileCompletionNotificationModes`、`NtCancelIoFileEx`、`SIO_BASE_HANDLE` 都是 Vista 起 | 全部由 YY-Thunks 补（见 1.1）。`IOCTL_AFD_POLL` 本身是 XP 的 afd.sys 就有的（Winsock 的 select 靠它）【推测】，【待验证】 |
+| quinn（QUIC） | QUIC 走 MagicSock（tokio UdpSocket），不用 quinn-udp 收发；但 quinn-udp 的代码经运行时虚表被链进来，静态导入 `WSASendMsg`（Vista 起，YY-Thunks 没补） | XP 版自己补 `WSASendMsg`（`src/win/xp.rs`：有真的用真的，没有退成 `WSASendTo`）。本机验证：补了之后导入表里没有它了 |
+| 双栈套接字 | XP 的 IPv6 是独立协议栈，不支持 `IPV6_V6ONLY=0`（多数 XP 没装 IPv6） | MagicSock 建双栈失败自动退 IPv4（已有代码） |
+| rustls + ring（TLS） | 纯 Rust / 汇编，不用系统 SChannel，TLS 1.3 照用；根证书编译在程序里（webpki-roots），XP 过期的根证书库不影响 | 无需处理 |
+| 随机数 | getrandom 0.2（ring、rand 0.8 用）导入 `BCryptGenRandom`（bcrypt.dll，Vista 起）；getrandom 0.3 与标准库在 win7 目标下用 `RtlGenRandom`（XP 有） | YY-Thunks 把 `BCryptGenRandom` 转到 `RtlGenRandom` |
+| SRWLock / 条件变量 / InitOnce | Vista 起 | YY-Thunks 用 keyed event 实现；parking_lot 运行时探测 `WaitOnAddress`，没有就用 keyed event |
+| 系统服务（windows-service） | XP 有服务管理器；「非崩溃退出也重启」、服务 SID 等是 Vista 起 | 安装时这几项失败本来就忽略 |
+| 管理员判断 | `TokenElevation` 是 Vista 起，XP 上查不到会当成「不是管理员」，装不了服务 | XP 改用 `IsUserAnAdmin`（`galaxy-host` win.rs） |
+| 画面 | DXGI 桌面复制是 Win8 起；XP 没有 d3d11 / dxgi | YY-Thunks 让 `CreateDXGIFactory1`、`D3D11CreateDevice` 返回失败，走已有的 GDI 截屏退路 |
+| 编码 | Media Foundation 是 Win7 起（动态加载，失败即跳过）；NVENC 的结构体按 64 位写、NVIDIA 2018 年起不出 32 位系统驱动 | 32 位不编 NVENC；XP 上用 openh264 软件编码 |
+| 键鼠 SendInput、剪贴板 | XP 都有 | 无需处理 |
+| Ctrl+Alt+Del | `SendSAS` 是 Win7 起（动态加载，失败返回 false） | XP 经典登录界面需要按 Ctrl+Alt+Del 时远程发不了；XP 默认的欢迎屏幕不需要。可考虑 XP 上给 Winlogon 的「SAS window」发 `WM_HOTKEY`（后续） |
+| 终端 | 没有 ConPTY（Win10 1809 起），Win7 / Vista / XP 一直是「简化终端」：管道、按行发送、不支持全屏程序 | 这次补上代码页转换：输出按控制台代码页（中文系统 GBK）转 UTF-8，输入反过来，退格按整个字符删；之前中文 Windows 7 的输出是乱码 |
+| winpty | 支持 XP 到 Win10（要用 XP 工具集编的发布包，winpty 0.4.x 的 `ia32_xp`）【已核实（winpty README / 发布说明）】；但现有代码**没有接 winpty**（spec 写的是 winpty，实际是简化终端） | 要接的话：随程序带 `winpty.dll` + `winpty-agent.exe`（或内嵌后释放），且 winpty 只能以调用者身份起进程，要以指定账号运行就得先起一个该账号身份的辅助进程再在里面开 winpty。列为后续可选，见第 8 节 |
+| PowerShell | XP、Vista 默认没装 | 默认 shell 改成「有 PowerShell 用 PowerShell，没有用 cmd」；命令执行（AI 的 run_command 等）本来就支持 cmd |
+| 以指定账号起进程 | 进程属性表（只继承指定句柄、伪终端）是 Vista 起；XP 的 `CreateProcess` 不认 `EXTENDED_STARTUPINFO_PRESENT`【推测】 | XP 上不用属性表、用普通 STARTUPINFO。代价：子进程会继承同一时刻别的会话建的可继承管道端（只有管道，影响很小） |
+| 未登录账号的 S4U 登录 | 本机账号走 MSV1_0 的 S4U，XP 是否支持没查到确切资料 | 【待验证】；已登录账号取会话令牌不受影响 |
+| 声音 | WASAPI 是 Vista 起 | XP 上采集失败报错，其他功能不受影响 |
+| 隐私屏 | 黑窗不进截屏要 Win10 2004 | YY-Thunks 会让设置「假装成功」，黑窗会出现在远端画面里，所以先按版本号挡掉（`privacy.rs`） |
+| 虚拟屏 | IddCx 驱动要 Win10 1607 起，且只有 x64 驱动 | 显示配置接口（Win7 起）改成运行时加载，老系统直接报不支持 |
+| AI 应用操作（UI Automation） | XP 要另装 UIAutomationCore（KB971513） | 失败报错 |
+| 文件管理 | 标准库的 `FindFirstFileExW(FindExInfoBasic)`、`GetFinalPathNameByHandleW` 等由 YY-Thunks 补；符号链接 XP 不支持 | 无需处理 |
+
+## 3. 导入表核对（保证程序能启动）
+
+程序导入了目标系统没有的函数，Windows 加载时就报「无法定位程序输入点」或「找不到 xxx.dll」，一行代码都跑不了。所以：
+
+- `scripts/check-legacy-imports.py`：把 `dumpbin /imports` 的结果与 YY-Thunks 包里的系统导出表逐个对照，CI 的三份兼容版每次都核（Win7 x64 版对 Win7 x64 导出表，Vista / 7 32 位版对 Vista，XP 版对 XP）。YY-Thunks 补上的函数链接后就不在导入表里了，所以只看最终导入表。
+- 本机用 llvm-mingw 编 32 位被控端（标准库与 C 运行库是 MinGW 的，与正式包不同，只看本工程与依赖库的导入）核对结果【已核实】：
+  - 改之前，Win7 缺 `combase.dll!CoTaskMemFree`；Vista 另缺 `QueryDisplayConfig`、`GetDisplayConfigBufferSizes`、`SetDisplayConfig`、`DisplayConfigGetDeviceInfo`、`newdev.dll!DiUninstallDevice`；XP 另缺 `SetDisplayConfig`、`DiUninstallDevice`、`WSASendMsg`。
+  - 改之后（`CoTaskMemFree` 从 ole32 导入，显示配置与设备卸载运行时加载，XP 补 `WSASendMsg`），XP、Vista、Win7 三个导出表全部覆盖。
+- 正式包的标准库（win7 目标）与 C 运行库（XP 用 VC-LTL）由 CI 核对。
+
+## 4. 代码改动
+
+1. `lemon-galaxy-worker-windows/src/win/compat.rs`：`co_task_mem_free`（ole32）；`win7` 模块运行时加载 4 个显示配置接口与 `DiUninstallDevice`。
+2. `src/win/xp.rs`（只在 `--cfg lemon_galaxy_xp` 时编）：`WSASendMsg` 替身，用 YY-Thunks 同样的办法定义 `__imp__WSASendMsg@24`。
+3. `src/win/encode/mod.rs`：32 位不编 NVENC。
+4. `src/win/privacy.rs`：Win10 2004 以下直接报不支持。
+5. `galaxy-host/src/win.rs`：`os_version()`（`RtlGetVersion`）；XP 不用进程属性表；XP 用 `IsUserAnAdmin` 判断管理员；没有 PowerShell 时默认 shell 用 cmd；简化终端的代码页转换与按字符退格。`win_cu.rs`：32 位上 `SHELLEXECUTEINFOW` 是 1 字节对齐的，字段先拷出再用。
+6. 自动更新平台名（第 5 节）。
+
+## 5. 自动更新
+
+| 发布文件 | 平台名 | 架构 |
+|---|---|---|
+| `lemon-galaxy-worker-<版本>-windows-x86_64.exe` / `-aarch64.exe` | `windows` | `x86_64` / `aarch64` |
+| `lemon-galaxy-worker-<版本>-windows7-x86_64.exe` | `windows7` | `x86_64` |
+| `lemon-galaxy-worker-<版本>-windows7-x86.exe` | `windows7` | `x86` |
+| `lemon-galaxy-worker-<版本>-windowsxp-x86.exe` | `windowsxp` | `x86` |
+
+- 被控端按「编译时」决定平台名（`galaxy-worker` 的 `platform_name`）：XP 版编译时加 `--cfg lemon_galaxy_xp` 得 `windowsxp`，win7 目标得 `windows7`；架构取 `std::env::consts::ARCH`，32 位是 `x86`。所以 XP 版装在 Win7 上也只会更新成 XP 版，32 位 Win7 版不会被换成 64 位。
+- 服务器按 `galaxy_proto::update::classify_asset` 认发布文件，新文件名有单元测试。
+
+## 6. 构建与 CI
+
+- `scripts/build-windows-legacy.sh <win7-x64|win7-x86|xp>`：固定 nightly（CI 里 `nightly-2026-11-20`）+ `-Z build-std`；下载并校验 YY-Thunks / VC-LTL；编译；`dumpbin` 看 PE 头（XP 版子系统版本应为 5.01）并核对导入表。Win7 x64 版另出主控端兼容版用的 `galaxy_ffi.dll`（导入表也核，但不挡发布）。
+- CI：`windows7` 任务改成三份矩阵（不挡发布）；新增「老系统兼容版端到端测试」：在 Windows Server 2025 上把兼容版被控端换进 x64 的测试目录，跑完整 `scripts/e2e.sh`（登录、直连 / UDP / TCP 中转、命令、终端、文件、声音测试音、远程开机、装成 SYSTEM 服务）。这验证的是功能链路（新系统上 YY-Thunks 直接转给真接口），**不能代替老系统实机**。
+- 发布说明的下载表加两行；XP 版标「实验」，直到实机测过。
+
+## 7. 实机测试计划（Ubuntu 测试机上的 VMware Workstation）
+
+需要：XP SP3 32 位、Vista SP2 32 位、Win7 SP1 32 位的安装 ISO 与激活方式（微软已不提供下载，要用户给或同意来源）。每个系统：
+
+1. 双击 `lemon-galaxy-worker.exe version`：能启动（验证导入表、子系统版本、C 运行库）。
+2. `login` → `install-service`：服务以 SYSTEM 起来，开机自启，主控端设备列表里在线。
+3. 连接路径：同一局域网直连；强制 UDP 中转、强制 TCP 中转（`LEMON_GALAXY_FORCE_RELAY`）。
+4. 远程桌面：GDI 截屏 + openh264，键鼠、剪贴板（中文）、多显示器；锁屏 / 欢迎屏幕 / 注销后能看到登录界面；画面帧率与 CPU 占用（老机器的软件编码是瓶颈）。
+5. 终端：cmd 简化终端，中文输出不乱码，退格、Ctrl+C；断线重连接续。
+6. 文件：列目录（含中文名）、上传下载大文件、断点续传、删除目录。
+7. 自动更新：从旧版本更新到新版本，平台名不串。
+8. 长跑：挂一夜看内存与句柄（YY-Thunks 的 SRWLock / 取消 I/O 替代实现）。
+
+## 8. 风险与需要拍板
+
+1. **XP 版目前只有「能编、导入表对得上、新系统上功能通」，还没有在 XP 上跑过**。最大的不确定：mio 的 AFD 轮询在 XP 的 afd.sys 上是否正常、YY-Thunks 的取消 I/O 语义、VC-LTL 与 Rust 标准库的配合。需要用户给 ISO 后实测。
+2. 万一 XP 上 tokio 网络不通（AFD 不可用）：退路是给 mio 打补丁改用 `select` / `WSAEventSelect` 轮询（XP 专用，构建脚本里用 `--config patch` 只替换 XP 版的依赖），工作量中等；或者 XP 版只走 TCP（同样依赖 tokio，帮助不大）。先实测再定。
+3. 终端要不要换 winpty（全屏程序、Tab 补全、颜色都能用，但要多带两个文件、以指定账号运行要多一层辅助进程）。现在的简化终端在 XP / Vista / 7 上都能用。
+4. CPU 要求 SSE2（2001 年以后的大多数机器都有），更老的不支持。
+5. Ctrl+Alt+Del：XP 经典登录界面远程发不了，要不要做 `WM_HOTKEY` 方案。

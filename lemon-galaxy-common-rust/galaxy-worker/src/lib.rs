@@ -838,7 +838,8 @@ async fn assist(os: &dyn WorkerOs, rest: &[String]) -> i32 {
 
 fn platform_name(os: &dyn WorkerOs) -> &'static str {
     match os.platform() {
-        // Windows 7 兼容版单独发布，不能更新成 Windows 10 起的版本
+        // XP 兼容版（构建时加 --cfg lemon_galaxy_xp）、Windows 7 兼容版单独发布，不能更新成 Windows 10 起的版本
+        Platform::Windows if cfg!(lemon_galaxy_xp) => "windowsxp",
         Platform::Windows if cfg!(target_vendor = "win7") => "windows7",
         Platform::Windows => "windows",
         Platform::Macos => "macos",

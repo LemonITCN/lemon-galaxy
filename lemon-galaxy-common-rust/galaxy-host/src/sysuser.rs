@@ -130,7 +130,7 @@ impl SysUser {
 pub fn default_shell() -> String {
     #[cfg(windows)]
     {
-        crate::win::powershell_exe()
+        crate::win::default_shell()
     }
     #[cfg(not(windows))]
     if std::path::Path::new("/bin/bash").exists() {
