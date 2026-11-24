@@ -8,7 +8,9 @@ WORKER="$(cd "$(dirname "${1:-target/debug/lemon-galaxy-worker}")" && pwd)/$(bas
 if [ "$(id -u)" = 0 ]; then
   U="${LG_TEST_USER:-alice}"
   cp "$0" /tmp/lg-test-mutter.sh && chmod 755 /tmp/lg-test-mutter.sh
-  exec su "$U" -c "dbus-run-session -- bash /tmp/lg-test-mutter.sh '$WORKER'"
+  # 程序可能在测试用户进不去的目录（CI 的家目录是 0750）：拷一份到它能执行的地方
+  install -m 755 "$WORKER" /tmp/lg-test-mutter-worker
+  exec su "$U" -c "cd /tmp && dbus-run-session -- bash /tmp/lg-test-mutter.sh /tmp/lg-test-mutter-worker"
 fi
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
   exec dbus-run-session -- bash "$0" "$WORKER"
