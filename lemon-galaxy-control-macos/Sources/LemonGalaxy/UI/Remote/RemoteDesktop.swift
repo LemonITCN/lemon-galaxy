@@ -586,6 +586,11 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
     private let videoLayer = CALayer()
     private var tracking: NSTrackingArea?
     private var pressedModifiers: Set<UInt16> = []
+    /// 已按物理键发出「按下」的键（Mac 键码）：抬起只发给这些键，输入法吃掉的键不发不成对的抬起
+    private var keysDown: Set<UInt16> = []
+    /// 正交给输入法处理的按键；输入法没要（退格、回车、方向键……）时在 doCommand 里按物理键发出
+    private var imeEvent: NSEvent?
+    private var imeEventSent = false
     private var marked = NSAttributedString()
     /// selftest 下把帧转成 CGImage 放进图层（离屏截图抓不到 IOSurface 内容）
     static var snapshotMode = false
@@ -711,17 +716,38 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
         return hid
     }
 
+    private func sendKey(_ event: NSEvent, down: Bool) {
+        guard let hid = mapped(event.keyCode) else { return }
+        if down { keysDown.insert(event.keyCode) } else { keysDown.remove(event.keyCode) }
+        model?.send(.key(hidUsage: hid, down: down))
+    }
+
     override func keyDown(with event: NSEvent) {
         if usingInputMethod, event.modifierFlags.intersection([.command, .control]).isEmpty {
-            inputContext?.handleEvent(event)
+            // 输入法在组字时自己处理；没在组字时退格、回车、方向键、Tab、Esc 等会经 doCommand(by:) 交回来，
+            // 那时按物理键发给远端（以前 doCommand 是空的，开着中文输入法这些键全被丢掉）
+            imeEvent = event
+            imeEventSent = false
+            let handled = inputContext?.handleEvent(event) ?? false
+            // 输入法既没处理也没交回来（如 F1–F12）：照样按物理键发
+            if !handled, !imeEventSent, !hasMarkedText() { sendKey(event, down: true) }
+            imeEvent = nil
             return
         }
-        if let hid = mapped(event.keyCode) { model?.send(.key(hidUsage: hid, down: true)) }
+        sendKey(event, down: true)
     }
 
     override func keyUp(with event: NSEvent) {
-        if usingInputMethod, hasMarkedText() { return }
-        if let hid = mapped(event.keyCode) { model?.send(.key(hidUsage: hid, down: false)) }
+        // 只给发过「按下」的键发抬起：输入法吃掉的键（组字、提交成文字的）两头都不发
+        if keysDown.contains(event.keyCode) { sendKey(event, down: false) }
+    }
+
+    /// 输入法交回来的命令：按当前这个物理键发出去，抬起在 keyUp 里发
+    private func imePassthrough() -> Bool {
+        guard let e = imeEvent, !imeEventSent, !hasMarkedText() else { return false }
+        imeEventSent = true
+        sendKey(e, down: true)
+        return true
     }
 
     override func flagsChanged(with event: NSEvent) {
@@ -744,7 +770,10 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
 
     func insertText(_ string: Any, replacementRange: NSRange) {
         let s = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
+        let wasComposing = hasMarkedText()
         marked = NSAttributedString()
+        // 没在组字、插入的是功能键字符（U+F700–U+F8FF，如 F5、Home）：按物理键发，不当文字
+        if !wasComposing, !s.isEmpty, s.unicodeScalars.allSatisfy({ (0xF700...0xF8FF).contains($0.value) }), imePassthrough() { return }
         if !s.isEmpty { model?.send(.text(text: s)) }
     }
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
@@ -763,7 +792,9 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
         return w.convertToScreen(NSRect(x: p.x, y: p.y - 20, width: 1, height: 20))
     }
     func characterIndex(for point: NSPoint) -> Int { NSNotFound }
-    override func doCommand(by selector: Selector) {}
+    override func doCommand(by selector: Selector) {
+        _ = imePassthrough()
+    }
 }
 
 struct RemoteVideoHost: NSViewRepresentable {
