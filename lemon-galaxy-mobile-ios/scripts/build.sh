@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 不签名地编出 LemonGalaxy iOS 的模拟器版与真机版（CI 用）。
 #   scripts/build.sh [--debug] [--sim-only|--device-only] [--no-core] [--test]
-# 产物：build/Products/<配置>-iphonesimulator/LemonGalaxy.app、build/Products/<配置>-iphoneos/LemonGalaxy.app
-#       以及 build/LemonGalaxy-<配置>-iphoneos-unsigned.ipa（未签名，装机前需要重新签名）。
+# 产物：build.noindex/Products/<配置>-iphonesimulator/LemonGalaxy.app、build.noindex/Products/<配置>-iphoneos/LemonGalaxy.app
+#       以及 build.noindex/LemonGalaxy-<配置>-iphoneos-unsigned.ipa（未签名，装机前需要重新签名）。
 # 有 Vendor/LemonGalaxyCore.xcframework 与 Sources/Generated/galaxy_ffi.swift 时接入真内核（仓库根 scripts/build-ffi-apple.sh --ios 生成），
 # 没有或加 --no-core 时只编模拟内核（类型来自 Sources/CoreMirror/BridgeMirror.swift）。
 # --test 先在 macOS 上跑 GalaxyKit 的单元测试（swift test）。
