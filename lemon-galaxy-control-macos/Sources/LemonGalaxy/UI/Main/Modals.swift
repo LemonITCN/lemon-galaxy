@@ -61,7 +61,8 @@ struct ConnectChooser: View {
 
     var body: some View {
         let d = app.device(deviceId)
-        let gui = d.map { $0.platform == .windows || $0.platform == .macos } ?? false
+        // Linux 被控端也能远程桌面（2026-11-24 起）；没有桌面的 Linux 服务器连上后由被控端说明原因
+        let gui = d.map { $0.platform == .windows || $0.platform == .macos || $0.platform == .linux } ?? false
         VStack(alignment: .leading, spacing: 16) {
             ModalHeader(title: app.deviceName(deviceId),
                         subtitle: d.map { "\($0.hostname) · \($0.osVersion)" },

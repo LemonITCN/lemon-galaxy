@@ -228,7 +228,7 @@ internal static class HostTree
                 if (n.Device is { } d && !d.IsSelf && d.Kind != DeviceKind.Mobile && n.DeviceId is { } id)
                 {
                     if (app.CanWake(id)) list.Add(new(L.T("wake.action"), () => app.WakeDevice(id), !app.IsWaking(id)));
-                    if (d.Platform is Platform.Windows or Platform.Macos) list.Add(new(L.T("connect.desktop"), () => app.OpenRemoteDesktop(id)));
+                    if (d.Platform is Platform.Windows or Platform.Macos or Platform.Linux) list.Add(new(L.T("connect.desktop"), () => app.OpenRemoteDesktop(id)));
                     list.Add(new(L.T("connect.terminal"), () => app.OpenTerminalAsking(id)));
                     list.Add(new(L.T("connect.files"), () => app.OpenSftp(id)));
                     list.Add(new(L.T("connect.ai"), () => app.OpenAi(new AgentTarget(AgentTargetKind.Device, id)), app.AiEnabled));

@@ -20,7 +20,8 @@ internal static class Modals
     public static FrameworkElement ConnectChooser(AppModel app, string deviceId)
     {
         var d = app.Device(deviceId);
-        var gui = d != null && d.Platform is Platform.Windows or Platform.Macos;
+        // Linux 被控端也能远程桌面（2026-11-24 起）；没有桌面的 Linux 服务器连上后由被控端说明原因
+        var gui = d != null && d.Platform is Platform.Windows or Platform.Macos or Platform.Linux;
         FrameworkElement Choice(string icon, string title, bool enabled, Action a)
         {
             var b = new Btn

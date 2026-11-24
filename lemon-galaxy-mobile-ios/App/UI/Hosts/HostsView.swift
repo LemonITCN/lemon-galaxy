@@ -312,7 +312,7 @@ struct ConnectButtons: View {
     }
 
     @ViewBuilder private func deviceButtons(_ d: DeviceInfo) -> some View {
-        if d.platform == .windows || d.platform == .macos {
+        if d.platform == .windows || d.platform == .macos || d.platform == .linux {
             Button { app.openRemoteDesktop(d.id) } label: { Label(loc("action.remoteDesktop"), systemImage: "display") }
         }
         Button { app.openTerminal(.device(d.id)) } label: { Label(loc("action.terminal"), systemImage: "terminal") }

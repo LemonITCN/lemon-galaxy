@@ -76,8 +76,8 @@ fun wakeSentMessage(res: Resources, relays: List<String>): String {
     return res.getString(R.string.wake_sent_via, names.joinToString(res.getString(R.string.list_separator)))
 }
 
-/** 设备有没有图形界面（能远程桌面）。 */
-fun HostItem.Device.hasDisplay() = device.platform == Platform.MACOS || device.platform == Platform.WINDOWS
+/** 设备有没有图形界面（能远程桌面）。Linux 被控端 2026-11-24 起也能；没有桌面的 Linux 服务器连上后由被控端说明原因。 */
+fun HostItem.Device.hasDisplay() = device.platform == Platform.MACOS || device.platform == Platform.WINDOWS || device.platform == Platform.LINUX
 fun HostItem.Device.reachable() = device.online || device.lanSeen
 
 /**

@@ -249,7 +249,7 @@ struct DeviceDetail: View {
 
     var body: some View {
         let id = device.id
-        let gui = device.platform == .windows || device.platform == .macos
+        let gui = device.platform == .windows || device.platform == .macos || device.platform == .linux
         let connectable = !device.isSelf && device.kind != .mobile && (device.online || device.lanSeen)
         let meta = app.meta(for: id)
         var tags: [String] = []

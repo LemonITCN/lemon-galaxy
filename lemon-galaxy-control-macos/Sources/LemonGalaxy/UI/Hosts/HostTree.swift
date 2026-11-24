@@ -437,7 +437,7 @@ struct HostContextMenu: View {
                 Divider()
             }
             if let d = node.device, !d.isSelf, d.kind != .mobile, let id = node.deviceId {
-                if d.platform == .windows || d.platform == .macos {
+                if d.platform == .windows || d.platform == .macos || d.platform == .linux {
                     Button(loc("connect.desktop")) { app.openRemoteDesktop(deviceId: id) }
                 }
                 Button(loc("connect.terminal")) { app.openTerminalAsking(deviceId: id) }

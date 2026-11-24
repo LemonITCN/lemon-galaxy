@@ -385,7 +385,7 @@ internal static class HostsViews
     private static FrameworkElement DeviceDetail(AppModel app, DeviceInfo d)
     {
         var id = d.Id;
-        var gui = d.Platform is Platform.Windows or Platform.Macos;
+        var gui = d.Platform is Platform.Windows or Platform.Macos or Platform.Linux;
         var connectable = !d.IsSelf && d.Kind != DeviceKind.Mobile && (d.Online || d.LanSeen);
         var meta = app.MetaFor(id)?.Data as VaultData.DeviceMeta;
         var icon = new Grid { Width = 54, Height = 54 };

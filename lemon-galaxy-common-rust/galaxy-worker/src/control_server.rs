@@ -360,7 +360,10 @@ impl Control {
                         PolkitResult::Denied { dismissed: true, .. } => Err(Response::err(ErrorCode::AuthFailed, c.tr("已取消授权。", "Authorization was cancelled."))),
                         PolkitResult::Denied { challenge: true, .. } => Err(Response::err(
                             ErrorCode::AuthFailed,
-                            c.tr("需要管理员授权，但没有通过。如果没有弹出密码框，说明桌面没有运行 polkit 授权代理。", "Administrator authorization failed. If no password dialog appeared, no polkit agent is running in your session."),
+                            c.tr(
+                                "需要管理员授权，但没有通过。如果没有弹出密码框：界面要从应用菜单打开（从终端、SSH 启动的不在桌面会话里，弹不出密码框），或者桌面没有运行 polkit 授权代理。",
+                                "Administrator authorization failed. If no password dialog appeared, open LemonGalaxy from the application menu (when started from a terminal or SSH it is outside the desktop session), or no polkit agent is running.",
+                            ),
                         )),
                         PolkitResult::Denied { .. } => Err(Response::err(ErrorCode::AuthFailed, c.tr("没有通过管理员授权。", "Not authorized."))),
                         PolkitResult::Unavailable(e) => {
