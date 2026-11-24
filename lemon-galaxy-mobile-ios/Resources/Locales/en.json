@@ -365,6 +365,7 @@
     "remote.privacyOff": "Privacy screen off",
     "remote.privacyOn": "Privacy screen on",
     "remote.quality": "Quality",
+    "remote.reconnecting": "Connection lost, reconnecting…",
     "remote.record": "Record",
     "remote.recordAutoSaved": "Recording stopped and saved to LemonGalaxy › Recordings in the Files app",
     "remote.recordEmpty": "Nothing was recorded yet, so no file was saved",

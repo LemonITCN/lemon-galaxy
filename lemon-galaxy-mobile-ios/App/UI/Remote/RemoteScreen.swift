@@ -107,10 +107,26 @@ struct RemoteScreen: View {
                 ProgressView().tint(.white)
                 Text(loc("remote.connecting")).font(.subheadline).foregroundStyle(.white.opacity(0.8))
             }
+        case .reconnecting:
+            // 最后一帧留着、压暗；不拦触摸（输入在会话里丢弃，右侧菜单照常可用）
+            ZStack {
+                dimmer
+                VStack(spacing: 12) {
+                    ProgressView().tint(.white)
+                    Text(loc("remote.reconnecting")).font(.subheadline).foregroundStyle(.white.opacity(0.9))
+                }
+            }
+            .allowsHitTesting(false)
         case .failed(let m):
-            failedView(m)
+            // 同样压暗，白字不会压在桌面画面上看不清（与安卓一致）
+            ZStack {
+                dimmer.allowsHitTesting(false)
+                failedView(m)
+            }
         }
     }
+
+    private var dimmer: some View { Color.black.opacity(0.55).ignoresSafeArea() }
 
     private func failedView(_ m: String) -> some View {
         VStack(spacing: 14) {
@@ -150,6 +166,8 @@ struct RemoteScreen: View {
     }
 
     private func pickDisplay(_ id: UInt32) {
+        // 重连中不切屏（重连按原来那块屏）
+        guard session.status != .reconnecting else { return }
         if let d = session.displays.first(where: { $0.id == id }) { showDisplay(d) }
         session.switchDisplay(id)
     }

@@ -365,6 +365,7 @@
     "remote.privacyOff": "已关闭隐私屏",
     "remote.privacyOn": "已开启隐私屏",
     "remote.quality": "画质",
+    "remote.reconnecting": "连接中断，正在重新连接…",
     "remote.record": "录像",
     "remote.recordAutoSaved": "录像已停止，保存在「文件」App 的 LemonGalaxy › Recordings",
     "remote.recordEmpty": "还没录到画面，没有生成文件",

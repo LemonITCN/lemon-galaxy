@@ -6,11 +6,21 @@ import Combine
 import GalaxyKit
 
 /// 远程桌面会话：list_displays → open_display(VideoSink) → VideoToolbox 硬件解码 → 显示；手势与键盘 → InputEvent。
+/// 断了自动重连（四端一致，与安卓对齐）：出过画面后会话断开、画面被被控端结束 / 出错 / 没有响应时按 ReconnectSchedule 重试；
+/// 第一次就没打开（从没出过画面）的直接显示失败；后台不重连，回前台从 1 秒那次重新开始；
+/// 自己停的画面（换屏幕、改帧率、离开）内核不通知，不会触发。
 @MainActor
 final class RemoteSession: ObservableObject, Identifiable {
     enum Status: Equatable {
         case connecting, streaming
+        /// 断了正在自动重连：保留最后一帧（压暗），输入丢弃
+        case reconnecting
         case failed(String)
+    }
+
+    /// 一次打开画面的结果。superseded：等待期间又开了别的画面、开始了重连或离开了界面，这次结果不要了
+    private enum OpenResult {
+        case opened, failed(String), superseded
     }
 
     let id = UUID().uuidString
@@ -78,6 +88,25 @@ final class RemoteSession: ObservableObject, Identifiable {
     private var recordingGeneration = 0
     private var stopped = false
 
+    // 自动重连
+    /// 等着的下一次尝试，或新画面等第一帧的超时；结束一轮（成功、放弃、手动重试、离开）时取消
+    private var reconnectTask: Task<Void, Never>?
+    /// 每结束一轮加一：取消后迟到的定时与结果作废
+    private var reconnectGeneration = 0
+    /// 本轮已经试了几次（新画面出了第一帧才算成功、清零）
+    private var reconnectAttempts = 0
+    /// 正在试（连会话、取屏幕、开画面）：回前台不再另起一次，免得同时建两个会话
+    private var reconnectInFlight = false
+    /// 本轮新画面已经打开，在等第一帧
+    private var reconnectAwaitingFrame = false
+    /// 放弃时显示的原因：最近一次失败的原因，没有就是断开的原因
+    private var reconnectReason = ""
+    /// 现在的「连不上」是重连放弃了：重试按钮重新开始一轮；之后迟到的会话断开不再自动开始
+    private var reconnectGaveUp = false
+    /// 出过画面（第一帧）：从没出过画面就断的直接显示失败，不自动重连
+    private var everStreamed = false
+    private var foregroundWatch: AnyCancellable?
+
     init(app: AppModel, deviceId: String, title: String, platform: Platform) {
         self.app = app
         self.deviceId = deviceId
@@ -105,12 +134,33 @@ final class RemoteSession: ObservableObject, Identifiable {
                 guard let self else { return }
                 RemoteCanvasView.enqueue(pb, on: display)
                 self.frames += 1
-                if self.status != .streaming { self.status = .streaming }
+                self.gotFrame()
             }
         }
         decoder.onNeedKeyframe = { [weak self] in
             DispatchQueue.main.async { self?.channel?.requestKeyframe() }
         }
+        // 回前台（比 scenePhase 的 active 早到，两边都调 setForeground，只生效一次）
+        foregroundWatch = NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.setForeground(true) }
+    }
+
+    /// 解出一帧：连接中或重连中的新画面出图了就回到正常（重连成功不提示）
+    private func gotFrame() {
+        switch status {
+        case .streaming:
+            return
+        case .reconnecting:
+            // 断开时丢掉的旧画面迟到的帧不算：本次尝试开始打开新画面（sinkAdapter 非空）之后的才算
+            guard sinkAdapter != nil else { return }
+            endReconnect()
+        case .connecting, .failed:
+            break
+        }
+        reconnectGaveUp = false
+        everStreamed = true
+        status = .streaming
     }
 
     var display: DisplayInfo? { displays.first { $0.id == displayId } }
@@ -214,43 +264,210 @@ final class RemoteSession: ObservableObject, Identifiable {
             }
         }
         stopAudio()
+        endReconnect()
+        reconnectGaveUp = false
+        status = .connecting
         Task { [weak self] in
-            guard let self, let app = self.app else { return }
-            do {
-                let p = try await app.account.peer(deviceId)
-                // 换了会话（重连）：上一个会话加的虚拟屏已由被控端删掉
-                if p !== peer { myVirtual.reset() }
-                peer = p
-                virtualMax = Int(p.session.virtualDisplayMax())
-                closeWatch = p.$closedReason.compactMap { $0 }.receive(on: DispatchQueue.main).sink { [weak self] reason in
-                    self?.status = .failed(reason.isEmpty ? L("remote.closed") : reason)
-                    // 会话断了，声音通道也随之失效；录像收尾（内核还留着已写的部分）
-                    self?.stopRecording(.dropped)
-                    self?.stopAudio()
-                    // 被控端随会话删掉本会话加的虚拟屏
-                    self?.resetVirtual()
-                }
-                displays = try await p.session.listDisplays()
-                guard let first = displays.first(where: \.primary) ?? displays.first else {
-                    status = .failed(L("remote.noDisplay"))
-                    return
-                }
-                await open(first.id)
-            } catch {
-                status = .failed(describeError(error))
+            guard let self else { return }
+            // 等待期间开始了重连：交给重连，不标失败
+            if case .failed(let m) = await self.connect(prefer: nil), self.status != .reconnecting {
+                self.status = .failed(m)
             }
         }
     }
 
+    /// 经连接池拿会话（旧会话断了会建新会话）、取屏幕列表，打开 prefer 那块（没有了就主屏，再没有就第一块）
+    private func connect(prefer: UInt32?) async -> OpenResult {
+        guard let app else { return .superseded }
+        do {
+            let p = try await app.account.peer(deviceId)
+            guard !stopped else {
+                // 等待期间界面关了（关时已释放过）：刚建的会话没人用就断开，免得留在连接池里
+                app.releaseIfUnused(.device(deviceId))
+                return .superseded
+            }
+            adopt(p)
+            let list = try await p.session.listDisplays()
+            guard !stopped, p === peer else { return .superseded }
+            applyDisplays(list)
+            guard let target = list.first(where: { $0.id == prefer }) ?? list.first(where: \.primary) ?? list.first else {
+                return .failed(L("remote.noDisplay"))
+            }
+            return await openChannel(target.id)
+        } catch {
+            return .failed(describeError(error))
+        }
+    }
+
+    /// 换上（或重新绑定）会话。换了会话：上一个会话加的虚拟屏已由被控端删掉
+    private func adopt(_ p: PeerConnection) {
+        if p !== peer { myVirtual.reset() }
+        peer = p
+        virtualMax = Int(p.session.virtualDisplayMax())
+        closeWatch = p.$closedReason.compactMap { $0 }.receive(on: DispatchQueue.main).sink { [weak self, weak p] reason in
+            // 只算当前会话：重连换了新会话后，旧会话迟到的断开不管
+            guard let self, let p, p === self.peer else { return }
+            self.sessionLost(reason)
+        }
+    }
+
+    /// 会话断了：声音通道随之失效，录像收尾（内核还留着已写的部分），被控端随会话删掉本会话加的虚拟屏；然后重连
+    private func sessionLost(_ reason: String, restart: Bool = false) {
+        stopRecording(.dropped)
+        stopAudio()
+        resetVirtual()
+        connectionLost(reason.isEmpty ? L("remote.closed") : reason, restart: restart)
+    }
+
+    // MARK: 自动重连
+
+    /// 断了（会话断开、画面被结束或没有响应）：进入重连，最后一帧留着（压暗）。
+    /// 从没出过画面的直接显示失败。已经在重连时只记原因；本轮新画面还没出第一帧就又断了（含内核看门狗判定没有响应），
+    /// 算这次失败、接着用剩下的次数（不从头算，免得无限循环）。
+    /// 重连放弃后迟到的断开不再自动开始；restart（重试按钮、回前台）照样开始。immediate：第一次不等（只有重试按钮）
+    private func connectionLost(_ reason: String, restart: Bool = false, immediate: Bool = false) {
+        guard !stopped, !reconnectGaveUp || restart else { return }
+        guard everStreamed else {
+            dropChannel()
+            endReconnect()
+            status = .failed(reason)
+            return
+        }
+        reconnectReason = reason
+        if status == .reconnecting {
+            if reconnectAwaitingFrame {
+                reconnectAwaitingFrame = false
+                dropChannel()
+                scheduleReconnect()
+            }
+            return
+        }
+        dropChannel()
+        endReconnect()
+        reconnectGaveUp = false
+        status = .reconnecting
+        scheduleReconnect(immediate: immediate)
+    }
+
+    /// 丢掉当前画面通道：之后这一路迟到的回调都不算（sinkAdapter 不再是它），输入也不再发
+    private func dropChannel() {
+        channel?.stop()
+        channel = nil
+        sinkAdapter = nil
+    }
+
+    /// 排下一次尝试；次数用完就放弃。在后台不排（系统会挂起 App），回前台从 1 秒那次重新开始
+    private func scheduleReconnect(immediate: Bool = false) {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        guard foreground else { return }
+        guard let wait = ReconnectSchedule.delay(before: reconnectAttempts) else {
+            giveUpReconnect()
+            return
+        }
+        let gen = reconnectGeneration
+        let ns = immediate ? 0 : UInt64(wait * 1_000_000_000)
+        reconnectTask = Task { [weak self] in
+            if ns > 0 { try? await Task.sleep(nanoseconds: ns) }
+            guard !Task.isCancelled, let self, gen == self.reconnectGeneration else { return }
+            await self.reconnectAttempt(gen)
+        }
+    }
+
+    private func reconnectAttempt(_ gen: Int) async {
+        guard foreground, !stopped, status == .reconnecting, !reconnectInFlight else { return }
+        reconnectInFlight = true
+        reconnectAttempts += 1
+        let result = await reconnectOnce()
+        reconnectInFlight = false
+        guard gen == reconnectGeneration, !stopped, status == .reconnecting else { return }
+        switch result {
+        case .opened:
+            // 新画面开了，等第一帧（gotFrame 里结束重连）；一直不来、也没有结束通知，算这次失败
+            reconnectAwaitingFrame = true
+            reconnectTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(ReconnectSchedule.firstFrameTimeout * 1_000_000_000))
+                guard !Task.isCancelled, let self, gen == self.reconnectGeneration, self.reconnectAwaitingFrame else { return }
+                self.reconnectAwaitingFrame = false
+                self.reconnectReason = L("remote.failed")
+                self.dropChannel()
+                self.scheduleReconnect()
+            }
+        case .failed(let m):
+            reconnectReason = m
+            scheduleReconnect()
+        case .superseded:
+            // 同一轮里不该出现（别的打开都会结束这一轮）；万一出现也接着排，免得停在重连中
+            scheduleReconnect()
+        }
+    }
+
+    /// 一次重连：会话还在就先在同一块屏上重开画面；不行（或会话断了）再经连接池重连会话，
+    /// 打开同一块屏（没有了就主屏）。声音、录像、虚拟屏照原来的规则处理
+    private func reconnectOnce() async -> OpenResult {
+        if let peer, peer.isAlive, let id = displayId {
+            switch await openChannel(id) {
+            case .opened: return .opened
+            case .superseded: return .superseded
+            case .failed: break
+            }
+        }
+        return await connect(prefer: displayId)
+    }
+
+    /// 试满还不行：回到「连不上」（原因 + 重试，重试重新开始一轮）
+    private func giveUpReconnect() {
+        endReconnect()
+        dropChannel()
+        reconnectGaveUp = true
+        status = .failed(reconnectReason.isEmpty ? L("remote.closed") : reconnectReason)
+    }
+
+    /// 结束这一轮（成功、放弃、手动重试、离开）：取消等着的尝试，迟到的定时与结果作废
+    private func endReconnect() {
+        reconnectGeneration += 1
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempts = 0
+        reconnectAwaitingFrame = false
+    }
+
+    /// 回前台：重连中（后台里断的或在后台停着）次数归零、从 1 秒那次重新开始；
+    /// 会话已断（还没收到通知，或重连已放弃）开始一轮重连（从没出过画面的照样只显示失败）
+    private func reconnectOnForeground() {
+        guard !stopped else { return }
+        if status == .reconnecting {
+            reconnectAttempts = 0
+            // 正在试的那次跑完会自己排下一次；新画面已开在等第一帧就接着等
+            guard !reconnectInFlight, !reconnectAwaitingFrame else { return }
+            scheduleReconnect()
+        } else if status != .connecting, let peer, !peer.isAlive {
+            sessionLost(peer.closedReason ?? "", restart: true)
+        }
+    }
+
+    /// 切后台：不重连，等着的那次取消（正在试的让它跑完、新画面在等第一帧的照样等；回前台从 1 秒那次重新开始）
+    private func pauseReconnect() {
+        guard status == .reconnecting, !reconnectInFlight, !reconnectAwaitingFrame else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+    }
+
+    /// 用户发起的打开画面（换屏幕、改画质、删虚拟屏后切走、重试）。重连中不开：重连会用最新的画质，屏幕按原来的
     private func open(_ id: UInt32) async {
-        guard let peer else { return }
+        guard status != .reconnecting else { return }
+        if case .failed(let m) = await openChannel(id) { status = .failed(m) }
+    }
+
+    private func openChannel(_ id: UInt32) async -> OpenResult {
+        guard let peer else { return .superseded }
         // 关画面时内核会自动结束录像但不返回结果：先自己停，拿到文件
         stopRecording(.reopen)
         channel?.stop()
         channel = nil
         let switched = id != displayId
         displayId = id
-        status = .connecting
+        if status != .reconnecting { status = .connecting }
         if let d = display { canvas.setRemoteSize(Int(d.width), Int(d.height)) }
         // 换了屏幕：光标先放屏幕中心
         if switched { canvas.resetPointer() }
@@ -284,22 +501,31 @@ final class RemoteSession: ObservableObject, Identifiable {
         adapter.onClose = { [weak self, weak adapter] reason in
             DispatchQueue.main.async {
                 guard let self else { return }
-                // 只算当前画面的关闭：换屏幕后旧通道迟到的关闭（"stopped"）不把新画面标成失败，也不收新画面的录像
+                // 画面被被控端结束、出错或没有响应（自己停的内核不通知）。只算当前画面：
+                // 换屏幕、改帧率、重连换下的旧通道迟到的回调不把新画面标成断开，也不收新画面的录像
                 guard let adapter, self.sinkAdapter === adapter else { return }
-                self.status = .failed(reason.isEmpty ? L("remote.closed") : reason)
                 self.stopRecording(.dropped)
+                self.connectionLost(reason.isEmpty ? L("remote.closed") : reason)
             }
         }
         sinkAdapter = adapter
         do {
-            channel = try await peer.session.openDisplay(options: DisplayOptions(displayId: id, maxFps: quality.maxFps, bitrateKbps: quality.bitrateKbps,
-                                                                                 codecs: VideoDecoder.supportedCodecs, viewOnly: viewOnly),
-                                                         sink: adapter)
+            let ch = try await peer.session.openDisplay(options: DisplayOptions(displayId: id, maxFps: quality.maxFps, bitrateKbps: quality.bitrateKbps,
+                                                                                codecs: VideoDecoder.supportedCodecs, viewOnly: viewOnly),
+                                                        sink: adapter)
+            // 等待期间又开了别的画面、开始了重连或离开了界面：这一路不要了
+            guard sinkAdapter === adapter, !stopped else {
+                ch.stop()
+                return .superseded
+            }
+            channel = ch
             canvas.viewOnly = viewOnly
             applyClientCursor()
             startAudioIfWanted()
+            return .opened
         } catch {
-            status = .failed(describeError(error))
+            guard sinkAdapter === adapter, !stopped else { return .superseded }
+            return .failed(describeError(error))
         }
     }
 
@@ -375,7 +601,7 @@ final class RemoteSession: ObservableObject, Identifiable {
     }
 
     func switchDisplay(_ id: UInt32) {
-        guard id != displayId else { return }
+        guard id != displayId, status != .reconnecting else { return }
         Task { await open(id) }
     }
 
@@ -390,12 +616,19 @@ final class RemoteSession: ObservableObject, Identifiable {
         }
     }
 
+    /// 「连不上」里的重试：取消等着的重连；重连放弃后重新开始一轮（立即试第一次），其余照旧重开画面或重连会话
     func retry() {
+        endReconnect()
+        if reconnectGaveUp {
+            connectionLost(reconnectReason, restart: true, immediate: true)
+            return
+        }
         if let id = displayId, peer?.isAlive == true { Task { await open(id) } } else { start() }
     }
 
     func send(_ events: [InputEvent]) {
-        guard let channel, !viewOnly else { return }
+        // 重连中的输入丢弃（新画面出图前也不发）
+        guard let channel, !viewOnly, status != .reconnecting else { return }
         for e in events { channel.sendInput(event: e) }
     }
 
@@ -511,7 +744,9 @@ final class RemoteSession: ObservableObject, Identifiable {
     }
 
     /// 切后台：系统会让解码会话失效，回来后重建并请求关键帧；
-    /// 声音在后台放不了（没有后台音频模式），先停掉，回来后按开关重新开始
+    /// 声音在后台放不了（没有后台音频模式），先停掉，回来后按开关重新开始。
+    /// 系统在后台会挂起 App，会话往往就断了：后台不重连，回来时会话已断或正在重连，从 1 秒那次重新开始。
+    /// 两个来源：willEnterForeground 通知与 scenePhase（AppModel），只生效一次
     func setForeground(_ fg: Bool) {
         guard fg != foreground else { return }
         foreground = fg
@@ -519,9 +754,11 @@ final class RemoteSession: ObservableObject, Identifiable {
             canvas.displayLayer.flush()
             channel?.requestKeyframe()
             if channel != nil { startAudioIfWanted() }
+            reconnectOnForeground()
         } else {
             stopRecording(.background)
             stopAudio()
+            pauseReconnect()
         }
     }
 
@@ -530,6 +767,10 @@ final class RemoteSession: ObservableObject, Identifiable {
         mouseKeys.cancel()
         stopRecording(.closed)
         stopped = true
+        // 离开：取消等着的重连
+        endReconnect()
+        closeWatch = nil
+        foregroundWatch = nil
         stopAudio()
         // 同一会话可能还被终端、文件用着：删掉本会话界面加的虚拟屏（会话随后断开的话被控端也会删）
         if myVirtual.count > 0, let peer, peer.closedReason == nil {
