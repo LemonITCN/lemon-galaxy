@@ -11,11 +11,13 @@ using LemonGalaxy.Core;
 
 namespace LemonGalaxy.UI;
 
-internal enum RemotePhase { Connecting, Streaming, Failed }
+/// <summary>Reconnecting：看过画面后会话断开或画面意外结束，自动重连中（最后一帧压暗留着）</summary>
+internal enum RemotePhase { Connecting, Streaming, Reconnecting, Failed }
 
 /// <summary>
 /// 远程桌面标签：list_displays → open_display(VideoSink) → 解码线程 H.264 软解 → 界面线程写 WriteableBitmap；
 /// 鼠标键盘转 InputEvent（键盘为 USB HID 用法码，坐标为被控屏幕像素）。界面忙时只显示最新一帧，解码跟不上时丢帧并请求关键帧。
+/// 看过画面后会话断开或画面不是自己停的却结束了：按 1、2、4、8、15 秒…的间隔自动重连，约 2 分钟仍不行才显示失败。
 /// </summary>
 internal sealed partial class RemoteTab : TabModel
 {
@@ -52,12 +54,17 @@ internal sealed partial class RemoteTab : TabModel
     private ICoreDisplay? channel;
     private SinkAdapter? sink;
     private readonly IFrameDecoder decoder;
-    private readonly BlockingCollection<byte[]> queue = new(new ConcurrentQueue<byte[]>());
+    /// <summary>待解码的帧，带来源画面通道的代号：换了通道后旧通道的帧解出来也不显示</summary>
+    private readonly BlockingCollection<(int Gen, byte[] Data)> queue = new(new ConcurrentQueue<(int, byte[])>());
     private readonly Thread decodeThread;
     private volatile bool closed;
     private volatile bool waitKeyframe;
-    private DecodedFrame? latest;
+    private (int Gen, DecodedFrame Frame)? latest;
     private readonly object frameLock = new();
+    /// <summary>每打开或丢掉一路画面加一（界面线程）；新通道的 SinkAdapter 记下它</summary>
+    private int streamGen;
+    /// <summary>本次开始（Start）后看到过画面：之后断了才自动重连，首次连接失败照旧显示失败</summary>
+    private bool hadPicture;
     private int frameCount, byteCount;
     private DispatcherTimer? stats, clipTimer;
     private string? lastClipboard;
@@ -79,6 +86,8 @@ internal sealed partial class RemoteTab : TabModel
     public string[]? LocalClipboardFiles { get; private set; }
     /// <summary>selftest 核对用</summary>
     public ICoreClipboardTransfer? ClipTransfer => clipTransfer;
+    /// <summary>当前画面通道（selftest 模拟画面断了用）</summary>
+    public ICoreDisplay? Channel => channel;
     private readonly HashSet<uint> pressed = new();
     private bool imeComposing;
     private ICoreAudio? audio;
@@ -113,6 +122,9 @@ internal sealed partial class RemoteTab : TabModel
 
     public void Start()
     {
+        // 首次打开或手动重试：放弃正在等的自动重连，从头来
+        CancelReconnect();
+        hadPicture = false;
         Phase = RemotePhase.Connecting;
         StopAudio();
         Notify();
@@ -121,19 +133,7 @@ internal sealed partial class RemoteTab : TabModel
             try
             {
                 var p = await App.Peer(DeviceId!);
-                // 新的会话：被控端随旧会话已删掉我加的虚拟屏
-                if (!ReferenceEquals(Peer, p)) ResetVirtual();
-                Peer = p;
-                VirtualMax = QueryVirtualMax(p);
-                // 会话断了：声音通道随之失效，停掉本机播放；正在录像的结束并提示保存位置；我加的虚拟屏被控端已自动删掉
-                p.Watch(this, () =>
-                {
-                    if (p.ClosedReason == null || !ReferenceEquals(Peer, p)) return;
-                    StopAudio();
-                    StopRecording();
-                    ResetVirtual();
-                    Notify();
-                });
+                UsePeer(p);
                 Displays = await p.Session.ListDisplays();
                 PruneVirtual();
                 var first = Displays.FirstOrDefault(d => d.Primary) ?? Displays.FirstOrDefault();
@@ -163,8 +163,34 @@ internal sealed partial class RemoteTab : TabModel
         }
     }
 
+    /// <summary>用这条会话。换了新会话：被控端随旧会话已删掉我加的虚拟屏、关掉隐私屏；盯着它断开</summary>
+    private void UsePeer(PeerConnection p)
+    {
+        if (!ReferenceEquals(Peer, p))
+        {
+            ResetVirtual();
+            Privacy = false;
+            Peer = p;
+            p.Watch(this, () => PeerChanged(p));
+        }
+        VirtualMax = QueryVirtualMax(p);
+    }
+
+    /// <summary>会话断了：声音通道随之失效，停掉本机播放；正在录像的结束并提示保存位置；我加的虚拟屏、隐私屏被控端已自动撤掉。看着画面的转入自动重连</summary>
+    private void PeerChanged(PeerConnection p)
+    {
+        if (p.ClosedReason == null || !ReferenceEquals(Peer, p)) return;
+        StopAudio();
+        StopRecording();
+        ResetVirtual();
+        Privacy = false;
+        ConnectionLost(p.ClosedReason.Length == 0 ? L.T("path.closed") : p.ClosedReason);
+        Notify();
+    }
+
     private void Fail(string reason)
     {
+        CancelReconnect();
         StopRecording();
         Phase = RemotePhase.Failed;
         FailReason = reason;
@@ -173,35 +199,235 @@ internal sealed partial class RemoteTab : TabModel
         Notify();
     }
 
+    /// <summary>切屏、改帧率、加删虚拟屏时（重新）打开画面；失败显示失败状态。正在自动重连时只记下要看的屏，由重连去打开</summary>
     public async Task Open(uint id)
     {
-        if (Peer == null) return;
+        var p = Peer;
+        if (p == null || closed) return;
+        if (Phase == RemotePhase.Reconnecting)
+        {
+            DisplayId = id;
+            // 重连已打开的画面还没出第一帧：换成这块屏（或新帧率）马上再试
+            if (!reconnectPending)
+            {
+                DropChannel();
+                reconnectPending = true;
+                var gen = reconnectGen;
+                Ui.Run(() => ReconnectOnce(gen));
+            }
+            Notify();
+            return;
+        }
+        Phase = RemotePhase.Connecting;
+        Notify();
+        try { await OpenChannel(p, id); }
+        catch (Exception e) { Fail(Fmt.Error(e)); }
+    }
+
+    /// <summary>
+    /// 换掉当前画面通道，打开 id 这块屏。打开失败时抛出；等待期间又换了画面、丢掉了画面、换了会话或关了标签时，
+    /// 新开的这一路直接停掉（失败也不报），返回 false。
+    /// </summary>
+    private async Task<bool> OpenChannel(PeerConnection p, uint id)
+    {
         // 换屏幕或改帧率要重开画面：正在录的先结束（关画面时内核也会自动结束）
         StopRecording();
-        try { channel?.Stop(); } catch { }
-        channel = null;
+        DropChannel();
         DisplayId = id;
-        Phase = RemotePhase.Connecting;
         waitKeyframe = false;
-        Notify();
-        var adapter = new SinkAdapter(this);
+        var adapter = new SinkAdapter(this, streamGen);
         sink = adapter;
+        bool Stale() => closed || !ReferenceEquals(sink, adapter) || !ReferenceEquals(Peer, p);
+        ICoreDisplay ch;
         try
         {
             // Windows 主控端只有 H.264 软解
-            var opts = new DisplayOptions(id, (uint)Fps, (uint)BitrateKbps, new[] { VideoCodec.H264 }, !Peer.Info.Permissions.Control);
-            channel = await Peer.Session.OpenDisplay(opts, adapter);
-            Live = true;
-            Notify();
-            // 画面打开后按设置开始播放声音（已在播放时不重复开）
-            if (App.Settings.RemoteAudio) StartAudio();
+            var opts = new DisplayOptions(id, (uint)Fps, (uint)BitrateKbps, new[] { VideoCodec.H264 }, !p.Info.Permissions.Control);
+            ch = await p.Session.OpenDisplay(opts, adapter);
         }
-        catch (Exception e) { Fail(Fmt.Error(e)); }
+        catch when (Stale()) { return false; }
+        if (Stale())
+        {
+            try { ch.Stop(); } catch { }
+            return false;
+        }
+        channel = ch;
+        Live = true;
+        Notify();
+        // 画面打开后按设置开始播放声音（已在播放时不重复开）
+        if (App.Settings.RemoteAudio) StartAudio();
+        return true;
+    }
+
+    /// <summary>停掉当前画面通道；之后它迟到的帧与结束通知都丢弃，积压的帧不再解码</summary>
+    private void DropChannel()
+    {
+        var ch = channel;
+        channel = null;
+        sink = null;
+        streamGen++;
+        while (queue.TryTake(out _)) { }
+        lock (frameLock) latest = null;
+        try { ch?.Stop(); } catch { }
+    }
+
+    // ---------- 断线自动重连 ----------
+
+    /// <summary>重连间隔（毫秒）：1、2、4、8、15 秒，之后每 15 秒，共 10 次（连同每次的连接耗时约 2 分钟）后放弃。selftest 会临时改短</summary>
+    public static int[] ReconnectDelays = { 1000, 2000, 4000, 8000, 15000, 15000, 15000, 15000, 15000, 15000 };
+    /// <summary>重连打开了画面却一直没有第一帧，按这次没连上接着重试（与内核刚打开画面时的看门狗一致）</summary>
+    private const int FirstFrameTimeoutMs = 20000;
+    /// <summary>每次开始、结束或取消一轮重连加一：等待中的定时器与迟到的结果按它丢弃</summary>
+    private int reconnectGen;
+    /// <summary>本轮已经排上的次数</summary>
+    private int reconnectAttempt;
+    /// <summary>正在等下一次或正在试；false 时是已打开画面、在等第一帧</summary>
+    private bool reconnectPending;
+    /// <summary>断开的原因；最后一次尝试的错误（放弃时优先显示它）</summary>
+    private string reconnectReason = "", reconnectError = "";
+
+    /// <summary>
+    /// 会话断开或画面不是自己停的却结束了。看过画面的：最后一帧压暗留着、显示「正在重新连接」并按间隔重试；
+    /// 已在重连的：重连打开的画面没出第一帧就又断了（如内核看门狗 20 秒判定没有响应），用本轮剩下的次数接着重试，不从头算（显示出新画面的第一帧才清零）。
+    /// 本次开始后从没出过画面的：直接显示失败，不自动重连。已失败的不管。
+    /// </summary>
+    private void ConnectionLost(string reason)
+    {
+        if (closed) return;
+        var reconnecting = Phase == RemotePhase.Reconnecting;
+        if (!reconnecting && Phase == RemotePhase.Failed) return;
+        if (!reconnecting && !hadPicture)
+        {
+            // 第一次就没打开（从没出过画面）：直接显示失败，不自动重连
+            Fail(reason);
+            return;
+        }
+        if (IsAssist && !Alive(Peer))
+        {
+            // 临时协助的会话断了不能重新建（要对方重新给验证码）：直接显示失败
+            Fail(reconnecting ? reconnectReason : reason);
+            return;
+        }
+        if (reconnecting)
+        {
+            if (reconnectPending) return;
+            DropChannel();
+            ScheduleReconnect(reconnectGen);
+            return;
+        }
+        Log.Info("连接中断，自动重连：" + reason);
+        StopRecording();
+        DropChannel();
+        CancelReconnect();
+        reconnectReason = reason;
+        Phase = RemotePhase.Reconnecting;
+        Live = false;
+        Notify();
+        ScheduleReconnect(reconnectGen);
+    }
+
+    /// <summary>临时协助（设备码 + 验证码）连上的：会话断了不能经连接池重新建</summary>
+    private bool IsAssist => DeviceId != null && DeviceId.StartsWith("assist:", StringComparison.Ordinal);
+
+    private static bool Alive(PeerConnection? p) => p != null && p.ClosedReason == null && !p.Session.IsClosed();
+
+    /// <summary>不再自动重连（手动开始、失败、关标签、重连成功）</summary>
+    private void CancelReconnect()
+    {
+        reconnectGen++;
+        reconnectAttempt = 0;
+        reconnectPending = false;
+        reconnectError = "";
+    }
+
+    private void ScheduleReconnect(int gen)
+    {
+        if (gen != reconnectGen || closed) return;
+        if (reconnectAttempt >= ReconnectDelays.Length)
+        {
+            Fail(reconnectError.Length > 0 ? reconnectError : reconnectReason);
+            return;
+        }
+        reconnectPending = true;
+        Ui.After(ReconnectDelays[reconnectAttempt++], () =>
+        {
+            if (gen == reconnectGen && !closed) Ui.Run(() => ReconnectOnce(gen));
+        });
+    }
+
+    /// <summary>
+    /// 重连一次：会话还在就先在同一块屏上重开画面；不行（或会话断了）就经连接池重新建会话，回到原来那块屏（没了就主屏）。
+    /// 打开了画面就等第一帧（Present 里结束这一轮），否则排下一次。
+    /// </summary>
+    private async Task ReconnectOnce(int gen)
+    {
+        bool Stale() => gen != reconnectGen || closed;
+        if (Stale()) return;
+        var id = DisplayId;
+        var old = Peer;
+        if (old != null && Alive(old))
+        {
+            try
+            {
+                if (await OpenChannel(old, id)) { ReconnectOpened(gen); return; }
+            }
+            catch (Exception e) { reconnectError = Fmt.Error(e); }
+            if (Stale()) return;
+            Log.Info("重连：重开画面没成功，重新建会话：" + reconnectError);
+        }
+        else if (IsAssist)
+        {
+            // 临时协助的会话断了不能重新建（要对方重新给验证码）
+            Fail(reconnectReason);
+            return;
+        }
+        try
+        {
+            var p = await App.Peer(DeviceId!);
+            if (Stale()) return;
+            UsePeer(p);
+            var list = await p.Session.ListDisplays();
+            if (Stale()) return;
+            Displays = list;
+            PruneVirtual();
+            var target = list.FirstOrDefault(d => d.Id == id) ?? list.FirstOrDefault(d => d.Primary) ?? list.FirstOrDefault()
+                ?? throw new InvalidOperationException(L.T("remote.noDisplay"));
+            if (await OpenChannel(p, target.Id)) { ReconnectOpened(gen); return; }
+        }
+        catch (Exception e)
+        {
+            if (Stale()) return;
+            reconnectError = Fmt.Error(e);
+            Log.Info("重连没成功：" + reconnectError);
+        }
+        if (!Stale()) ScheduleReconnect(gen);
+    }
+
+    /// <summary>重连打开了画面：等第一帧；迟迟没有就按没连上接着重试</summary>
+    private void ReconnectOpened(int gen)
+    {
+        if (gen != reconnectGen || closed || Phase != RemotePhase.Reconnecting) return;
+        reconnectPending = false;
+        var stream = streamGen;
+        Ui.After(FirstFrameTimeoutMs, () =>
+        {
+            if (gen != reconnectGen || closed || reconnectPending || stream != streamGen || Phase != RemotePhase.Reconnecting) return;
+            Log.Info("重连：打开的画面一直没有画面，接着重试");
+            DropChannel();
+            ScheduleReconnect(gen);
+        });
+    }
+
+    /// <summary>画面不是我们停的却结束了（被控端结束、流断了、画面没有响应）。内核在我们自己停画面时回 "stopped"（切屏、改帧率、关标签），不算</summary>
+    private void PictureEnded(string reason)
+    {
+        if (closed || reason == "stopped") return;
+        ConnectionLost(reason.Length == 0 ? L.T("remote.closed") : reason);
     }
 
     // ---------- 收帧与解码 ----------
 
-    private void FrameArrived(byte[] data, bool keyframe)
+    private void FrameArrived(int gen, byte[] data, bool keyframe)
     {
         if (closed) return;
         if (waitKeyframe)
@@ -216,7 +442,7 @@ internal sealed partial class RemoteTab : TabModel
             waitKeyframe = !keyframe;
             if (!keyframe) { try { channel?.RequestKeyframe(); } catch { } return; }
         }
-        try { queue.Add(data); }
+        try { queue.Add((gen, data)); }
         catch (InvalidOperationException) { return; }
         Interlocked.Add(ref byteCount, data.Length);
     }
@@ -225,7 +451,7 @@ internal sealed partial class RemoteTab : TabModel
     {
         try
         {
-            foreach (var data in queue.GetConsumingEnumerable())
+            foreach (var (gen, data) in queue.GetConsumingEnumerable())
             {
                 if (closed) break;
                 DecodedFrame? f;
@@ -238,7 +464,7 @@ internal sealed partial class RemoteTab : TabModel
                     continue;
                 }
                 if (f == null) continue;
-                lock (frameLock) latest = f;
+                lock (frameLock) latest = (gen, f);
                 Ui.Coalesce(this, Present, DispatcherPriority.Render);
             }
         }
@@ -247,9 +473,11 @@ internal sealed partial class RemoteTab : TabModel
 
     private void Present()
     {
-        DecodedFrame? f;
-        lock (frameLock) { f = latest; latest = null; }
-        if (f == null || closed) return;
+        (int Gen, DecodedFrame Frame)? next;
+        lock (frameLock) { next = latest; latest = null; }
+        // 已经换掉或丢掉的画面通道解出来的帧不显示（也不能把「正在重新连接」当成连上了）
+        if (next is not { } n || closed || n.Gen != streamGen) return;
+        var f = n.Frame;
         int w = (int)f.Width, h = (int)f.Height;
         if (bitmap == null || bitmap.PixelWidth != w || bitmap.PixelHeight != h)
         {
@@ -262,7 +490,14 @@ internal sealed partial class RemoteTab : TabModel
         bitmap.WritePixels(new Int32Rect(0, 0, w, h), f.Bgra, w * 4, 0);
         frameCount++;
         FramesDecoded++;
-        if (Phase != RemotePhase.Streaming) { Phase = RemotePhase.Streaming; Notify(); }
+        hadPicture = true;
+        if (Phase != RemotePhase.Streaming)
+        {
+            // 重连打开的画面出了第一帧：这一轮重连结束，不另外提示
+            if (Phase == RemotePhase.Reconnecting) CancelReconnect();
+            Phase = RemotePhase.Streaming;
+            Notify();
+        }
     }
 
     private void Configured(VideoCodec codec, uint width, uint height)
@@ -579,7 +814,8 @@ internal sealed partial class RemoteTab : TabModel
     /// <summary>拉取对方剪贴板：文字直接放进本机剪贴板，文件下载后放进去</summary>
     public void PullRemoteClipboard()
     {
-        if (!ClipboardSync || Peer == null) return;
+        // 正在重新连接时不同步（本机剪贴板的变化等连上后照常推过去）
+        if (!ClipboardSync || Peer == null || Phase == RemotePhase.Reconnecting) return;
         var p = Peer;
         Ui.Run(async () =>
         {
@@ -843,6 +1079,8 @@ internal sealed partial class RemoteTab : TabModel
         Region.Detach(VideoHost);
         var grid = new Grid { Background = Brushes.Black };
         grid.Children.Add(VideoHost);
+        // 连接中、正在重新连接、失败的提示全屏时也要看得到
+        grid.Children.Add(new Region(() => RemoteView.PhaseOverlay(this)).On(this));
         var exit = K.TintButton(L.T("remote.exitFullscreen"), ExitFullscreen, Colors.White, "fit", 30);
         exit.Background = Th.B(Colors.Black, 0.55);
         exit.Normal = Th.B(Colors.Black, 0.55);
@@ -878,9 +1116,10 @@ internal sealed partial class RemoteTab : TabModel
 
     public override void Close()
     {
-        // 关标签：先结束录像拿到保存位置，再关画面
+        // 关标签：先结束录像拿到保存位置，再关画面；等着的自动重连作废
         StopRecording();
         closed = true;
+        CancelReconnect();
         StopAudio();
         try { channel?.Stop(); } catch { }
         channel = null;
@@ -910,16 +1149,18 @@ internal sealed partial class RemoteTab : TabModel
 
     protected override FrameworkElement CreateView() => RemoteView.Build(App, this);
 
+    /// <summary>一路画面的回调（内核线程）。换掉或丢掉这一路后（tab.sink 不再是它）迟到的回调全部丢弃</summary>
     private sealed class SinkAdapter : VideoSink
     {
         private readonly WeakReference<RemoteTab> owner;
-        public SinkAdapter(RemoteTab t) { owner = new WeakReference<RemoteTab>(t); }
+        private readonly int gen;
+        public SinkAdapter(RemoteTab t, int gen) { owner = new WeakReference<RemoteTab>(t); this.gen = gen; }
         private RemoteTab? Tab => owner.TryGetTarget(out var t) && ReferenceEquals(t.sink, this) ? t : null;
 
         public void OnConfig(VideoCodec codec, uint width, uint height) => Ui.Post(() => Tab?.Configured(codec, width, height));
-        public void OnFrame(byte[] data, ulong ptsUs, bool keyframe) => Tab?.FrameArrived(data, keyframe);
+        public void OnFrame(byte[] data, ulong ptsUs, bool keyframe) => Tab?.FrameArrived(gen, data, keyframe);
         public void OnCursor(int x, int y, bool visible) { }
-        public void OnClosed(string reason) => Ui.Post(() => Tab?.Fail(reason.Length == 0 ? L.T("remote.closed") : reason));
+        public void OnClosed(string reason) => Ui.Post(() => Tab?.PictureEnded(reason));
     }
 }
 
@@ -945,18 +1186,26 @@ internal static class RemoteView
             return new ScrollViewer { Content = tab.VideoHost, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Focusable = false };
         }).Keyed(() => (tab.FitMode, tab.FullscreenWindow != null)).On(tab);
         area.Children.Add(video);
-        area.Children.Add(new Region(() => tab.Phase switch
-        {
-            RemotePhase.Connecting => K.Center(K.Col(10, K.Center(K.Spinner(22, Brushes.White)), K.Center(K.Text(L.T("remote.connecting"), 13, Th.B(Colors.White, 0.75))))),
-            RemotePhase.Failed => K.Center(K.Col(12, K.Center(K.Icon("display", 32, Th.B(Colors.White, 0.7), 1.4)),
-                K.Center(K.Text(tab.FailReason, 13.5, Th.B(Colors.White, 0.85), wrap: true).Also(t => { t.TextAlignment = TextAlignment.Center; t.MaxWidth = 420; })),
-                K.Center(K.PrimaryButton(L.T("common.retry"), tab.Start)))),
-            _ => null,
-        }).On(tab));
+        // 全屏时画面在全屏窗口里，提示也跟过去
+        area.Children.Add(new Region(() => tab.FullscreenWindow == null ? PhaseOverlay(tab) : null).On(tab));
         area.Children.Add(new Region(() => FileClipView.Pill(tab)).On(tab.ClipChanged));
         dock.Children.Add(area);
         return dock;
     }
+
+    /// <summary>画面上的状态提示：连接中、正在重新连接（最后一帧压暗留着，挡住键鼠）、失败（原因 + 重试）</summary>
+    public static FrameworkElement? PhaseOverlay(RemoteTab tab) => tab.Phase switch
+    {
+        RemotePhase.Connecting => K.Center(K.Col(10, K.Center(K.Spinner(22, Brushes.White)), K.Center(K.Text(L.T("remote.connecting"), 13, Th.B(Colors.White, 0.75))))),
+        RemotePhase.Reconnecting => K.Center(K.Col(10, K.Center(K.Spinner(22, Brushes.White)), K.Center(K.Text(L.T("remote.reconnecting"), 13, Th.B(Colors.White, 0.85)))))
+            .Also(g => ((Grid)g).Background = Th.B(Colors.Black, 0.55)),
+        // 失败：白字压在最后一帧上，同样压暗
+        RemotePhase.Failed => K.Center(K.Col(12, K.Center(K.Icon("display", 32, Th.B(Colors.White, 0.7), 1.4)),
+            K.Center(K.Text(tab.FailReason, 13.5, Th.B(Colors.White, 0.85), wrap: true).Also(t => { t.TextAlignment = TextAlignment.Center; t.MaxWidth = 420; })),
+            K.Center(K.PrimaryButton(L.T("common.retry"), tab.Start))))
+            .Also(g => ((Grid)g).Background = Th.B(Colors.Black, 0.55)),
+        _ => null,
+    };
 
     private static FrameworkElement Divider() => K.Margin(K.VLine(null, 18), 3, 0, 3, 0);
 

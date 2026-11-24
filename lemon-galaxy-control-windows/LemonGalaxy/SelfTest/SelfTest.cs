@@ -281,6 +281,63 @@ internal static class SelfTest
         ClearToast(app);
     }
 
+    /// <summary>
+    /// 断线自动重连：画面被被控端结束 → 最后一帧压暗、显示「正在重新连接」，会话还在就在同一会话、同一块屏上重开画面；
+    /// 会话断开 → 经连接池重新建会话、回到原来那块屏，声音照设置恢复；一直连不上 → 按间隔重试，次数用完显示失败与重试按钮，点重试从头再来。
+    /// </summary>
+    private static void CheckReconnect(AppModel app, RemoteTab r, FrameworkElement root, string prefix, bool zh)
+    {
+        void Expect(bool ok, string what) { if (!ok) Problems.Add("断线重连：" + what); }
+        if (!Wait("重连前的画面", () => r.Phase == RemotePhase.Streaming)) return;
+        if (app.Client is not MockClient mock || r.Channel is not MockDisplayChannel ch || r.Peer is not { Session: MockPeer peer } oldPeer)
+        {
+            Problems.Add("断线重连：拿不到模拟的画面通道或会话");
+            return;
+        }
+        var display = r.DisplayId;
+
+        // 1. 画面被被控端结束、会话还在：同一会话、同一块屏重开画面
+        var frames = r.FramesDecoded;
+        ch.SimulateEnded(zh ? "画面没有响应" : "The display stopped responding");
+        if (!Wait("画面断了转入重连", () => r.Phase == RemotePhase.Reconnecting)) return;
+        Expect(r.Channel == null && r.Live == false, "重连中还留着旧画面通道");
+        Capture($"{prefix}-50-remote-reconnecting", root);
+        if (!Wait("重开画面", () => r.Phase == RemotePhase.Streaming)) return;
+        Expect(ReferenceEquals(r.Peer, oldPeer) && r.DisplayId == display && r.Channel != null && !ReferenceEquals(r.Channel, ch) && r.FramesDecoded > frames,
+            "会话还在时应在同一会话、同一块屏上重开画面");
+
+        // 2. 会话断开：重新建会话，回到原来那块屏，声音照设置恢复
+        peer.SimulateClosed(zh ? "连接已断开" : "Connection closed");
+        if (!Wait("会话断了转入重连", () => r.Phase == RemotePhase.Reconnecting)) return;
+        Expect(!r.AudioOn, "会话断了声音没有停");
+        if (!Wait("重新建会话", () => r.Phase == RemotePhase.Streaming)) return;
+        Expect(r.Peer is { ClosedReason: null } p2 && !ReferenceEquals(p2, oldPeer) && r.DisplayId == display, "会话断开后没有重新建会话、回到原来那块屏");
+        if (r.AudioSupported && app.Settings.RemoteAudio) Wait("重连后声音恢复", () => r.AudioOn, 5000);
+
+        // 3. 一直连不上：间隔改短，次数用完显示最后一次的原因与重试按钮；点重试从头再来
+        var delays = RemoteTab.ReconnectDelays;
+        var offline = zh ? "设备离线" : "The device is offline";
+        RemoteTab.ReconnectDelays = new[] { 10, 10, 10 };
+        mock.ConnectFailure = offline;
+        try
+        {
+            if (r.Peer?.Session is MockPeer peer2) peer2.SimulateClosed(zh ? "连接已断开" : "Connection closed");
+            if (Wait("重连放弃", () => r.Phase == RemotePhase.Failed))
+            {
+                Expect(r.FailReason == offline, "放弃后显示的原因不对（" + r.FailReason + "）");
+                Capture($"{prefix}-51-remote-reconnect-failed", root);
+            }
+        }
+        finally
+        {
+            mock.ConnectFailure = null;
+            RemoteTab.ReconnectDelays = delays;
+        }
+        r.Start();
+        Wait("点重试后重新连上", () => r.Phase == RemotePhase.Streaming);
+        ClearToast(app);
+    }
+
     /// <summary>本机一侧用的假主目录（文件名、时间都固定）</summary>
     private static string MakeFakeHome()
     {
@@ -761,6 +818,9 @@ internal static class SelfTest
 
         // 虚拟屏
         if (app.ActiveTab is RemoteTab remote5) CheckVirtualDisplay(app, remote5, root, prefix);
+
+        // 断线自动重连
+        if (app.ActiveTab is RemoteTab remote6) CheckReconnect(app, remote6, root, prefix, zh);
 
         // 6. AI 聊天（docs/ai-chat-ui.md）
         RenderAi(app, root, prefix, zh);

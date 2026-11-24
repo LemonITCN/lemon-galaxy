@@ -344,7 +344,8 @@ internal sealed class AppModel
         if (peers.TryGetValue(deviceId, out var p) && p.ClosedReason == null && !p.Session.IsClosed()) return Task.FromResult(p);
         if (connecting.TryGetValue(deviceId, out var pending)) return pending;
         var t = ConnectPeer(deviceId);
-        connecting[deviceId] = t;
+        // 同步就完成了（立即失败、模拟内核）时 ConnectPeer 的 finally 已经先跑过：不能再记进去，否则之后断线重连一直拿到这个旧结果
+        if (!t.IsCompleted) connecting[deviceId] = t;
         return t;
     }
 

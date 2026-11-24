@@ -247,9 +247,13 @@ internal sealed class MockClient : ICoreClient
 
     // ---------- 连接 ----------
 
+    /// <summary>selftest：设为非空时连哪台设备都失败（模拟一直连不上，重连放弃）</summary>
+    public volatile string? ConnectFailure;
+
     public async Task<ICorePeer> Connect(string deviceId)
     {
         await Delay(600);
+        if (ConnectFailure is { } failure) throw new GalaxyException.Network(failure);
         var d = Device(deviceId) ?? throw new GalaxyException.NotFound(Z("设备不存在", "Device not found"));
         if (!d.Online && !d.LanSeen) throw new GalaxyException.Network(Z("设备离线", "The device is offline"));
         if (d.Kind == DeviceKind.Mobile) throw new GalaxyException.Permission(Z("手机端不能被控制", "Mobile devices cannot be controlled"));
@@ -516,6 +520,13 @@ internal sealed class MockPeer : ICorePeer
         closed = true;
         timer?.Dispose();
         lock (virtualDisplays) virtualDisplays.Clear();
+    }
+
+    /// <summary>selftest：模拟会话断开（对方掉线、网络断了），与内核一样通知监听者</summary>
+    public void SimulateClosed(string reason)
+    {
+        Disconnect();
+        listener?.OnClosed(reason);
     }
 
     public async Task<ICoreTerminal> OpenTerminal(TerminalOptions options, TerminalSink sink)

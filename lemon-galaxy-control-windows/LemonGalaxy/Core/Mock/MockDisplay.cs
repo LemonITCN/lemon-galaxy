@@ -18,7 +18,7 @@ internal sealed class MockDisplayChannel : ICoreDisplay
     private readonly DisplayInfo display;
     private readonly Timer timer;
     private readonly object lk = new();
-    private bool stopped;
+    private bool stopped, stopCalled;
     private ulong frame;
     private readonly int w, h;
     private readonly bool zh;
@@ -90,13 +90,30 @@ internal sealed class MockDisplayChannel : ICoreDisplay
 
     public void Stop()
     {
+        bool first;
         lock (lk)
         {
-            stopped = true;
+            first = !stopCalled;
+            stopCalled = stopped = true;
             // 与内核一致：关画面时自动结束录像
             recordPath = null;
         }
         timer.Dispose();
+        // 与 FFI 一致：自己停的也回一次 on_closed("stopped")，界面要认得出不是断线
+        if (first) sink.OnClosed("stopped");
+    }
+
+    /// <summary>selftest：模拟画面被被控端结束（流断了、看门狗判定画面没有响应），与内核一样通知一次 on_closed</summary>
+    public void SimulateEnded(string reason)
+    {
+        lock (lk)
+        {
+            if (stopped) return;
+            stopped = true;
+            recordPath = null;
+        }
+        timer.Dispose();
+        sink.OnClosed(reason);
     }
 
     public Task StartRecording(string path, bool withAudio)

@@ -237,6 +237,7 @@
   "sftp.state.done": "完成",
   "sftp.state.cancelled": "已取消",
   "remote.connecting": "正在连接画面…",
+  "remote.reconnecting": "连接中断，正在重新连接…",
   "remote.noDisplay": "对方没有可用的屏幕",
   "remote.screen": "屏幕 {0}",
   "remote.fit": "适应窗口",
