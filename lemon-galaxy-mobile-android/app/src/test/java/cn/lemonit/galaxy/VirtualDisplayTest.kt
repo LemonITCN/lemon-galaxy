@@ -271,7 +271,8 @@ class VirtualDisplayTest {
         onMain { c.stop() }
         val again = controller(conn)
         onMain { again.start() }
-        waitFor("重新打开") { again.ui.value.displayId == 1u }
+        // 出过画面之后断开才自动重连（第一次就没打开的直接显示失败）
+        waitFor("重新打开") { again.ui.value.displayId == 1u && again.ui.value.status == RemoteStatus.STREAMING }
         assertEquals(kept, again.ui.value.myVirtualIds)
         assertEquals(3, again.ui.value.virtualMax)
 
@@ -281,11 +282,13 @@ class VirtualDisplayTest {
         // 被控端会自动删掉本会话加的屏：列表里也去掉
         assertFalse(again.ui.value.displays.any { it.id in kept })
 
-        // 重新连上是新会话：从空开始，上限重新取
-        onMain { again.switchDisplay(2u) }
-        waitFor("重连并重新取上限") { again.ui.value.virtualMax == 3 && again.ui.value.displayId == 2u }
+        // 自动重连上是新会话：从空开始，上限重新取，回到原来那块屏
+        waitFor("自动重连并重新取上限") { again.ui.value.virtualMax == 3 && again.ui.value.status == RemoteStatus.STREAMING }
+        assertEquals(1u, again.ui.value.displayId)
         assertTrue(again.ui.value.myVirtualIds.isEmpty())
         assertFalse(again.ui.value.displays.any { it.id in kept })
+        onMain { again.switchDisplay(2u) }
+        waitFor("换到第二块屏") { again.ui.value.displayId == 2u && again.ui.value.status == RemoteStatus.STREAMING }
         onMain { again.stop() }
         assertTrue(addErrors.toString(), addErrors.isEmpty())
         assertTrue(removeErrors.toString(), removeErrors.isEmpty())

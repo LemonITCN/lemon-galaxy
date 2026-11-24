@@ -86,6 +86,9 @@ internal class MockPeerSession(
         channels.filter { it.displayId in gone }.forEach { it.closeByRemote("display removed") }
     }
 
+    /** 测试用：开着的画面都被被控端结束（或画面没有响应），会话还在。 */
+    fun endDisplayStreams(reason: String) = channels.forEach { it.closeByRemote(reason) }
+
     init {
         // 每 2 秒抖动一下延迟，模拟后台持续探测
         ticker = scope.launch {
@@ -138,7 +141,8 @@ internal class MockPeerSession(
         ticker.cancel()
         host.shells.values.forEach { if (it.attached) it.sink = null }
         synchronized(virtualDisplays) { virtualDisplays.clear() }
-        // 与真内核一样：会话关闭时通知监听器
+        // 与真内核一样：开着的画面流随会话断掉，会话关闭时通知监听器
+        channels.forEach { it.closeByRemote("disconnected") }
         listener?.onClosed("disconnected")
     }
 

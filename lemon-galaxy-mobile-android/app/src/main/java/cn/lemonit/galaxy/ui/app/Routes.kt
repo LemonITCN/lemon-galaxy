@@ -580,6 +580,8 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
                 nav.pop()
             }
 
+            override fun onRetry() = controller.retry()
+
             override fun onFiles() {
                 nav.push(Route.Files(TargetRef.Device(deviceId)))
             }

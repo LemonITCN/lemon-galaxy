@@ -21,6 +21,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,7 +33,19 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-enum class RemoteStatus { CONNECTING, STREAMING, FAILED }
+enum class RemoteStatus {
+    CONNECTING,
+    STREAMING,
+    /** 画面或会话断了，正在自动重连：最后一帧留着变暗，输入丢掉 */
+    RECONNECTING,
+    FAILED,
+}
+
+/**
+ * 自动重连的等待间隔：断开后 1、2、4、8、15 秒，之后每 15 秒，共 10 次（约 2 分钟）都不成就显示失败。
+ * 四端一致（Mac、Windows、iOS 同一规则）。
+ */
+val RECONNECT_DELAYS_MS: List<Long> = listOf(1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000)
 
 data class RemoteUi(
     val title: String,
@@ -142,6 +155,8 @@ class RemoteDesktopController(
     private val onVirtualAddFailed: (String) -> Unit = {},
     /** 删虚拟屏失败（参数是原因） */
     private val onVirtualRemoveFailed: (String) -> Unit = {},
+    /** 自动重连的等待间隔（测试用短的） */
+    private val reconnectDelaysMs: List<Long> = RECONNECT_DELAYS_MS,
 ) {
     private val _ui = MutableStateFlow(RemoteUi(title, platform, quality = quality, mouseMode = mouseMode))
     val ui: StateFlow<RemoteUi> = _ui.asStateFlow()
@@ -162,13 +177,36 @@ class RemoteDesktopController(
     private var boundPeer: PeerHandle? = null
     private var peerJob: Job? = null
 
+    // 自动重连：以下状态都只在主线程读写
+    private var reconnectJob: Job? = null
+    /**
+     * 下一次重连用第几个间隔（也就是已用掉几次）。新画面真正显示出第一帧后才清零：
+     * 重连打开了画面、但一帧没来就又被关掉（内核判定没有响应）的，接着用剩下的次数，不从头来。点重试、回到前台也从头来。
+     */
+    private var reconnectStep = 0
+    /** 断在后台：不重连（网络可能被冻结），回到前台再开始 */
+    private var reconnectPending = false
+    /** 下一次尝试先在原会话上重开画面（只有画面断了、会话还活着时） */
+    private var reopenFirst = false
+    /** 每次断开加一：一次尝试期间又断了，这次不算成功 */
+    private var lossSeq = 0
+    /** 断开的原因（重连都失败、又没有更具体的原因时显示） */
+    private var lossReason = ""
+    /** 出过画面：之后断了才自动重连（第一次就没打开的直接显示失败） */
+    @Volatile private var everStreamed = false
+
     val decoder = VideoDecoder(
         requestKeyframe = { channel?.requestKeyframe() },
         onVideoSize = { w, h ->
+            everStreamed = true
             val before = _ui.value
             _ui.update { it.copy(videoW = w, videoH = h, status = RemoteStatus.STREAMING) }
             // 画面中途变了尺寸（对方改分辨率）：重新取屏幕信息，输入坐标和画面比例跟着更新
             if (before.status == RemoteStatus.STREAMING && (before.videoW != w || before.videoH != h)) refreshDisplays()
+        },
+        onFrameShown = {
+            // 新画面显示出第一帧：重连次数清零（期间又断了的不算）
+            scope.launch { if (_ui.value.status == RemoteStatus.STREAMING) reconnectStep = 0 }
         },
         onCursorChanged = { x, y, v ->
             // 回报是画面像素，输入与界面用被控屏幕像素：画面被缩放过时换算一下（相等时原样）
@@ -177,11 +215,6 @@ class RemoteDesktopController(
                 val sy = if (it.videoH > 0 && it.remoteH > 0) y.toLong() * it.remoteH / it.videoH else y.toLong()
                 it.copy(cursorX = sx.toInt(), cursorY = sy.toInt(), cursorVisible = v, cursorSeq = it.cursorSeq + 1)
             }
-        },
-        onClosedByRemote = { reason ->
-            _ui.update { it.copy(status = RemoteStatus.FAILED, error = reason) }
-            // 画面断了：录像到此为止（界面还在，弹保存提示）
-            scope.launch { stopRecording(auto = false) }
         },
     )
 
@@ -238,6 +271,8 @@ class RemoteDesktopController(
                         }
                         stopAudio()
                         stopRecording(auto = false)
+                        // 远程桌面还开着、不是自己离开的：自动重连（会话已断，走重新连接）
+                        if (!stopped && reconnectable()) connectionLost(r, sessionDead = true)
                     }
                 }
             }
@@ -263,8 +298,127 @@ class RemoteDesktopController(
             if (current) decoder.onCursor(x, y, visible)
         }
 
+        /** 不是自己停的（自己停时先换掉了回调）：被控端结束、流出错、画面没有响应。回主线程再核对一次是不是当前这一路。 */
         override fun onClosed(reason: String) {
-            if (current) decoder.onClosed(reason)
+            if (current) scope.launch { if (current) streamClosed(reason) }
+        }
+    }
+
+    private fun peerAlive(p: PeerHandle?) = p != null && !p.closed && !p.session.isClosed()
+
+    /** 出过画面、现在正看着（或正在换屏 / 重连）：断了要自动重连。 */
+    private fun reconnectable(): Boolean = when (_ui.value.status) {
+        RemoteStatus.STREAMING, RemoteStatus.RECONNECTING -> true
+        RemoteStatus.CONNECTING -> everStreamed
+        RemoteStatus.FAILED -> false
+    }
+
+    /** 当前这一路画面断了。 */
+    private fun streamClosed(reason: String) {
+        if (stopped) return
+        if (reconnectable()) {
+            connectionLost(reason, sessionDead = !peerAlive(boundPeer))
+            return
+        }
+        // 第一次打开就断了：显示失败（可重试）；录像到此为止（界面还在，弹保存提示）
+        stopRecording(auto = false)
+        dropChannel()
+        _ui.update { it.copy(status = RemoteStatus.FAILED, error = reason) }
+    }
+
+    /** 停掉当前这一路画面：之后的输入丢掉，迟到的回调不再算。 */
+    private fun dropChannel() {
+        activeSink = null
+        channel?.stop()
+        channel = null
+    }
+
+    /**
+     * 画面或会话断了（不是自己停的）：最后一帧留着变暗，按 [reconnectDelaysMs] 自动重连。
+     * [fresh] 为真（点了重试、回到前台）时次数从头算，否则接着用剩下的（见 [reconnectStep]）；
+     * 之前不在重连时（新一次断开）[sessionDead] 为假的，第一次先在原会话上只重开画面。
+     * 在后台时只记下，回到前台再开始。
+     */
+    private fun connectionLost(reason: String, sessionDead: Boolean, fresh: Boolean = false) {
+        if (stopped) return
+        if (reason.isNotEmpty()) lossReason = reason
+        lossSeq++
+        if (fresh) reconnectStep = 0
+        if (fresh || _ui.value.status != RemoteStatus.RECONNECTING) {
+            reopenFirst = !sessionDead
+        } else if (sessionDead) {
+            reopenFirst = false
+        }
+        stopRecording(auto = false)
+        dropChannel()
+        _ui.update { it.copy(status = RemoteStatus.RECONNECTING, error = null) }
+        if (!foreground) {
+            reconnectPending = true
+            return
+        }
+        if (reconnectJob?.isActive != true) reconnectJob = scope.launch { reconnectLoop() }
+    }
+
+    private suspend fun reconnectLoop() {
+        var lastError: String? = null
+        while (reconnectStep < reconnectDelaysMs.size) {
+            delay(reconnectDelaysMs[reconnectStep++])
+            val seq = lossSeq
+            try {
+                reconnectOnce()
+                // 尝试期间又断了：这次不算，接着按间隔重试
+                if (seq == lossSeq) return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                e.userMessage().takeIf { it.isNotEmpty() }?.let { lastError = it }
+                activeSink = null
+            }
+        }
+        // 都不成：显示失败（原因 + 重试）
+        _ui.update { it.copy(status = RemoteStatus.FAILED, error = lastError ?: lossReason) }
+    }
+
+    /**
+     * 重连一次：只有画面断了、会话还活着时先在原会话上重开同一块屏；不行（或会话已断）就经 [peer] 重新连接
+     * （会话已关会建新会话并重新绑定），原来那块屏还在就开它，否则开主屏。
+     */
+    private suspend fun reconnectOnce() {
+        val target = _ui.value.displayId
+        if (reopenFirst) {
+            reopenFirst = false
+            if (target != null && peerAlive(boundPeer)) {
+                try {
+                    open(target, reconnecting = true)
+                    return
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // 落到下面整条重新连接
+                }
+            }
+        }
+        val peer = peer()
+        val asked = peer.myVirtualDisplays.value
+        val displays = peer.session.listDisplays()
+        val next = displays.firstOrNull { it.id == target } ?: displays.firstOrNull { it.primary } ?: displays.firstOrNull()
+            ?: throw IllegalStateException("no display")
+        applyDisplays(peer, displays, asked)
+        open(next.id, reconnecting = true)
+    }
+
+    /** 失败界面的「重试」：出过画面的按自动重连从头再来（取消还没到的重试），第一次就没打开的重新打开。 */
+    fun retry() {
+        if (stopped) return
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectPending = false
+        if (everStreamed) {
+            connectionLost(lossReason, sessionDead = !peerAlive(boundPeer), fresh = true)
+        } else {
+            dropChannel()
+            _ui.update { it.copy(status = RemoteStatus.CONNECTING, error = null) }
+            start()
         }
     }
 
@@ -301,18 +455,17 @@ class RemoteDesktopController(
         }
     }
 
-    private suspend fun open(displayId: UInt) {
+    /** 打开一路画面；[reconnecting] 为真时（自动重连）状态保持 RECONNECTING，出画面后变 STREAMING。 */
+    private suspend fun open(displayId: UInt, reconnecting: Boolean = false) {
         // 换屏幕 / 重开画面前先停录像拿到结果（关画面时内核也会结束录像，但不返回信息）
         stopRecording(auto = false)
         // 先换掉回调：旧画面停下时的 "stopped" 不算新画面失败
-        activeSink = null
-        channel?.stop()
-        channel = null
+        dropChannel()
         _ui.update {
             // 光标先放屏幕中心（被控端有回报后以回报为准）
             val d = it.displays.firstOrNull { x -> x.id == displayId }
             it.copy(
-                displayId = displayId, status = RemoteStatus.CONNECTING, error = null,
+                displayId = displayId, status = if (reconnecting) RemoteStatus.RECONNECTING else RemoteStatus.CONNECTING, error = null,
                 cursorX = d?.let { x -> (x.width / 2u).toInt() } ?: it.cursorX,
                 cursorY = d?.let { x -> (x.height / 2u).toInt() } ?: it.cursorY,
                 cursorVisible = true,
@@ -322,10 +475,16 @@ class RemoteDesktopController(
         val peer = peer()
         val sink = StreamSink()
         activeSink = sink
-        channel = peer.session.openDisplay(
+        val ch = peer.session.openDisplay(
             DisplayOptions(displayId, q.maxFps, q.bitrateKbps, VideoDecoder.supportedCodecs(), viewOnly = false),
             sink,
         )
+        if (activeSink !== sink) {
+            // 打开期间断了、又换了画面或离开了：这一路不要了
+            ch.stop()
+            return
+        }
+        channel = ch
         // 每路画面各自记着要不要画光标（默认画）：鼠标模式由本机画，告诉被控端别画
         applyClientCursor()
         // 画面打开后按设置开始播放声音（已在播放时不重复开）
@@ -353,12 +512,19 @@ class RemoteDesktopController(
     }
 
     private suspend fun switchTo(id: UInt) {
+        // 重连期间不换屏（重连好了再换）
+        if (_ui.value.status == RemoteStatus.RECONNECTING) return
         try {
             open(id)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            _ui.update { it.copy(status = RemoteStatus.FAILED, error = e.userMessage()) }
+            when {
+                // 换屏期间断了：重连接手
+                _ui.value.status == RemoteStatus.RECONNECTING -> Unit
+                !peerAlive(boundPeer) && reconnectable() -> connectionLost(e.userMessage(), sessionDead = true)
+                else -> _ui.update { it.copy(status = RemoteStatus.FAILED, error = e.userMessage()) }
+            }
         }
     }
 
@@ -461,15 +627,33 @@ class RemoteDesktopController(
         if (on) startAudio() else stopAudio()
     }
 
-    /** 切到后台先停掉声音，回到前台按开关重新开始。 */
+    /**
+     * 切到后台先停掉声音，回到前台按开关重新开始。
+     * 后台不重连（网络可能被冻结）：正在重连的停下，回到前台从头再来；在后台时会话断了（或回来时发现已断）同样回前台再连。
+     */
     fun setForeground(fg: Boolean) {
         if (fg == foreground) return
         foreground = fg
         if (!fg) {
             stopAudio()
             stopRecording(auto = true)
-        } else if (audioWanted && channel != null) {
-            startAudio()
+            if (reconnectJob?.isActive == true) {
+                reconnectJob?.cancel()
+                reconnectJob = null
+                activeSink = null
+                reconnectPending = true
+            }
+            return
+        }
+        if (stopped) return
+        val bound = boundPeer
+        when {
+            reconnectPending -> {
+                reconnectPending = false
+                if (_ui.value.status == RemoteStatus.RECONNECTING) connectionLost("", sessionDead = !peerAlive(bound), fresh = true)
+            }
+            bound != null && !peerAlive(bound) && reconnectable() -> connectionLost(bound.closedReason.value ?: "", sessionDead = true)
+            audioWanted && channel != null -> startAudio()
         }
     }
 
@@ -586,9 +770,10 @@ class RemoteDesktopController(
             conn.existingPeer(deviceId)?.let { p -> scope.launch { runCatching { p.session.setPrivacy(false) } } }
             _ui.update { it.copy(privacyOn = false) }
         }
-        activeSink = null
-        channel?.stop()
-        channel = null
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectPending = false
+        dropChannel()
         decoder.release()
         peerJob?.cancel()
         peerJob = null

@@ -22,6 +22,8 @@ class VideoDecoder(
     private val onVideoSize: (Int, Int) -> Unit,
     private val onCursorChanged: (Int, Int, Boolean) -> Unit,
     private val onClosedByRemote: (String) -> Unit = {},
+    /** 每路画面（每次 onConfig 之后）真正显示出第一帧时调用一次（在解码线程上） */
+    private val onFrameShown: () -> Unit = {},
 ) : VideoSink {
     private class Frame(val data: ByteArray, val ptsUs: Long, val keyframe: Boolean)
 
@@ -32,6 +34,7 @@ class VideoDecoder(
     @Volatile private var height = 0
     @Volatile private var reconfigure = false
     @Volatile private var running = true
+    @Volatile private var awaitingShown = false
     private var codec: MediaCodec? = null
     private var waitingKeyframe = true
     private val thread = Thread(::loop, "galaxy-video-decoder").apply { isDaemon = true; start() }
@@ -52,7 +55,16 @@ class VideoDecoder(
         this.width = width.toInt()
         this.height = height.toInt()
         reconfigure = true
+        awaitingShown = true
         onVideoSize(this.width, this.height)
+    }
+
+    /** 一帧送上了 Surface：这一路画面的第一帧通知一次。 */
+    internal fun frameShown() {
+        if (awaitingShown) {
+            awaitingShown = false
+            onFrameShown()
+        }
     }
 
     override fun onFrame(data: ByteArray, ptsUs: ULong, keyframe: Boolean) {
@@ -126,6 +138,7 @@ class VideoDecoder(
                     val out = c.dequeueOutputBuffer(info, 0)
                     if (out >= 0) {
                         c.releaseOutputBuffer(out, true)
+                        frameShown()
                     } else {
                         break
                     }

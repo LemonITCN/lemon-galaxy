@@ -287,6 +287,7 @@
     <string name="rd_record_gallery_failed">保存到相册失败：%1$s</string>
     <string name="rd_record_auto_saved">录像已停止并保存到 %1$s</string>
     <string name="rd_connecting">正在连接画面…</string>
+    <string name="rd_reconnecting">连接中断，正在重新连接…</string>
     <string name="rd_failed">无法打开远程画面</string>
     <string name="rd_mode">操作方式</string>
     <string name="rd_mode_touch">触控</string>

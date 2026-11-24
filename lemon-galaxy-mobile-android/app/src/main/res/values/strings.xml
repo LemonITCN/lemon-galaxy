@@ -289,6 +289,7 @@
     <string name="rd_record_gallery_failed">Could not save to Gallery: %1$s</string>
     <string name="rd_record_auto_saved">Recording stopped and saved to %1$s</string>
     <string name="rd_connecting">Connecting to the display…</string>
+    <string name="rd_reconnecting">Connection lost, reconnecting…</string>
     <string name="rd_failed">Could not open the display</string>
     <string name="rd_mode">Input</string>
     <string name="rd_mode_touch">Touch</string>

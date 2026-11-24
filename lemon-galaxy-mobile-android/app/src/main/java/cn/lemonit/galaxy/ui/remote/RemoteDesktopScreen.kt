@@ -106,6 +106,9 @@ interface RemoteActions {
     fun onClipboardGet()
     fun onDisconnect()
 
+    /** 失败界面的「重试」（出过画面的重新开始自动重连）。 */
+    fun onRetry() = Unit
+
     /** 隐私屏开关（对端能力里有 "privacy" 时才显示）。 */
     fun onPrivacy(on: Boolean) = Unit
 
@@ -338,16 +341,26 @@ fun RemoteDesktopScreen(
             if (ui.localCursor && ui.status == RemoteStatus.STREAMING) {
                 LocalPointerArrow(state.pointer, { state.viewport }, Modifier.fillMaxSize())
             }
+            if (ui.status == RemoteStatus.RECONNECTING || ui.status == RemoteStatus.FAILED) {
+                // 断线重连 / 失败：最后一帧留着变暗
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)).testTag("remote-dim"))
+            }
             if (ui.status != RemoteStatus.STREAMING) {
                 Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                    if (ui.status == RemoteStatus.CONNECTING) {
+                    if (ui.status == RemoteStatus.CONNECTING || ui.status == RemoteStatus.RECONNECTING) {
                         CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp)
                         Spacer(Modifier.height(12.dp))
-                        Text(stringResource(R.string.rd_connecting), color = Color.White.copy(alpha = 0.8f))
+                        Text(
+                            stringResource(if (ui.status == RemoteStatus.RECONNECTING) R.string.rd_reconnecting else R.string.rd_connecting),
+                            color = Color.White.copy(alpha = 0.8f),
+                        )
                     } else {
                         Text(ui.error?.takeIf { it.isNotEmpty() } ?: stringResource(R.string.rd_failed), color = Color.White)
                         Spacer(Modifier.height(12.dp))
-                        TextButton(onClick = actions::onDisconnect) { Text(stringResource(R.string.close)) }
+                        Row {
+                            TextButton(onClick = actions::onRetry) { Text(stringResource(R.string.retry)) }
+                            TextButton(onClick = actions::onDisconnect) { Text(stringResource(R.string.close)) }
+                        }
                     }
                 }
             }

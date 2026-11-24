@@ -83,6 +83,7 @@ import cn.lemonit.galaxy.ui.login.LoginScreen
 import cn.lemonit.galaxy.ui.remote.RemoteActions
 import cn.lemonit.galaxy.ui.remote.RemoteDesktopScreen
 import cn.lemonit.galaxy.ui.remote.RemotePanel
+import cn.lemonit.galaxy.ui.remote.RemoteStatus
 import cn.lemonit.galaxy.ui.remote.RemoteUi
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -445,6 +446,8 @@ class ScreenshotTest {
         displays: List<DisplayInfo>? = null,
         addDisplay: Boolean = false,
         edit: (RemoteUi) -> RemoteUi = { it },
+        /** 画面上有转圈（无限动画）时为假：不打开自动推进等空闲，免得等不到 */
+        settle: Boolean = true,
         then: (RemoteViewState) -> Unit = {},
     ) {
         val bytes = context.assets.open("mock/desktop_preview.jpg").use { it.readBytes() }
@@ -479,11 +482,13 @@ class ScreenshotTest {
             }
         }
         compose.mainClock.advanceTimeBy(800)
-        // 手势要跟着时钟走：做手势时打开自动推进，做完再停住截图
-        compose.mainClock.autoAdvance = true
-        then(view)
-        compose.waitForIdle()
-        compose.mainClock.autoAdvance = false
+        if (settle) {
+            // 手势要跟着时钟走：做手势时打开自动推进，做完再停住截图
+            compose.mainClock.autoAdvance = true
+            then(view)
+            compose.waitForIdle()
+            compose.mainClock.autoAdvance = false
+        }
         compose.mainClock.advanceTimeBy(400)
         capture(name, dark)
     }
@@ -659,6 +664,17 @@ class ScreenshotTest {
 
     @Test @Config(qualifiers = TABLET_ZH)
     fun remoteTabletZhDark() = remote(true, "remote_panel_display", panel = RemotePanel.DISPLAY, displays = threeDisplays)
+
+    /** 断线自动重连：最后一帧变暗 + 转圈 + 一行字 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remoteReconnectingZhDark() = remote(true, "remote_reconnecting", settle = false, edit = { it.copy(status = RemoteStatus.RECONNECTING) })
+
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remoteReconnectingEnLight() = remote(false, "remote_reconnecting", settle = false, edit = { it.copy(status = RemoteStatus.RECONNECTING) })
+
+    /** 重连都不成：原因 + 重试 / 关闭 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remoteFailedZhDark() = remote(true, "remote_failed", edit = { it.copy(status = RemoteStatus.FAILED, error = "设备离线") })
 
     // ---------------- AI ----------------
 
