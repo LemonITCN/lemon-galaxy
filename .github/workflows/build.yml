@@ -4,7 +4,8 @@
 # 产物
 #   服务器         lemon-galaxy-server  Linux x86_64 / ARM64 静态单文件、Windows 10 / Server 2016 起 x64 / ARM64、
 #                  macOS 13 起 Apple 芯片 + Intel 通用单文件（内嵌 Web 管理后台，可装成系统服务；终端里不带参数运行进交互菜单）
-#   Linux 被控端   lemon-galaxy-worker  Linux x86_64 / ARM64 静态单文件
+#   Linux 被控端   lemon-galaxy-worker  Linux x86_64 / ARM64：glibc 2.17 起单文件（含远程桌面、显卡编码）、musl 静态精简版（只有终端与文件）、
+#                  .deb / .rpm（内核 + GTK 界面 + 系统服务，界面在 Debian 10 容器里编，Ubuntu 20.04 / Debian 10 / RHEL 8 起可用）
 #   Windows 被控端 lemon-galaxy-worker.exe  Windows 10 / Server 2016 起，x64 / ARM64 单文件（系统服务 + 画面代理）
 #   Mac 客户端     LemonGalaxy.dmg      macOS 13 起，Apple 芯片 + Intel 通用（主控 + 被控）
 #   安卓客户端     LemonGalaxy.apk      Android 8.0 起
@@ -57,6 +58,9 @@ jobs:
             target
           key: rust-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: rust-test-${{ runner.os }}-${{ runner.arch }}-
+      - name: Linux 图形界面的编译依赖（GTK 3）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-3-dev >/dev/null
       - name: 单元测试
         run: cargo test --workspace --exclude galaxy-ffi
 
@@ -93,11 +97,13 @@ jobs:
         with:
           name: web-dist
           path: lemon-galaxy-server/web/dist
-      - name: 准备 musl 工具链
+      - name: 准备工具链（musl 静态、zig 编 glibc 2.17）与桌面测试环境
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools rpm xvfb xauth xdotool dbus-x11 xfce4-session xfwm4 xfdesktop4 xfce4-panel xfce4-settings mutter pipewire wireplumber >/dev/null
           rustup update stable --no-self-update && rustup default stable
-          rustup target add ${{ matrix.arch }}-unknown-linux-musl
+          rustup target add ${{ matrix.arch }}-unknown-linux-musl ${{ matrix.arch }}-unknown-linux-gnu
+          pip install --quiet --break-system-packages ziglang cargo-zigbuild
       - uses: actions/cache@v6
         with:
           path: |
@@ -106,31 +112,105 @@ jobs:
             target
           key: rust-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: rust-linux-${{ matrix.arch }}-
-      - name: 静态编译
+      - name: 编译
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: |
-          cargo build --release --target ${{ matrix.arch }}-unknown-linux-musl -p lemon-galaxy-server -p lemon-galaxy-worker-linux -p galaxy-dev
+          A=${{ matrix.arch }}
           mkdir -p dist
-          cp target/${{ matrix.arch }}-unknown-linux-musl/release/lemon-galaxy-server dist/
-          cp target/${{ matrix.arch }}-unknown-linux-musl/release/lemon-galaxy-worker dist/
-          cp target/${{ matrix.arch }}-unknown-linux-musl/release/galaxy-dev dist/
+          # 服务器、开发用主控端、被控端精简版：musl 静态单文件
+          cargo build --release --target $A-unknown-linux-musl -p lemon-galaxy-server -p galaxy-dev
+          cargo build --release --target $A-unknown-linux-musl -p lemon-galaxy-worker-linux --no-default-features
+          cp target/$A-unknown-linux-musl/release/lemon-galaxy-server dist/
+          cp target/$A-unknown-linux-musl/release/galaxy-dev dist/
+          cp target/$A-unknown-linux-musl/release/lemon-galaxy-worker dist/lemon-galaxy-worker-musl
+          # 被控端（含远程桌面）：只依赖 glibc 2.17，显卡编码、PipeWire、PulseAudio 运行时加载
+          cargo zigbuild --release --target $A-unknown-linux-gnu.2.17 -p lemon-galaxy-worker-linux
+          cp target/$A-unknown-linux-gnu/release/lemon-galaxy-worker dist/
           file dist/* || true
+          echo "被控端依赖的系统库："; objdump -p dist/lemon-galaxy-worker | grep NEEDED
+          MAXG="$(objdump -T dist/lemon-galaxy-worker | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          echo "最高 glibc 符号版本：$MAXG"
+          [ "$(printf '%s\nGLIBC_2.17\n' "$MAXG" | sort -V | tail -1)" = GLIBC_2.17 ] || { echo "用到了 glibc 2.17 之后的符号" >&2; exit 1; }
+          if objdump -p dist/lemon-galaxy-worker | grep NEEDED | grep -v -E 'lib(c|m|dl|pthread|rt|gcc_s|util)\.so|ld-linux'; then echo "链接了不该链接的系统库" >&2; exit 1; fi
+          dist/lemon-galaxy-worker-musl version
           ls -l dist
       - name: 端到端测试（服务器 + Linux 被控端 + 主控）
         run: scripts/e2e.sh dist
       - name: 服务器装成 systemd 服务（安装、改参数、卸载）
         run: scripts/server-service-test.sh dist
+      - name: 远程桌面端到端（没人登录 → 虚拟桌面 → 画面、截图、剪贴板、键鼠）
+        run: |
+          id alice >/dev/null 2>&1 || sudo useradd -m -s /bin/bash alice
+          sudo scripts/e2e-desktop.sh dist
+      - name: GNOME Wayland 后端（无头 mutter + PipeWire）
+        run: sudo LG_TEST_USER=alice scripts/test-mutter-headless.sh "$PWD/dist/lemon-galaxy-worker"
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: |
             dist/lemon-galaxy-server
             dist/lemon-galaxy-worker
+            dist/lemon-galaxy-worker-musl
             dist/galaxy-dev
+          if-no-files-found: error
+
+  linux-gui:
+    name: Linux 被控端界面与安装包 (${{ matrix.arch }})
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, arch: x86_64 }
+          - { os: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: 在 Debian 10 容器里编界面（glibc 2.28、GTK 3.24：Ubuntu 20.04 / Debian 10 / RHEL 8 起都能用）
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -e LEMONGALAXY_BUILD_NUMBER -e LEMONGALAXY_BUILD_VERSION debian:10 bash -c '
+            set -e
+            echo "deb http://archive.debian.org/debian buster main" > /etc/apt/sources.list
+            apt-get -o Acquire::Check-Valid-Until=false update -qq
+            apt-get install -y -qq --no-install-recommends ca-certificates curl build-essential pkg-config libgtk-3-dev >/dev/null
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
+            . $HOME/.cargo/env
+            CARGO_TARGET_DIR=/src/target-gui cargo build --release -p lemon-galaxy-worker-gui
+            mkdir -p dist && cp target-gui/release/lemon-galaxy-worker-gui dist/
+            chown -R '"$(id -u):$(id -g)"' dist target-gui
+          '
+          objdump -T dist/lemon-galaxy-worker-gui | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-${{ matrix.arch }}
+          path: core
+      - name: 打 .deb / .rpm
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq rpm >/dev/null
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then V="${GITHUB_REF_NAME#v}"; else V="$VERSION.$GITHUB_RUN_NUMBER"; fi
+          chmod +x core/lemon-galaxy-worker dist/lemon-galaxy-worker-gui
+          scripts/package-linux.sh ${{ matrix.arch }} "$V" core/lemon-galaxy-worker dist/lemon-galaxy-worker-gui pkg
+          dpkg-deb --info pkg/*.deb | head -20
+          dpkg-deb --contents pkg/*.deb
+          rpm -qlp pkg/*.rpm
+      - name: 安装包实测（装、服务起来、界面程序能启动、卸载）
+        run: |
+          sudo apt-get install -y -qq ./pkg/*.deb >/dev/null
+          sleep 3
+          systemctl is-active lemon-galaxy-worker
+          ls -la /run/lemon-galaxy-worker/
+          xvfb-run -a timeout 5 lemon-galaxy-worker-gui --version || true
+          sudo apt-get remove -y -qq lemon-galaxy-worker >/dev/null
+          ! systemctl is-active lemon-galaxy-worker
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-pkg-${{ matrix.arch }}
+          path: pkg/*
           if-no-files-found: error
 
   windows:
@@ -530,8 +610,8 @@ jobs:
   release:
     name: 发布
     # Windows 被控端还在打磨：它失败时照常发布，只是不带 Windows 文件
-    if: always() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && needs.rust-tests.result == 'success' && needs.linux.result == 'success' && needs.macos.result == 'success' && needs.android.result == 'success'
-    needs: [rust-tests, linux, windows, windows7, windows-control, macos, android]
+    if: always() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && needs.rust-tests.result == 'success' && needs.linux.result == 'success' && needs.linux-gui.result == 'success' && needs.macos.result == 'success' && needs.android.result == 'success'
+    needs: [rust-tests, linux, linux-gui, windows, windows7, windows-control, macos, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -557,6 +637,9 @@ jobs:
           for a in x86_64 aarch64; do
             cp "art/linux-$a/lemon-galaxy-worker" "out/lemon-galaxy-worker-$V-linux-$a"
             chmod +x "out/lemon-galaxy-worker-$V-linux-$a"
+            cp "art/linux-$a/lemon-galaxy-worker-musl" "out/lemon-galaxy-worker-$V-linux-musl-$a"
+            chmod +x "out/lemon-galaxy-worker-$V-linux-musl-$a"
+            cp art/linux-pkg-$a/*.deb art/linux-pkg-$a/*.rpm out/
             # 构建产物传过来会丢可执行权限，打包前补上
             chmod +x "art/linux-$a/lemon-galaxy-server"
             tar -C "art/linux-$a" -czf "out/lemon-galaxy-server-$V-linux-$a.tar.gz" lemon-galaxy-server
@@ -621,8 +704,14 @@ jobs:
             [ -f "out/LemonGalaxy-$V-windows-x64.zip" ] && echo "| Windows 客户端（主控） | Windows 10 / 11，x64（ARM64 电脑可用） | [LemonGalaxy-$V-windows-x64.zip]($DL/LemonGalaxy-$V-windows-x64.zip) |"
             [ -f "out/LemonGalaxy-$V-windows7-x64.zip" ] && echo "| Windows 客户端（主控，兼容版） | Windows 7 SP1 / 8 / 8.1，x64（需要 .NET Framework 4.8） | [LemonGalaxy-$V-windows7-x64.zip]($DL/LemonGalaxy-$V-windows7-x64.zip) |"
             echo "| 安卓客户端（主控） | Android 8.0 及以上 | [LemonGalaxy-$V-Android.apk]($DL/LemonGalaxy-$V-Android.apk) |"
-            echo "| Linux 被控端 | x86_64，任意发行版 | [lemon-galaxy-worker-$V-linux-x86_64]($DL/lemon-galaxy-worker-$V-linux-x86_64) |"
-            echo "| Linux 被控端 | ARM64，任意发行版 | [lemon-galaxy-worker-$V-linux-aarch64]($DL/lemon-galaxy-worker-$V-linux-aarch64) |"
+            echo "| Linux 被控端（桌面版：窗口 + 托盘 + 远程桌面） | Ubuntu 20.04 / Debian 10 起，x86_64 | [lemon-galaxy-worker_${V}_amd64.deb]($DL/lemon-galaxy-worker_${V}_amd64.deb) |"
+            echo "| Linux 被控端（桌面版） | Ubuntu 20.04 / Debian 10 起，ARM64 | [lemon-galaxy-worker_${V}_arm64.deb]($DL/lemon-galaxy-worker_${V}_arm64.deb) |"
+            echo "| Linux 被控端（桌面版） | CentOS / RHEL / Rocky / Alma 8 起、Fedora、openSUSE，x86_64 | [lemon-galaxy-worker-$V.x86_64.rpm]($DL/lemon-galaxy-worker-$V.x86_64.rpm) |"
+            echo "| Linux 被控端（桌面版） | 同上，ARM64 | [lemon-galaxy-worker-$V.aarch64.rpm]($DL/lemon-galaxy-worker-$V.aarch64.rpm) |"
+            echo "| Linux 被控端（单文件，服务器用，含远程桌面与虚拟桌面） | glibc 2.17 起（CentOS 7 起），x86_64 | [lemon-galaxy-worker-$V-linux-x86_64]($DL/lemon-galaxy-worker-$V-linux-x86_64) |"
+            echo "| Linux 被控端（单文件） | glibc 2.17 起，ARM64 | [lemon-galaxy-worker-$V-linux-aarch64]($DL/lemon-galaxy-worker-$V-linux-aarch64) |"
+            echo "| Linux 被控端（精简版，只有终端与文件） | 任意发行版（含 Alpine），x86_64 | [lemon-galaxy-worker-$V-linux-musl-x86_64]($DL/lemon-galaxy-worker-$V-linux-musl-x86_64) |"
+            echo "| Linux 被控端（精简版） | 任意发行版，ARM64 | [lemon-galaxy-worker-$V-linux-musl-aarch64]($DL/lemon-galaxy-worker-$V-linux-musl-aarch64) |"
             for a in "${WINS[@]}"; do
               case $a in x86_64) W="x64" ;; *) W="ARM64" ;; esac
               echo "| Windows 被控端 | Windows 10 / Server 2016 及以上，$W | [lemon-galaxy-worker-$V-windows-$a.exe]($DL/lemon-galaxy-worker-$V-windows-$a.exe) |"

@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=LemonGalaxy Worker
+Name[zh_CN]=LemonGalaxy 被控端
+GenericName=Remote Control
+GenericName[zh_CN]=远程控制
+Comment=Let your LemonGalaxy accounts connect to and control this computer
+Comment[zh_CN]=让你的 LemonGalaxy 账号远程连接和控制这台电脑
+Exec=lemon-galaxy-worker-gui
+Icon=lemon-galaxy-worker
+Terminal=false
+StartupNotify=true
+StartupWMClass=lemon-galaxy-worker-gui
+Categories=Network;RemoteAccess;System;GTK;
+Keywords=remote;desktop;control;assistance;vnc;
+Keywords[zh_CN]=远程;桌面;控制;协助;远控;

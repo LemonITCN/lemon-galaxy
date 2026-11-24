@@ -12,6 +12,7 @@ members = [
     "lemon-galaxy-common-rust/galaxy-worker",
     "lemon-galaxy-server",
     "lemon-galaxy-worker-linux",
+    "lemon-galaxy-worker-linux/gui",
     "lemon-galaxy-worker-windows",
 ]
 

@@ -14,6 +14,13 @@
 //!
 //! 各系统的差异（数据目录、服务安装、画面与输入等）由 [`WorkerOs`] 提供。
 
+pub mod control;
+#[cfg(unix)]
+mod control_server;
+pub mod gdm;
+#[cfg(unix)]
+mod localsys;
+
 use galaxy_client::account::{self, DeviceMeta, LoginOutcome};
 use galaxy_client::api::Api;
 use galaxy_client::identity::{FileStore, Identity, SecureStore};
@@ -584,42 +591,23 @@ fn platform_for(os: &dyn WorkerOs) -> Option<Arc<dyn galaxy_host::platform::Host
 }
 
 /// 运行被控服务，直到 `stop` 完成。命令行 `run` 与 Windows 服务共用。
+///
+/// 还没登录时不退出：开着本机控制接口等图形界面或命令行登录，登录后马上开始；换了服务器就重启被控服务。
 pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl std::future::Future<Output = ()>) -> i32 {
-    let st = HostState::load(&dir.join("host.json"));
-    if st.server.is_empty() {
-        eprintln!("{}", t!("还没有登录，请先运行 lemon-galaxy-worker login", "Not signed in. Run `lemon-galaxy-worker login` first."));
-        return 1;
-    }
-    let server = match ServerAddr::parse(&st.server) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
-        }
-    };
+    let _ = std::fs::create_dir_all(dir);
     os.secure_data_dir(dir);
-    let id = Identity::load_or_create(&store(dir));
-    // 以最高权限运行时，文件操作交给以目标用户身份启动的子进程
-    let helper = if galaxy_host::sysuser::is_root() { std::env::current_exe().ok() } else { None };
-    let cfg = HostConfig { server, data_dir: dir.to_path_buf(), meta: meta(os.as_ref(), DeviceKind::Worker), multi_account: true, file_helper: helper };
-    let host = match HostService::start(cfg, id).await {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("{}: {e}", t!("启动失败", "Start failed"));
-            return 1;
-        }
-    };
-    if let Some(p) = platform_for(&*os) {
-        host.set_platform(p);
-    }
-    tracing::info!("LemonGalaxy worker {VERSION} 已启动，设备 {}", host.identity.device_id);
+    #[cfg(unix)]
+    let ctl = control_server::start(os.clone(), dir).await;
+    #[cfg(not(unix))]
+    let ctl: Option<Arc<NoControl>> = None;
     // 服务模式下定期自动更新：换好程序后退出，由服务管理器拉起新版本
     if std::env::var("LEMON_GALAXY_SUPERVISED").as_deref() == Ok("1") {
         let (os2, dir2) = (os.clone(), dir.to_path_buf());
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(600)).await;
             loop {
-                if HostState::load(&dir2.join("host.json")).auto_update {
+                let st = HostState::load(&dir2.join("host.json"));
+                if st.auto_update && !st.accounts.is_empty() {
                     match apply_update(os2.as_ref(), &dir2).await {
                         Ok(Some(v)) => {
                             tracing::info!("已更新到 {v}，重启服务");
@@ -634,33 +622,137 @@ pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl s
         });
     }
     let path = dir.join("host.json");
-    let mut last = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let device_id = Identity::load_or_create(&store(dir)).device_id.to_hex();
+    let mut host: Option<Arc<HostService>> = None;
+    let mut last = None;
+    let mut retry_at: Option<tokio::time::Instant> = None;
+    let mut told_waiting = false;
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     let mut n = 0u64;
     tokio::pin!(stop);
     loop {
+        // 还没有在运行的被控服务：看看登录了没有
+        if host.is_none() && retry_at.is_none_or(|t| tokio::time::Instant::now() >= t) {
+            retry_at = None;
+            let st = HostState::load(&path);
+            if st.server.is_empty() {
+                if !told_waiting {
+                    told_waiting = true;
+                    eprintln!("{}", t!("还没有登录，等待登录（运行 lemon-galaxy-worker login，或在图形界面里登录）……", "Not signed in. Waiting for sign-in (run `lemon-galaxy-worker login` or use the app)..."));
+                }
+            } else {
+                match ServerAddr::parse(&st.server) {
+                    Err(e) => {
+                        tracing::warn!("服务器地址无效：{e}");
+                        retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(30));
+                    }
+                    Ok(server) => {
+                        last = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                        match start_host(os.clone(), dir, server).await {
+                            Ok(h) => {
+                                if let Some(c) = &ctl {
+                                    c.set_host(Some(h.clone()));
+                                }
+                                h.write_status_file();
+                                host = Some(h);
+                            }
+                            Err(e) => {
+                                eprintln!("{}: {e}", t!("启动失败", "Start failed"));
+                                retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(10));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let woken = async {
+            match &ctl {
+                Some(c) => c.woken().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             _ = tick.tick() => {
                 n += 1;
-                let now = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                if now != last {
-                    last = now;
-                    if host.reload_from_disk() {
-                        tracing::info!("已重新读取账号配置");
+                if n % 3 == 1 {
+                    match &host {
+                        Some(h) => h.write_status_file(),
+                        None => write_waiting_status(dir, &device_id),
                     }
                 }
-                if n % 3 == 1 {
-                    host.write_status_file();
-                }
             }
+            _ = woken => {}
             _ = &mut stop => {
                 tracing::info!("收到退出信号");
-                host.disconnect_all();
+                if let Some(c) = &ctl {
+                    c.close();
+                }
+                if let Some(h) = &host {
+                    h.disconnect_all();
+                }
                 let _ = std::fs::remove_file(dir.join("status.json"));
                 return 0;
             }
         }
+        let Some(h) = host.clone() else { continue };
+        let now = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if now == last {
+            continue;
+        }
+        last = now;
+        // 换了服务器（或退出了服务器）：停掉现在的被控服务，下一轮按新配置启动
+        let disk = HostState::load(&path);
+        if disk.server != h.cfg.server.to_string_full() {
+            tracing::info!("服务器地址变了，重启被控服务");
+            if let Some(c) = &ctl {
+                c.set_host(None);
+            }
+            h.shutdown();
+            host = None;
+            continue;
+        }
+        if h.reload_from_disk() {
+            tracing::info!("已重新读取账号配置");
+        }
     }
+}
+
+async fn start_host(os: Arc<dyn WorkerOs>, dir: &Path, server: ServerAddr) -> anyhow::Result<Arc<HostService>> {
+    let id = Identity::load_or_create(&store(dir));
+    // 以最高权限运行时，文件操作交给以目标用户身份启动的子进程
+    let helper = if galaxy_host::sysuser::is_root() { std::env::current_exe().ok() } else { None };
+    let cfg = HostConfig { server, data_dir: dir.to_path_buf(), meta: meta(os.as_ref(), DeviceKind::Worker), multi_account: true, file_helper: helper };
+    let host = HostService::start(cfg, id).await?;
+    if let Some(p) = platform_for(&*os) {
+        host.set_platform(p);
+    }
+    tracing::info!("LemonGalaxy worker {VERSION} 已启动，设备 {}", host.identity.device_id);
+    Ok(host)
+}
+
+/// 还没登录时也写 status.json，命令行 status 据此知道服务在运行。
+fn write_waiting_status(dir: &Path, device_id: &str) {
+    let st = HostState::load(&dir.join("host.json"));
+    let s = galaxy_host::HostStatus { online: false, server: st.server.clone(), device_id: device_id.into(), accounts: vec![], sessions: vec![], assist: None, remote_enabled: st.remote_enabled, public_ip: String::new() };
+    if let Ok(b) = serde_json::to_vec_pretty(&s) {
+        let p = dir.join("status.json");
+        let tmp = p.with_extension("tmp");
+        if std::fs::write(&tmp, b).is_ok() {
+            let _ = std::fs::rename(tmp, p);
+        }
+    }
+}
+
+/// Windows 没有本机控制接口（界面另有做法）。
+#[cfg(not(unix))]
+struct NoControl;
+#[cfg(not(unix))]
+impl NoControl {
+    fn set_host(&self, _h: Option<Arc<HostService>>) {}
+    async fn woken(&self) {
+        std::future::pending::<()>().await
+    }
+    fn close(&self) {}
 }
 
 pub async fn shutdown_signal() {
@@ -750,6 +842,8 @@ fn platform_name(os: &dyn WorkerOs) -> &'static str {
         Platform::Windows if cfg!(target_vendor = "win7") => "windows7",
         Platform::Windows => "windows",
         Platform::Macos => "macos",
+        // musl 静态精简版（Alpine 等）单独发布，不能更新成 glibc 版
+        _ if cfg!(target_env = "musl") => "linux-musl",
         _ => "linux",
     }
 }

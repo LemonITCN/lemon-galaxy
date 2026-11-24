@@ -22,7 +22,7 @@
 |---|---|---|
 | `lemon-galaxy-server` | 服务器：账号、设备、在线状态、信令、打洞协助、中转、端到端加密库同步、大模型网关、自动更新分发、Web 管理后台 | Rust（axum + rustls + quinn）、SQLite 单文件、Vue 3 + antdv-next 后台打进同一个可执行文件 |
 | `lemon-galaxy-common-rust` | 公共内核：协议、加密、连接层、会话、终端/文件/命令执行、AI 智能体、SSH 客户端、FFI | Rust workspace |
-| `lemon-galaxy-worker-linux` | Linux 纯被控端，命令行工具 + 后台服务 | Rust，静态编译单文件（x86_64 / ARM64） |
+| `lemon-galaxy-worker-linux` | Linux 纯被控端：内核（命令行 + 系统服务 + 桌面会话画面代理 + 虚拟桌面）与图形界面（窗口 + 托盘），见 [linux-desktop.md](linux-desktop.md) | Rust；内核只依赖 glibc 2.17（另有 musl 静态精简版），界面 GTK 3；x86_64 / ARM64 |
 | `lemon-galaxy-worker-macos` | macOS 纯被控端（小体积，菜单栏状态 + 登录） | Swift + Rust 内核（后续期） |
 | `lemon-galaxy-worker-windows` | Windows 纯被控端（小体积） | Rust + Win32：系统服务 + 会话画面代理 |
 | `lemon-galaxy-control-macos` | Mac 主控 + 被控 | SwiftUI + AppKit，macOS 13 起 |
@@ -34,7 +34,7 @@
 ### 2.1 三类客户端
 
 - **control**（Windows / macOS）：主控 + 被控。**同一时间只能登录一个账号**，主控和被控都用这个账号。
-- **worker**（Windows / macOS / Linux）：纯被控，体积小。**可以同时登录多个账号**，出现在每个账号各自的设备列表里，能被这些账号分别控制。Linux 只有 worker，是命令行工具。
+- **worker**（Windows / macOS / Linux）：纯被控，体积小。**可以同时登录多个账号**，出现在每个账号各自的设备列表里，能被这些账号分别控制。Linux 只有 worker：有桌面的机器装 .deb / .rpm 得到窗口 + 托盘，服务器用单文件命令行；都能远程桌面（2026-11-24 起，见 [linux-desktop.md](linux-desktop.md)）。
 - **mobile**（安卓 / iOS / 鸿蒙）：纯主控，不能被控。
 
 被控能力在所有端是同一套内核逻辑（`galaxy-host`）。control 与 worker 的区别只在「能登录几个账号」这条规则上。
@@ -140,7 +140,7 @@
 | Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2 | 是（worker） | 是（control, WPF） | 截屏用 GDI（7）或桌面复制（8+）；无虚拟屏；终端用 winpty |
 | Windows 10 / 11 / Server 2016+ | 是 | 是 | 全功能；10 1607 起支持虚拟屏；ARM64 原生 |
 | macOS 13+ | 是 | 是 | 首次需本人授权「屏幕录制」「辅助功能」；Apple 芯片 + Intel 通用 |
-| Linux（x86_64 / ARM64，任意发行版） | 是（终端 / 文件 / 端口映射 / AI 命令） | 否 | 静态编译单文件；有 root 装系统服务，无 root 装用户级服务 |
+| Linux（x86_64 / ARM64，glibc 2.17 起；musl 精简版任意发行版） | 是（远程桌面、终端、文件、端口映射、AI） | 否 | X11 全支持（含登录界面）；GNOME Wayland 走 Mutter（无人值守），其他 Wayland 走桌面门户（首次本人点允许）；没人登录时开虚拟桌面；NVENC / VA-API 显卡编码；有 root 装系统服务，无 root 装用户级服务 |
 | Android 8.0+ | 否 | 是（mobile） | |
 | iOS / iPadOS | 否 | 是（mobile，后续期） | TestFlight 分发 |
 | HarmonyOS NEXT | 否 | 是（mobile，后续期） | |

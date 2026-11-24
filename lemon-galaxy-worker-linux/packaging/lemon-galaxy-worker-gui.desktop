@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=LemonGalaxy
+Name[zh_CN]=LemonGalaxy
+Comment=Shows whether someone is controlling this computer
+Comment[zh_CN]=在托盘里显示有没有人在控制这台电脑
+Exec=lemon-galaxy-worker-gui --tray
+Icon=lemon-galaxy-worker
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+X-KDE-autostart-after=panel

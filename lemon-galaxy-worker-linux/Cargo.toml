@@ -1,6 +1,6 @@
 [package]
 name = "lemon-galaxy-worker-linux"
-description = "LemonGalaxy Linux 被控端（命令行）"
+description = "LemonGalaxy Linux 被控端：命令行 + 系统服务 + 桌面会话画面代理（X11 / Wayland、显卡编码、虚拟桌面）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,28 @@ publish.workspace = true
 name = "lemon-galaxy-worker"
 path = "src/main.rs"
 
+[features]
+default = ["desktop"]
+# 远程桌面（画面、键鼠、剪贴板、声音、虚拟桌面）。musl 静态精简版关掉它，只剩终端与文件。
+desktop = ["dep:x11rb", "dep:zbus", "dep:openh264", "dep:jpeg-encoder"]
+
 [dependencies]
 galaxy-proto.workspace = true
 galaxy-host.workspace = true
 galaxy-worker.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+postcard.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+libc = "0.2"
+nix = { version = "0.29", features = ["user", "process", "signal", "fs", "socket", "uio"] }
+
+# 纯 Rust 的 X11 客户端（不链接 libX11 / libxcb；别开 allow-unsafe-code，它会带进 libxcb 绑定），扩展：共享内存截屏、模拟输入、光标、多显示器、变化检测
+x11rb = { version = "0.13", optional = true, default-features = false, features = ["shm", "xtest", "xfixes", "randr", "damage"] }
+# 纯 Rust 的 D-Bus：Mutter 远程桌面、桌面门户、logind、polkit
+zbus = { version = "5", optional = true, default-features = false, features = ["blocking-api", "async-io"] }
+openh264 = { version = "0.9", optional = true }
+jpeg-encoder = { version = "0.7", optional = true }

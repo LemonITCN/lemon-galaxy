@@ -416,6 +416,11 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             if !p.view {
                 return MgmtResp::Error(denied("没有查看画面的权限"));
             }
+            // Linux：没有可看的图形会话时给这个账号的系统用户开虚拟桌面
+            {
+                let (pl, user, mode) = (platform.clone(), p.system_user.clone(), host.headless_display());
+                let _ = tokio::task::spawn_blocking(move || pl.prepare_desktop(&user, mode)).await;
+            }
             // 本机没有亮着的显示器时先加无头兜底屏
             host.ensure_headless_display().await;
             MgmtResp::Displays(platform.list_displays())

@@ -31,6 +31,10 @@ pub fn classify_asset(name: &str) -> Option<(&'static str, &'static str, String)
             other => other.into(),
         }
     };
+    // musl 静态精简版（Alpine 等）单独算一个平台，不能和 glibc 版互相更新
+    if lower.starts_with("lemon-galaxy-worker-") && lower.contains("-linux-musl-") {
+        return Some(("worker", "linux-musl", arch_of(&lower)));
+    }
     if lower.starts_with("lemon-galaxy-worker-") && lower.contains("-linux-") {
         return Some(("worker", "linux", arch_of(&lower)));
     }
@@ -103,6 +107,10 @@ mod tests {
         assert_eq!(classify_asset("LemonGalaxyWorker-0.1.0.5-macOS.dmg"), Some(("worker", "macos", "universal".into())));
         assert_eq!(classify_asset("LemonGalaxy-0.1.0.5-Android.apk"), Some(("mobile", "android", "universal".into())));
         assert_eq!(classify_asset("lemon-galaxy-worker-0.1.0.5-linux-aarch64"), Some(("worker", "linux", "aarch64".into())));
+        assert_eq!(classify_asset("lemon-galaxy-worker-0.1.0.5-linux-musl-x86_64"), Some(("worker", "linux-musl", "x86_64".into())));
+        // 安装包不参与自动更新
+        assert_eq!(classify_asset("lemon-galaxy-worker_0.1.0.5_amd64.deb"), None);
+        assert_eq!(classify_asset("lemon-galaxy-worker-0.1.0.5.x86_64.rpm"), None);
         assert_eq!(classify_asset("lemon-galaxy-worker-0.1.0.5-windows-x86_64.exe"), Some(("worker", "windows", "x86_64".into())));
         assert_eq!(classify_asset("LemonGalaxy-0.1.0.5-windows-x64.zip"), Some(("control", "windows", "x86_64".into())));
         assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-linux-x86_64.tar.gz"), Some(("server", "linux", "x86_64".into())));

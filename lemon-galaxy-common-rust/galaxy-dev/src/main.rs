@@ -18,6 +18,9 @@
 //!                                             虚拟屏：加一块、列屏、开画面数帧、删掉、再列屏（断开时被控端也会自动删）
 //! galaxy-dev --data <目录> view <设备> <屏幕 id> [秒数]    看画面（不解码），每秒打印收到的帧数与分辨率
 //! galaxy-dev --data <目录> vd-add <设备> <块数> [宽 高 刷新率]   连加几块（验证上限），列屏后直接断开（验证会话结束自动删屏）
+//! galaxy-dev --data <目录> shot <设备> <屏幕 id> <输出 .jpg>   截一张图存到本机
+//! galaxy-dev --data <目录> clip-text <设备> [set <文字>]      读（或写）远端剪贴板文字
+//! galaxy-dev --data <目录> type <设备> <屏幕 id> <文字> [x y]  打开画面，（先在 x,y 点一下）再输入文字
 //! galaxy-dev --data <目录> assist <设备码> <验证码> <命令>
 //! galaxy-dev --data <目录> vault-test
 //! galaxy-dev release-sign <文件>            用环境变量 LEMONGALAXY_RELEASE_SIGNING_KEY（base64 私钥种子）签名，写出 <文件>.sig
@@ -266,6 +269,43 @@ async fn main() -> anyhow::Result<()> {
                         let (w, h) = *sink.size.lock().unwrap();
                         println!("第 {} 秒：累计 {} 帧，{w}x{h}", i + 1, sink.frames.load(std::sync::atomic::Ordering::Relaxed));
                     }
+                    ch.stop().await;
+                }
+                "shot" => {
+                    let display: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let img = session.screenshot(display, 0, 0).await?;
+                    std::fs::write(&args[3], &img.data)?;
+                    println!("截图 {}x{} {} 字节 → {}", img.width, img.height, img.data.len(), args[3]);
+                }
+                "clip-text" => {
+                    if args.get(2).map(|s| s.as_str()) == Some("set") {
+                        session.clipboard_set(galaxy_proto::peer::ClipboardData::Text(args[3..].join(" "))).await?;
+                        println!("已设置远端剪贴板");
+                    } else {
+                        match session.clipboard_get().await? {
+                            Some(galaxy_proto::peer::ClipboardData::Text(t)) => println!("剪贴板文字：{t}"),
+                            Some(galaxy_proto::peer::ClipboardData::Files(f)) => println!("剪贴板文件：{f:?}"),
+                            Some(galaxy_proto::peer::ClipboardData::Image(i)) => println!("剪贴板图片：{} {}x{}", i.mime, i.width, i.height),
+                            None => println!("剪贴板：空"),
+                        }
+                    }
+                }
+                "type" => {
+                    use galaxy_proto::peer::{InputEvent, MouseButton};
+                    let display: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let sink = Arc::new(FrameCount::default());
+                    let req = galaxy_proto::peer::DisplayRequest { display_id: display, codecs: vec![galaxy_proto::peer::VideoCodec::H264], max_fps: 30, bitrate_kbps: 4000, view_only: false };
+                    let ch = session.open_display(req, sink.clone()).await?;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if let (Some(x), Some(y)) = (args.get(4).and_then(|s| s.parse().ok()), args.get(5).and_then(|s| s.parse().ok())) {
+                        ch.send_input(InputEvent::MouseMove { x, y }).await;
+                        ch.send_input(InputEvent::MouseButton { button: MouseButton::Left, down: true, x, y }).await;
+                        ch.send_input(InputEvent::MouseButton { button: MouseButton::Left, down: false, x, y }).await;
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                    ch.send_input(InputEvent::Text { text: args[3].clone() }).await;
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    println!("已输入，收到 {} 帧", sink.frames.load(std::sync::atomic::Ordering::Relaxed));
                     ch.stop().await;
                 }
                 "vd-add" => {

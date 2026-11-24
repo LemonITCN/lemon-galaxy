@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- 装到 /usr/share/polkit-1/actions/。图形界面改被控服务的设置（登录、改权限、开机自启、更新等）时由服务向 polkit 请求这个动作。 -->
+<policyconfig>
+  <vendor>LemonGalaxy</vendor>
+  <vendor_url>https://github.com/LemonITCN/lemon-galaxy</vendor_url>
+  <icon_name>lemon-galaxy-worker</icon_name>
+
+  <action id="cn.lemonit.galaxy.worker.manage">
+    <description>Manage the LemonGalaxy worker</description>
+    <description xml:lang="zh_CN">管理 LemonGalaxy 被控端</description>
+    <message>Authentication is required to change LemonGalaxy remote control settings</message>
+    <message xml:lang="zh_CN">修改 LemonGalaxy 远程控制设置需要管理员授权</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

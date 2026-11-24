@@ -1,0 +1,24 @@
+[package]
+name = "lemon-galaxy-worker-gui"
+description = "LemonGalaxy Linux 被控端的图形界面与托盘：经本机控制接口遥控被控服务（docs/linux-desktop.md 第 8 节）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lemon-galaxy-worker-gui"
+path = "src/main.rs"
+
+[dependencies]
+# 消息类型直接引入 galaxy-worker/src/control.rs（见 main.rs），这里只要它用到的
+galaxy-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# 只在 Linux 上有界面；其他系统编出来只是一个提示，不影响整个工作区在 macOS / Windows 上编译
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+async-channel = "2"
+# 托盘：StatusNotifierItem，纯 Rust 的 D-Bus（不依赖 libappindicator / libdbus）
+ksni = { version = "0.3", default-features = false, features = ["blocking", "tokio"] }
