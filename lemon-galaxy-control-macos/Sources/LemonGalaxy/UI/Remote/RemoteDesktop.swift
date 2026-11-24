@@ -56,6 +56,10 @@ final class RemoteDesktopModel: TabModel {
     /// 自动重连（docs/protocol.md 8.3「画面结束」）：正在进行的重连任务与最近一次失败原因
     private var reconnectTask: Task<Void, Never>?
     private var lastReconnectError: String?
+    /// 已用掉的重试次数：真正出了画面才清零（打开了却一帧不来又被关掉时接着用剩下的次数，不会无限循环）
+    private var reconnectAttempt = 0
+    /// 这个标签出过画面没有：一次画面都没出过就断的直接显示失败，不自动重连
+    private var everStreamed = false
     /// 重连间隔：约 2 分钟后放弃，显示失败与重试
     private static let reconnectDelays: [Double] = [1, 2, 4, 8, 15, 15, 15, 15, 15, 15]
     let videoView = RemoteVideoNSView()
@@ -102,6 +106,7 @@ final class RemoteDesktopModel: TabModel {
         // 手动重试：放弃正在等的自动重连，从头来
         reconnectTask?.cancel()
         reconnectTask = nil
+        reconnectAttempt = 0
         Task {
             guard let app, let deviceId else { return }
             do {
@@ -181,7 +186,11 @@ final class RemoteDesktopModel: TabModel {
     private func show(_ pb: CVPixelBuffer) {
         frameCount += 1
         framesDecoded += 1
-        if phase != .streaming { phase = .streaming }
+        if phase != .streaming {
+            phase = .streaming
+            everStreamed = true
+            reconnectAttempt = 0
+        }
         videoView.display(pb)
     }
 
@@ -199,21 +208,41 @@ final class RemoteDesktopModel: TabModel {
         if reconnectTask != nil { return }
         channel = nil
         live = false
+        // 一次画面都没出过（第一次就没打开）：直接失败，由用户点重试
+        guard everStreamed else {
+            phase = .failed(reason)
+            return
+        }
         phase = .reconnecting
         lastReconnectError = nil
+        let first = reconnectAttempt
         reconnectTask = Task { [weak self] in
-            for (i, delay) in Self.reconnectDelays.enumerated() {
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                guard let self, !Task.isCancelled, !self.closed else { return }
-                if await self.reconnectOnce(reopenOnly: reopenOnly && i == 0) {
-                    self.reconnectTask = nil
+            while let me = self, !Task.isCancelled, !me.closed, me.reconnectAttempt < Self.reconnectDelays.count {
+                let i = me.reconnectAttempt
+                me.reconnectAttempt += 1
+                try? await Task.sleep(nanoseconds: UInt64(Self.reconnectDelays[i] * 1_000_000_000))
+                guard let me = self, !Task.isCancelled, !me.closed else { return }
+                // 打开了还要等到第一帧才算连上
+                if await me.reconnectOnce(reopenOnly: reopenOnly && i == first), await me.waitFirstFrame() {
+                    me.reconnectTask = nil
                     return
                 }
             }
-            guard let self, !Task.isCancelled, !self.closed else { return }
-            self.reconnectTask = nil
-            self.phase = .failed(self.lastReconnectError ?? reason)
+            guard let me = self, !Task.isCancelled, !me.closed else { return }
+            me.reconnectTask = nil
+            me.phase = .failed(me.lastReconnectError ?? reason)
         }
+    }
+
+    /// 重连打开画面后等第一帧（最多 20 秒）
+    private func waitFirstFrame() async -> Bool {
+        for _ in 0..<80 {
+            if phase == .streaming { return true }
+            if closed { return false }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        lastReconnectError = L("remote.noResponse")
+        return false
     }
 
     /// 重连一次：会话还在且只是画面断了就只重开画面，否则重新建会话；回到原来那块屏（没了就主屏）

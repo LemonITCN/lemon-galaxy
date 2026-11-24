@@ -259,6 +259,7 @@
   "sftp.state.paused": "Paused",
   "sftp.state.done": "Done",
   "sftp.state.cancelled": "Cancelled",
+  "remote.noResponse": "The screen is not responding",
   "remote.reconnecting": "Connection lost, reconnecting…",
   "remote.connecting": "Connecting display…",
   "remote.noDisplay": "No display available on the remote device",
