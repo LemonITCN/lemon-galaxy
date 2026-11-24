@@ -30,6 +30,8 @@ case "$FLAVOR" in
   *) echo "不认识的版本：$FLAVOR（win7-x64 / win7-x86 / xp）" >&2; exit 2 ;;
 esac
 
+# Python 在 Windows 上默认按控制台代码页输出，打中文会抛 UnicodeEncodeError
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
 winpath() { if command -v cygpath >/dev/null; then cygpath -w "$1"; else echo "$1"; fi; }
 fetch() { # 地址 SHA-256 保存到
   if [ -f "$3" ] && echo "$2  $3" | sha256sum -c --status; then return; fi

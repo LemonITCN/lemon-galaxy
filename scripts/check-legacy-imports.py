@@ -67,6 +67,10 @@ def load_imports(path):
 
 
 def main():
+    # Windows 控制台默认代码页（CI 上是 cp1252）打不出中文，统一按 UTF-8 输出
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     if len(sys.argv) != 3:
         print(__doc__)
         return 2
