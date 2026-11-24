@@ -34,7 +34,8 @@ if [ "$TEST" = 1 ]; then
   swift test
 fi
 
-DD="$ROOT/build"
+# .noindex：不被聚焦索引，iPhone / 模拟器版的 LemonGalaxy.app 不会出现在 Mac 的应用列表里（显示成打叉的禁用图标）
+DD="$ROOT/build.noindex"
 COMMON=(-project LemonGalaxy.xcodeproj -scheme LemonGalaxy -configuration "$CONFIG" -derivedDataPath "$DD"
         CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= -skipPackagePluginValidation)
 # 包清单读环境变量（LEMONGALAXY_NO_CORE）：换内核模式后要让 Xcode 重新解析
