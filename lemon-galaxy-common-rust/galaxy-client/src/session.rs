@@ -24,6 +24,26 @@ pub trait VideoSink: Send + Sync {
     fn on_config(&self, codec: VideoCodec, width: u32, height: u32);
     fn on_frame(&self, data: Vec<u8>, pts_us: u64, keyframe: bool);
     fn on_cursor(&self, x: i32, y: i32, visible: bool);
+    /// 画面不是我们自己停的却结束了：被控端结束了画面流、流断了、或者画面没有响应（见 open_display）。
+    /// 每个画面最多一次；自己调 DisplayChannel::stop 时不会来。
+    fn on_closed(&self, _reason: String) {}
+}
+
+/// 画面结束的通知只发一次（被控端结束、流出错、看门狗判定没有响应，谁先到算谁；自己停的不发）。
+struct CloseOnce {
+    done: Arc<std::sync::atomic::AtomicBool>,
+    sink: Arc<dyn VideoSink>,
+}
+
+impl CloseOnce {
+    fn fire(&self, reason: String) {
+        if !self.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.sink.on_closed(reason);
+        }
+    }
+    fn is_done(&self) -> bool {
+        self.done.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 pub trait TransferProgress: Send + Sync {
@@ -508,12 +528,22 @@ impl PeerSession {
         self.video.lock().insert(channel, tx);
         let recorder: Arc<Mutex<Option<Arc<crate::record::Recorder>>>> = Default::default();
         let dims = Arc::new(std::sync::atomic::AtomicU64::new(((w as u64) << 32) | h as u64));
-        let ch = Arc::new(DisplayChannel { send: tokio::sync::Mutex::new(send), channel, recorder: recorder.clone(), dims: dims.clone() });
-        // 控制消息
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ch = Arc::new(DisplayChannel { send: tokio::sync::Mutex::new(send), channel, recorder: recorder.clone(), dims: dims.clone(), closed: closed.clone() });
+        let close_once = Arc::new(CloseOnce { done: closed, sink: sink.clone() });
+        // 被控端空闲时也每秒至少发一帧（能力 video_keepalive）时才能用「多久没数据」判断画面卡死
+        let keepalive = self.ack.capabilities.iter().any(|c| c == CAP_VIDEO_KEEPALIVE);
+        // 控制消息；这条流结束（被控端结束画面、出错、断线）要告诉界面，不然界面停在最后一帧还以为连着
         let sink2 = sink.clone();
         let rec2 = recorder.clone();
+        let close2 = close_once.clone();
         tokio::spawn(async move {
-            while let Ok(Some(m)) = frame::read::<DisplayOut>(&mut recv).await {
+            let reason = loop {
+                let m = match frame::read::<DisplayOut>(&mut recv).await {
+                    Ok(Some(m)) => m,
+                    Ok(None) => break "被控端结束了画面".to_string(),
+                    Err(e) => break format!("画面连接中断：{e}"),
+                };
                 match m {
                     DisplayOut::Cursor { x, y, visible } => sink2.on_cursor(x, y, visible),
                     DisplayOut::Resized { width, height } => {
@@ -523,9 +553,11 @@ impl PeerSession {
                         }
                         sink2.on_config(codec, width, height)
                     }
+                    DisplayOut::Error(e) => break e.message,
                     _ => {}
                 }
-            }
+            };
+            close2.fire(reason);
         });
         // 重组：收不齐、跳号的帧都算丢帧；丢帧后到关键帧之前的帧不交给解码器，并要关键帧（见 Reassembler）
         let ch2 = Arc::downgrade(&ch);
@@ -533,6 +565,10 @@ impl PeerSession {
             let mut asm = Reassembler::default();
             // 刚打开时被控端第一帧就是关键帧，先等一会再催
             let mut last_kf_req = std::time::Instant::now();
+            // 看门狗：最后一次收到画面数据的时间，以及这段静默里有没有探过（要过关键帧）
+            let mut last_data = std::time::Instant::now();
+            let mut got_any = false;
+            let mut probed = false;
             loop {
                 // 没有新数据时也要定时检查：收不齐的帧超时、等关键帧时重催
                 let got = match tokio::time::timeout(KEYFRAME_POLL, rx.recv()).await {
@@ -541,6 +577,32 @@ impl PeerSession {
                     Err(_) => None,
                 };
                 let now = std::time::Instant::now();
+                if got.is_some() {
+                    last_data = now;
+                    got_any = true;
+                    probed = false;
+                }
+                if close_once.is_done() {
+                    break;
+                }
+                if keepalive {
+                    let quiet = now.duration_since(last_data);
+                    if quiet >= STALL_PROBE && !probed {
+                        // 被控端本该每秒至少一帧：先要个关键帧探一下
+                        probed = true;
+                        last_kf_req = now;
+                        if let Some(c) = ch2.upgrade() {
+                            c.request_keyframe().await;
+                        }
+                    }
+                    if quiet >= if got_any { STALL_DEAD } else { STALL_DEAD_FIRST } {
+                        close_once.fire("画面没有响应".into());
+                        if let Some(c) = ch2.upgrade() {
+                            c.stop().await;
+                        }
+                        break;
+                    }
+                }
                 let step = match got.as_ref().and_then(|d| VideoFragHeader::decode(d).map(|(h, pos)| (h, d.slice(pos..)))) {
                     Some((h, payload)) => asm.push(h, payload, now),
                     None => asm.tick(now),
@@ -678,6 +740,8 @@ pub struct DisplayChannel {
     recorder: Arc<Mutex<Option<Arc<crate::record::Recorder>>>>,
     /// 当前画面尺寸（高 32 位宽、低 32 位高）
     dims: Arc<std::sync::atomic::AtomicU64>,
+    /// 画面已结束（自己停的或已通知过界面），之后不再通知
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DisplayChannel {
@@ -718,6 +782,8 @@ impl DisplayChannel {
         let _ = frame::write(&mut *self.send.lock().await, &DisplayIn::SetBitrate(kbps)).await;
     }
     pub async fn stop(&self) {
+        // 自己停的：之后这条流结束不再当成「画面断了」通知界面
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         let mut s = self.send.lock().await;
         let _ = frame::write(&mut *s, &DisplayIn::Stop).await;
         let _ = s.finish();
@@ -733,6 +799,12 @@ const KEYFRAME_REQ_MIN_GAP: Duration = Duration::from_millis(100);
 const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
 /// 没有新数据时多久检查一次超时与重催
 const KEYFRAME_POLL: Duration = Duration::from_millis(100);
+/// 看门狗（被控端有 video_keepalive 时）：这么久没有画面数据先要关键帧探一下
+const STALL_PROBE: Duration = Duration::from_secs(4);
+/// 再久还没有就判定画面没有响应，结束画面让界面重连
+const STALL_DEAD: Duration = Duration::from_secs(10);
+/// 刚打开、一帧都还没收到时多给点时间（被控端可能在开虚拟桌面）
+const STALL_DEAD_FIRST: Duration = Duration::from_secs(20);
 
 /// `a` 不晚于 `b`（帧号回绕也对）
 fn seq_le(a: u32, b: u32) -> bool {

@@ -174,6 +174,10 @@ pub enum MgmtReq {
     VirtualDisplayRemove { display_id: u32 },
     /// AI 应用操作（docs/computer-use.md）：请求是 JSON，需要控制权限，能力列表有 "computer_use"。放在最后，老版本的变体编号不变
     ComputerUse { request: String, origin: Origin },
+    /// 复制粘贴文件（docs/protocol.md 8.4.1）：本机复制的文件清单放到被控端剪贴板，内容等对方粘贴时
+    /// 由被控端经反向流（`ReverseOpen::ClipboardRead`）来读。需要剪贴板与文件权限，能力列表有 "clipboard_offer"。
+    /// 放在最后，老版本的变体编号不变
+    ClipboardOffer(ClipOffer),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -194,9 +198,101 @@ pub enum MgmtResp {
 /// AI 应用操作能力（docs/computer-use.md）
 pub const CAP_COMPUTER_USE: &str = "computer_use";
 
+/// 被控端空闲时也每秒至少发一帧画面（保活）。主控端据此判断画面卡死：几秒没数据先要关键帧，再没有就结束画面重连。
+/// 不报这个能力的被控端（如 macOS 被控端画面不变时不发帧）主控端不做这个判断。
+pub const CAP_VIDEO_KEEPALIVE: &str = "video_keepalive";
+
 /// 虚拟屏能力：能力列表里有 "virtual_display"，另有 "virtual_display_max=N" 给出主控最多能加几块。
 pub const CAP_VIRTUAL_DISPLAY: &str = "virtual_display";
 pub const CAP_VIRTUAL_DISPLAY_MAX: &str = "virtual_display_max";
+
+// ---------------- 复制粘贴文件（粘贴时才传，docs/protocol.md 8.4.1） ----------------
+
+/// 被控端支持「文件清单放进剪贴板、粘贴时才读内容」（`MgmtReq::ClipboardOffer`）。没有时主控端照旧整批上传。
+pub const CAP_CLIPBOARD_OFFER: &str = "clipboard_offer";
+
+/// 一份清单最多多少项（文件与文件夹合计）
+pub const CLIP_OFFER_MAX_ENTRIES: usize = 10_000;
+
+/// 剪贴板文件清单里的一项。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipOfferEntry {
+    /// 相对路径，用 '/' 分隔；顶层项（复制的那几项）没有 '/'。文件夹排在它的内容前面
+    pub path: String,
+    pub is_dir: bool,
+    /// 文件大小（文件夹为 0）
+    pub size: u64,
+    /// 修改时间（Unix 秒，不知道时为 0）
+    pub mtime: i64,
+}
+
+/// 剪贴板文件清单：复制时只交换这个，粘贴时才按项读内容。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipOffer {
+    /// 复制方生成的随机编号；读内容时带上
+    pub id: u64,
+    pub entries: Vec<ClipOfferEntry>,
+}
+
+impl ClipOffer {
+    pub fn total_bytes(&self) -> u64 {
+        self.entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum()
+    }
+
+    /// 顶层项（复制的那几项）的下标
+    pub fn top_level(&self) -> Vec<usize> {
+        self.entries.iter().enumerate().filter(|(_, e)| !e.path.contains('/')).map(|(i, _)| i).collect()
+    }
+
+    /// 粘贴方落盘前必须校验：路径只能是安全的相对路径（不能逃出粘贴目标目录），父文件夹排在前面，不超上限。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.entries.is_empty() {
+            return Err("清单是空的".into());
+        }
+        if self.entries.len() > CLIP_OFFER_MAX_ENTRIES {
+            return Err(format!("超过 {CLIP_OFFER_MAX_ENTRIES} 项"));
+        }
+        let mut dirs = std::collections::HashSet::new();
+        let mut seen = std::collections::HashSet::new();
+        for e in &self.entries {
+            let p = e.path.as_str();
+            if p.is_empty() || p.len() > 4096 || p.contains(['\\', '\0']) {
+                return Err(format!("路径无效：{p}"));
+            }
+            if p.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+                return Err(format!("路径无效：{p}"));
+            }
+            if let Some((parent, _)) = p.rsplit_once('/') {
+                if !dirs.contains(parent) {
+                    return Err(format!("{p} 的上级文件夹不在它前面"));
+                }
+            }
+            if !seen.insert(p) {
+                return Err(format!("重复的路径：{p}"));
+            }
+            if e.is_dir {
+                dirs.insert(p);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 被控端向主控端开的流（反向）的第一帧。只有发过 `ClipboardOffer` 的主控端会收到。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ReverseOpen {
+    /// 读清单 `offer_id` 第 `index` 项（必须是文件）从 `offset` 到末尾的内容。
+    /// 主控端先回 `ClipReadReply`，是 Ok 时接着发原始字节（不分帧）直到文件末尾，然后结束流。
+    /// 被控端中途不要了就 stop 这条流。
+    ClipboardRead { offer_id: u64, index: u32, offset: u64 },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ClipReadReply {
+    /// `size` 是文件现在的大小（可能和清单里的不同：复制后文件又变了）
+    Ok { size: u64 },
+    Error(PeerError),
+}
 
 /// 能力列表里 `key=value` 形式的值（如 `virtual_display_max=3`）。
 pub fn capability_value<'a>(caps: &'a [String], key: &str) -> Option<&'a str> {
@@ -513,6 +609,28 @@ impl AudioPacketHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn offer(paths: &[(&str, bool)]) -> ClipOffer {
+        ClipOffer { id: 1, entries: paths.iter().map(|(p, d)| ClipOfferEntry { path: p.to_string(), is_dir: *d, size: if *d { 0 } else { 3 }, mtime: 0 }).collect() }
+    }
+
+    #[test]
+    fn clip_offer_validate() {
+        let ok = offer(&[("报告", true), ("报告/a.txt", false), ("报告/子", true), ("报告/子/b.bin", false), ("top.txt", false)]);
+        assert_eq!(ok.validate(), Ok(()));
+        assert_eq!(ok.total_bytes(), 9);
+        assert_eq!(ok.top_level(), vec![0, 4]);
+        // 逃出目标目录、绝对路径、空段、反斜杠
+        for bad in ["../x", "a/../../x", "/etc/passwd", "a//b", "./a", "a\\..\\x", "", "a\0b"] {
+            assert!(offer(&[("a", true), (bad, false)]).validate().is_err(), "{bad:?} 应该被拒");
+        }
+        // 上级文件夹不在前面、上级是文件、重复
+        assert!(offer(&[("d/x", false), ("d", true)]).validate().is_err());
+        assert!(offer(&[("d", false), ("d/x", false)]).validate().is_err());
+        assert!(offer(&[("a", false), ("a", false)]).validate().is_err());
+        assert!(offer(&[]).validate().is_err());
+    }
+
     #[test]
     fn audio_header_roundtrip() {
         let h = AudioPacketHeader { channel: 9, seq: 0xdead_beef };

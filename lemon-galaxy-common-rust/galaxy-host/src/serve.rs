@@ -501,6 +501,8 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             platform.clipboard_set(d);
             MgmtResp::Ok
         }
+        // 复制粘贴文件（粘贴时才传，docs/protocol.md 8.4.1）：平台层还没接上，先拒绝（不报 clipboard_offer 能力的被控端主控端不会发）
+        MgmtReq::ClipboardOffer(_) => MgmtResp::Error(PeerError::new("unsupported", "这台设备还不支持粘贴时才传文件")),
         MgmtReq::WakeOnLan { mac } => {
             if !p.control && !p.terminal {
                 return MgmtResp::Error(denied("没有权限"));

@@ -434,7 +434,8 @@ impl HostPlatform for WinPlatform {
     }
 
     fn capabilities(&self) -> Vec<String> {
-        let mut c: Vec<String> = vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into(), "client_cursor".into(), galaxy_proto::peer::CAP_COMPUTER_USE.into()];
+        // 会话代理空闲时每秒至少编一帧（agent.rs），主控端据此判断画面卡死
+        let mut c: Vec<String> = vec!["display".into(), "screenshot".into(), "input".into(), "clipboard".into(), "privacy".into(), "client_cursor".into(), galaxy_proto::peer::CAP_COMPUTER_USE.into(), galaxy_proto::peer::CAP_VIDEO_KEEPALIVE.into()];
         if self.virtual_display_max() > 0 {
             c.push("virtual_display".into());
         }

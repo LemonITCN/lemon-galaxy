@@ -806,6 +806,9 @@ impl HostService {
         if perms.view && pc.iter().any(|x| x == "client_cursor") {
             c.push("client_cursor".into());
         }
+        if perms.view && pc.iter().any(|x| x == galaxy_proto::peer::CAP_VIDEO_KEEPALIVE) {
+            c.push(galaxy_proto::peer::CAP_VIDEO_KEEPALIVE.into());
+        }
         // 隐私屏要有控制权限（开着时被控端本地键鼠失效）
         if perms.control && pc.iter().any(|x| x == "privacy") {
             c.push("privacy".into());

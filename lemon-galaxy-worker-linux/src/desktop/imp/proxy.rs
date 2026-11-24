@@ -519,7 +519,8 @@ impl HostPlatform for LinuxPlatform {
         if !can {
             return vec![];
         }
-        let mut c: Vec<String> = ["display", "screenshot", "input", "clipboard", "client_cursor"].map(String::from).to_vec();
+        // 画面代理空闲时每秒至少编一帧（agent.rs），主控端据此判断画面卡死
+        let mut c: Vec<String> = ["display", "screenshot", "input", "clipboard", "client_cursor", galaxy_proto::peer::CAP_VIDEO_KEEPALIVE].map(String::from).to_vec();
         if super::audio::library_present() {
             c.push("audio".into());
         }

@@ -151,6 +151,9 @@ impl PeerSession {
                 fn on_cursor(&self, x: i32, y: i32, visible: bool) {
                     self.0.on_cursor(x, y, visible)
                 }
+                fn on_closed(&self, reason: String) {
+                    self.0.on_closed(reason)
+                }
             }
             let req = pp::DisplayRequest {
                 display_id: options.display_id,
