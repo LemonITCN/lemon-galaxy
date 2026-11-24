@@ -57,7 +57,7 @@ enum WorkerCore {
         #if LEMONGALAXY_REAL_CORE
         for d in [AppInfo.dataDir, AppInfo.cacheDir] { try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
         initCoreOnce(config(locale: locale))
-        let store = PrefixedSecureStore(base: KeychainStore(), prefix: "worker.")
+        let store = PrefixedSecureStore(base: LocalSecureStore(dir: AppInfo.secretsDir), prefix: "worker.")
         return Context(worker: WorkerHost(store: store), isMock: false, coreVersion: coreVersion())
         #else
         return Context(worker: MockWorkerHost(options: mockOptions), isMock: true, coreVersion: MockWorkerHost.version)

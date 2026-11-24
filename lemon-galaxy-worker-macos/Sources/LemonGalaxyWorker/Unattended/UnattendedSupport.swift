@@ -156,13 +156,13 @@ enum Migration {
         }
     }
 
-    /// 菜单栏应用（当前用户）的数据：~/Library/Application Support/LemonGalaxyWorker/worker + 钥匙串里的设备身份
+    /// 菜单栏应用（当前用户）的数据：~/Library/Application Support/LemonGalaxyWorker/worker + 本机安全存储里的设备身份（LocalSecureStore）
     static var localWorkerDir: URL { AppInfo.dataDir.appendingPathComponent("worker", isDirectory: true) }
 
     static func localBundle() -> MigrationBundle? {
         let dir = localWorkerDir
         guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("host.json").path) else { return nil }
-        let store = PrefixedSecureStore(base: KeychainStore(), prefix: "worker.")
+        let store = PrefixedSecureStore(base: LocalSecureStore(dir: AppInfo.secretsDir), prefix: "worker.")
         guard let id = store.get(key: "device_id"), let key = store.get(key: "device_key") else { return nil }
         return MigrationBundle(deviceId: id, deviceKey: key, files: collect(dir: dir), sourceUser: NSUserName())
     }
@@ -187,7 +187,7 @@ enum Migration {
             try fm.moveItem(at: dir, to: AppInfo.dataDir.appendingPathComponent("worker.backup-\(stamp)", isDirectory: true))
         }
         try write(b.files, to: dir)
-        let store = PrefixedSecureStore(base: KeychainStore(), prefix: "worker.")
+        let store = PrefixedSecureStore(base: LocalSecureStore(dir: AppInfo.secretsDir), prefix: "worker.")
         store.set(key: "device_id", value: b.deviceId)
         store.set(key: "device_key", value: b.deviceKey)
         try? fm.removeItem(at: AppInfo.dataDir.appendingPathComponent("worker.migrated", isDirectory: true))

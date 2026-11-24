@@ -164,8 +164,8 @@ final class AppModel: ObservableObject {
         self.selfTest = selfTest
         let adapter = ClientListenerAdapter()
         let wantsMock = forceMock || CoreProvider.wantsMock()
-        // 模拟内核不碰钥匙串（临时签名的开发包每次重编都会让钥匙串弹授权框）
-        let store: SecureStore = (selfTest || wantsMock) ? MemorySecureStore() : KeychainStore()
+        // 模拟内核只存内存；真内核存本机安全存储（临时签名的包存文件不碰钥匙串，见 LocalSecureStore）
+        let store: SecureStore = (selfTest || wantsMock) ? MemorySecureStore() : LocalSecureStore(dir: AppModel.dataDir.appendingPathComponent("secrets", isDirectory: true))
         for d in [AppModel.dataDir, AppModel.cacheDir] { try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
         let config = CoreConfig(dataDir: AppModel.dataDir.path, cacheDir: AppModel.cacheDir.path, logLevel: "info", platform: .macos,
                                 deviceKind: .control, appVersion: AppInfo.version, osVersion: AppInfo.osVersion,

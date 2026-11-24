@@ -60,6 +60,9 @@ enum AppInfo {
     static var cacheDir: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent(bundleId, isDirectory: true)
     }
+
+    /// 临时签名的包存设备身份等机密的目录（LocalSecureStore 的文件模式），与内核的 worker/ 分开，移交后台服务时不跟着改名
+    static var secretsDir: URL { dataDir.appendingPathComponent("secrets", isDirectory: true) }
 }
 
 /// 给钥匙串里的条目名加前缀：被控端的设备身份与同一台 Mac 上主控端的分开存（docs/ffi.md 5.1）。

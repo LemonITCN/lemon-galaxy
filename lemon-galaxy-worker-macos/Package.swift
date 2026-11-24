@@ -6,7 +6,7 @@
 //   Sources/LemonGalaxyWorker/   被控端自己的代码（Unattended/ 是无人值守：后台服务、会话代理、本机通信，见 docs/spec.md 3.0.1）
 //   Sources/Shared/              指向 Mac 主控端（lemon-galaxy-control-macos）源码的符号链接：
 //                                截屏编码与键鼠注入（MacHostPlatform / VideoEncoder / HIDKeyMap）、虚拟屏（VirtualDisplays）、
-//                                无头兜底屏设置（HeadlessDisplaySetting）、钥匙串（KeychainStore）、
+//                                无头兜底屏设置（HeadlessDisplaySetting）、本机安全存储（LocalSecureStore）、
 //                                NSLock 小工具（Util）、配色（Palette）、语言包底座（L10n）、通用小组件（Components）、
 //                                无内核时的类型镜像（BridgeMirror）。两端共用同一份实现，不另起分叉。
 //   CSources/CGVirtualDisplayBridge/  虚拟屏（CGVirtualDisplay 私有接口）的 Objective-C 封装，同样是指向主控端源码的符号链接
