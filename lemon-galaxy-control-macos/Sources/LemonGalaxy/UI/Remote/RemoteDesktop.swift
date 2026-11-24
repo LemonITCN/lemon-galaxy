@@ -8,7 +8,8 @@ import Combine
 /// 远程桌面标签：list_displays → open_display(VideoSink) → 解码显示；鼠标键盘 → InputEvent。
 @MainActor
 final class RemoteDesktopModel: TabModel {
-    enum Phase: Equatable { case connecting, streaming, failed(String) }
+    /// reconnecting：会话断开或画面意外结束后自动重连中（最后一帧压暗留着）
+    enum Phase: Equatable { case connecting, streaming, reconnecting, failed(String) }
     enum ScaleMode: String { case fit, original }
 
     @Published var phase: Phase = .connecting
@@ -52,6 +53,11 @@ final class RemoteDesktopModel: TabModel {
     @Published var virtualBusy = false
     private(set) var closed = false
     private var peerWatch: AnyCancellable?
+    /// 自动重连（docs/protocol.md 8.3「画面结束」）：正在进行的重连任务与最近一次失败原因
+    private var reconnectTask: Task<Void, Never>?
+    private var lastReconnectError: String?
+    /// 重连间隔：约 2 分钟后放弃，显示失败与重试
+    private static let reconnectDelays: [Double] = [1, 2, 4, 8, 15, 15, 15, 15, 15, 15]
     let videoView = RemoteVideoNSView()
     private var channel: DisplayChannel?
     private(set) var sinkAdapter: VideoSinkAdapter?
@@ -93,6 +99,9 @@ final class RemoteDesktopModel: TabModel {
     var platform: Platform { peer?.info.platform ?? app?.device(deviceId ?? "")?.platform ?? .windows }
 
     func start() {
+        // 手动重试：放弃正在等的自动重连，从头来
+        reconnectTask?.cancel()
+        reconnectTask = nil
         Task {
             guard let app, let deviceId else { return }
             do {
@@ -125,14 +134,16 @@ final class RemoteDesktopModel: TabModel {
         setupClipboardSync()
     }
 
-    func open(_ id: UInt32) async {
-        guard let peer else { return }
+    /// 打开画面。`reconnecting` 时界面保持「正在重新连接」，失败不改成失败状态（由重连循环决定），返回是否打开了。
+    @discardableResult
+    func open(_ id: UInt32, reconnecting: Bool = false) async -> Bool {
+        guard let peer else { return false }
         // 切屏、改帧率要重开画面：录像随旧画面结束（内核 stop 时也会自动结束），这里先停下来给出保存位置
         if recording != nil { stopRecording() }
         channel?.stop()
         channel = nil
         displayId = id
-        phase = .connecting
+        if !reconnecting { phase = .connecting }
         let adapter = VideoSinkAdapter(model: self)
         sinkAdapter = adapter
         let codecs: [VideoCodec] = app?.settings.preferH265 == true ? [.h265, .h264] : [.h264]
@@ -142,9 +153,15 @@ final class RemoteDesktopModel: TabModel {
             live = true
             // 画面开起来之后再开声音（切屏、改帧率重开画面时声音不断）
             if audio == nil, audioSupported, app?.settings.remoteAudio == true { startAudio() }
+            return true
         } catch {
-            phase = .failed(AppModel.describe(error))
-            live = false
+            if reconnecting {
+                lastReconnectError = AppModel.describe(error)
+            } else {
+                phase = .failed(AppModel.describe(error))
+                live = false
+            }
+            return false
         }
     }
 
@@ -168,11 +185,59 @@ final class RemoteDesktopModel: TabModel {
         videoView.display(pb)
     }
 
-    /// 被控端结束了画面（对方断开、权限收回、屏幕拔掉等）
+    /// 画面不是我们停的却结束了（被控端结束、断线、画面没有响应等）：自动重连，会话还在就先只重开画面
     func displayClosed(_ reason: String) {
+        // 内核在我们自己停画面时回 "stopped"（切屏、关标签），不算
+        guard !closed, reason != "stopped" else { return }
         if recording != nil { stopRecording() }
-        phase = .failed(reason.isEmpty ? L("remote.closed") : reason)
+        connectionLost(reason.isEmpty ? L("remote.closed") : reason, reopenOnly: true)
+    }
+
+    /// 会话断开或画面意外结束：最后一帧压暗留着、显示「正在重新连接」，按间隔自动重连，约 2 分钟仍不行才显示失败
+    private func connectionLost(_ reason: String, reopenOnly: Bool) {
+        guard !closed else { return }
+        if reconnectTask != nil { return }
+        channel = nil
         live = false
+        phase = .reconnecting
+        lastReconnectError = nil
+        reconnectTask = Task { [weak self] in
+            for (i, delay) in Self.reconnectDelays.enumerated() {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self, !Task.isCancelled, !self.closed else { return }
+                if await self.reconnectOnce(reopenOnly: reopenOnly && i == 0) {
+                    self.reconnectTask = nil
+                    return
+                }
+            }
+            guard let self, !Task.isCancelled, !self.closed else { return }
+            self.reconnectTask = nil
+            self.phase = .failed(self.lastReconnectError ?? reason)
+        }
+    }
+
+    /// 重连一次：会话还在且只是画面断了就只重开画面，否则重新建会话；回到原来那块屏（没了就主屏）
+    private func reconnectOnce(reopenOnly: Bool) async -> Bool {
+        guard let app, let deviceId else { return false }
+        do {
+            let alive = peer.map { $0.closedReason == nil && !$0.session.isClosed() } ?? false
+            if !(reopenOnly && alive) {
+                let p = try await app.peer(deviceId)
+                if peer !== p { watchPeer(p) }
+                peer = p
+                virtualMax = p.session.virtualDisplayMax()
+            }
+            guard let peer else { return false }
+            displays = try await peer.session.listDisplays()
+            guard let target = displays.first(where: { $0.id == displayId }) ?? displays.first(where: \.primary) ?? displays.first else {
+                lastReconnectError = L("remote.noDisplay")
+                return false
+            }
+            return await open(target.id, reconnecting: true)
+        } catch {
+            lastReconnectError = AppModel.describe(error)
+            return false
+        }
     }
 
     func cursorMoved(x: Int32, y: Int32, visible: Bool) {
@@ -210,13 +275,14 @@ final class RemoteDesktopModel: TabModel {
         myVirtual = [:]
         stopAudio()
         peerWatch = p.$closedReason.sink { [weak self] reason in
-            if reason != nil {
-                self?.privacyOn = false
-                self?.myVirtual = [:]
-                self?.stopAudio()
-                // 会话断了：录像到此为止
-                if self?.recording != nil { self?.stopRecording() }
-            }
+            guard let reason, let self, self.peer === p else { return }
+            self.privacyOn = false
+            self.myVirtual = [:]
+            self.stopAudio()
+            // 会话断了：录像到此为止
+            if self.recording != nil { self.stopRecording() }
+            // 以前这里不改界面，画面停在最后一帧还像连着、键鼠发进死流；现在自动重连
+            self.connectionLost(reason.isEmpty ? L("remote.closed") : reason, reopenOnly: false)
         }
     }
 
@@ -547,6 +613,8 @@ final class RemoteDesktopModel: TabModel {
 
     override func close() {
         closed = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
         // 关标签时录像随之结束并提示保存位置（要在 channel.stop 之前，才拿得到内核给的文件信息）
         if recording != nil { stopRecording() }
         stopAudio()
@@ -868,6 +936,14 @@ struct RemoteDesktopView: View {
                     VStack(spacing: 10) {
                         ProgressView().controlSize(.regular).tint(.white)
                         Text(loc("remote.connecting")).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.75))
+                    }
+                case .reconnecting:
+                    ZStack {
+                        Color.black.opacity(0.55)
+                        VStack(spacing: 10) {
+                            ProgressView().controlSize(.regular).tint(.white)
+                            Text(loc("remote.reconnecting")).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.85))
+                        }
                     }
                 case .failed(let e):
                     VStack(spacing: 12) {

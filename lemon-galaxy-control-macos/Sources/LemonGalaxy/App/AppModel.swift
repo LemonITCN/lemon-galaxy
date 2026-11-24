@@ -579,18 +579,33 @@ final class PeerConnection: ObservableObject {
     let session: PeerSession
     @Published var path: PathInfo
     @Published var info: PeerInfo
-    @Published var closedReason: String?
+    @Published var closedReason: String? {
+        didSet { if closedReason != nil { endNapGuard() } }
+    }
     private var adapter: PeerListenerAdapter?
+    /// 连着时不让系统 App Nap：切到别的窗口后被降速，保活包发不出去，被控端 30 秒收不到就断开会话
+    nonisolated(unsafe) private var napGuard: NSObjectProtocol?
 
     init(deviceId: String, session: PeerSession) {
         self.deviceId = deviceId
         self.session = session
         self.path = session.path()
         self.info = session.info()
+        napGuard = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                         reason: "LemonGalaxy 远程会话保持连接")
         let a = PeerListenerAdapter()
         a.owner = self
         adapter = a
         session.setListener(listener: a)
+    }
+
+    private func endNapGuard() {
+        if let g = napGuard { ProcessInfo.processInfo.endActivity(g) }
+        napGuard = nil
+    }
+
+    deinit {
+        if let g = napGuard { ProcessInfo.processInfo.endActivity(g) }
     }
 }
 
