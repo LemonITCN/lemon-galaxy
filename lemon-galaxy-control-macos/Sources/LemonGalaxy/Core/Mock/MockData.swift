@@ -131,6 +131,8 @@ enum MockData {
             c += ["display", "input", "clipboard", "screenshot", "ui_tree", "privacy"]
             // 被控端按账号权限过滤能力：没给声音权限时不报 audio
             if permissions(for: d).audio { c.append("audio") }
+            // 有控制权限才报虚拟屏（与被控端一致：上限 3 块）
+            if permissions(for: d).control { c += ["virtual_display", "virtual_display_max=3"] }
         }
         return c
     }

@@ -12,6 +12,12 @@ if args.contains("--cu-exec") {
 if args.contains("--core-smoke") {
     exit(CoreSmoke.run(args))
 }
+if args.contains("--vd-host") {
+    exit(VirtualDisplaySmoke.host(args))
+}
+if args.contains("--vd-smoke") {
+    exit(VirtualDisplaySmoke.controller(args))
+}
 if let i = args.firstIndex(of: "--make-icon"), i + 1 < args.count {
     exit(MainActor.assumeIsolated { SelfTest.makeIcon(args[i + 1]) })
 }

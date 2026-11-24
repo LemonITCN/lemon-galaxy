@@ -129,6 +129,21 @@ interface PeerSessionInterface {
     suspend fun openDisplay(options: DisplayOptions, sink: VideoSink): DisplayChannelInterface
     suspend fun screenshot(displayId: UInt, maxWidth: UInt): ImageData
 
+    /**
+     * 主控最多能在被控端加几块虚拟屏（docs/protocol.md 8.6，能力 "virtual_display" + "virtual_display_max=N"）；
+     * 不支持或没有控制权限时为 0。
+     */
+    fun virtualDisplayMax(): UInt
+
+    /**
+     * 在被控端加一块虚拟屏（扩展桌面），返回新屏（isVirtual 为真），id 直接用于 [openDisplay]。
+     * 宽 640–7680、高 480–4320、刷新率 24–240（0 表示 60）。虚拟屏属于本会话，断开时被控端自动删掉。
+     */
+    suspend fun addVirtualDisplay(width: UInt, height: UInt, refresh: UInt): DisplayInfo
+
+    /** 删掉本会话加的虚拟屏（别的会话加的、无头兜底屏都删不了）。 */
+    suspend fun removeVirtualDisplay(displayId: UInt)
+
     suspend fun clipboardGet(): ClipboardData?
     suspend fun clipboardSet(data: ClipboardData)
 

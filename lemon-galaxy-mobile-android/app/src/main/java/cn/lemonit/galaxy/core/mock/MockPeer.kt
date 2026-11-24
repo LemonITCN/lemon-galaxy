@@ -71,6 +71,21 @@ internal class MockPeerSession(
     @Volatile private var closed = false
     private val ticker: Job
 
+    /** 本会话加的虚拟屏：属于会话，断开时被控端自动删掉（这里随会话对象一起清空）。 */
+    private val virtualDisplays = mutableListOf<DisplayInfo>()
+    private val nextVirtualId = AtomicInteger(VIRTUAL_ID_BASE + 1)
+    @Volatile private var lastAddedId: UInt? = null
+    private val channels = java.util.concurrent.CopyOnWriteArrayList<MockDisplayChannel>()
+
+    /** 测试用：列屏结果暂时还没有刚加的那块（被控端列表滞后）。 */
+    @Volatile var listLagsBehindAdd = false
+
+    /** 测试用：被控端那边虚拟屏都没了（如 Windows 换控制台会话），开着的画面随之被关。 */
+    fun dropVirtualDisplays() {
+        val gone = synchronized(virtualDisplays) { virtualDisplays.map { it.id }.also { virtualDisplays.clear() } }
+        channels.filter { it.displayId in gone }.forEach { it.closeByRemote("display removed") }
+    }
+
     init {
         // 每 2 秒抖动一下延迟，模拟后台持续探测
         ticker = scope.launch {
@@ -106,6 +121,7 @@ internal class MockPeerSession(
         capabilities = buildList {
             addAll(listOf("terminal", "files", "exec", "clipboard", "port_forward"))
             if (hasGui) addAll(listOf("display", "input", "screenshot", "ui_tree", "privacy", "audio"))
+            if (hasGui) addAll(listOf("virtual_display", "virtual_display_max=$VIRTUAL_DISPLAY_MAX"))
         },
         path = currentPath,
     )
@@ -117,9 +133,13 @@ internal class MockPeerSession(
     }
 
     override fun disconnect() {
+        if (closed) return
         closed = true
         ticker.cancel()
         host.shells.values.forEach { if (it.attached) it.sink = null }
+        synchronized(virtualDisplays) { virtualDisplays.clear() }
+        // 与真内核一样：会话关闭时通知监听器
+        listener?.onClosed("disconnected")
     }
 
     override fun isClosed(): Boolean = closed
@@ -163,22 +183,61 @@ internal class MockPeerSession(
         return ExecResult(0, out, "", false, false, 300u)
     }
 
+    /** 被控端的屏幕：固定的几块 + 本会话加的虚拟屏。 */
+    private fun displays(): List<DisplayInfo> = MockData.displaysFor(host.platform) + synchronized(virtualDisplays) { virtualDisplays.toList() }
+
     override suspend fun listDisplays(): List<DisplayInfo> {
         delay(150)
         if (!hasGui) throw GalaxyException.Permission(host.tr("该设备没有图形界面", "This device has no graphical display"))
-        return MockData.displaysFor(host.platform)
+        val all = displays()
+        return if (listLagsBehindAdd) all.filter { it.id != lastAddedId } else all
     }
 
     override suspend fun openDisplay(options: DisplayOptions, sink: VideoSink): DisplayChannelInterface {
         delay(300)
-        val display = MockData.displaysFor(host.platform).firstOrNull { it.id == options.displayId }
+        val display = displays().firstOrNull { it.id == options.displayId }
             ?: throw GalaxyException.NotFound(host.tr("找不到屏幕", "Display not found"))
-        return MockDisplayChannel(display, core.desktopFrames(), sink, scope, options.maxFps.toInt().coerceAtMost(30))
+        return MockDisplayChannel(display, core.desktopFrames(), sink, scope, options.maxFps.toInt().coerceAtMost(30)).also { channels += it }
     }
 
     override suspend fun screenshot(displayId: UInt, maxWidth: UInt): ImageData {
         delay(200)
         return core.desktopPreview() ?: throw GalaxyException.Other("no preview")
+    }
+
+    override fun virtualDisplayMax(): UInt = if (hasGui) VIRTUAL_DISPLAY_MAX.toUInt() else 0u
+
+    override suspend fun addVirtualDisplay(width: UInt, height: UInt, refresh: UInt): DisplayInfo {
+        delay(400)
+        if (!hasGui) throw GalaxyException.Permission(host.tr("被控端不支持虚拟屏", "The remote device does not support virtual displays"))
+        if (width !in 640u..7680u || height !in 480u..4320u || (refresh != 0u && refresh !in 24u..240u)) {
+            throw GalaxyException.Protocol(host.tr("分辨率或刷新率不合法", "Invalid resolution or refresh rate"))
+        }
+        synchronized(virtualDisplays) {
+            if (virtualDisplays.size >= VIRTUAL_DISPLAY_MAX) {
+                throw GalaxyException.Other(host.tr("最多加 $VIRTUAL_DISPLAY_MAX 块虚拟屏", "At most $VIRTUAL_DISPLAY_MAX virtual displays"))
+            }
+            val id = nextVirtualId.getAndIncrement()
+            val d = DisplayInfo(id.toUInt(), "LemonGalaxy Display ${id - VIRTUAL_ID_BASE}", width, height, 1.0f, false, true)
+            virtualDisplays.add(d)
+            lastAddedId = d.id
+            return d
+        }
+    }
+
+    override suspend fun removeVirtualDisplay(displayId: UInt) {
+        delay(250)
+        val removed = synchronized(virtualDisplays) { virtualDisplays.removeAll { it.id == displayId } }
+        if (removed) {
+            // 被控端删屏时关掉还开着的这一路画面
+            channels.filter { it.displayId == displayId }.forEach { it.closeByRemote("display removed") }
+            return
+        }
+        throw if (MockData.displaysFor(host.platform).any { it.id == displayId }) {
+            GalaxyException.Permission(host.tr("只能删本会话加的虚拟屏", "Only virtual displays added in this session can be removed"))
+        } else {
+            GalaxyException.NotFound(host.tr("找不到屏幕", "Display not found"))
+        }
     }
 
     override suspend fun clipboardGet(): ClipboardData? = host.clipboard
@@ -205,6 +264,12 @@ internal class MockPeerSession(
     }
 
     companion object {
+        /** 模拟被控端（Windows / macOS）最多能加的虚拟屏块数，与真被控端一致。 */
+        const val VIRTUAL_DISPLAY_MAX = 3
+
+        /** 虚拟屏 id 从 101 开始，不和固定的几块屏撞。 */
+        private const val VIRTUAL_ID_BASE = 100
+
         fun bytesPerSecond(kind: PathKind): Long = when (kind) {
             PathKind.LAN -> 40L * 1024 * 1024
             PathKind.DIRECT -> 8L * 1024 * 1024

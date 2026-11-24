@@ -271,6 +271,40 @@ enum SelfTest {
 
     private static func app(_ r: RemoteDesktopModel) -> AppModel { r.app! }
 
+    static func checkVirtualDisplay(_ r: RemoteDesktopModel, prefix: String, dark: Bool, window: NSWindow, host: NSHostingView<RootView>) {
+        let app = app(r)
+        if r.virtualMax != 3 { problems.append("模拟的 Windows 设备应支持 3 块虚拟屏：\(r.virtualMax)") }
+        shotView("\(prefix)-45a-remote-virtual-display", app, dark: dark, size: CGSize(width: 340, height: 340)) {
+            RemoteVirtualDisplayPanel(tab: r)
+        }
+        let before = r.displays.map(\.id)
+        let primary = r.displayId
+        var added: Bool?
+        Task { added = await r.addVirtualDisplay(VirtualDisplayMode(width: 2560, height: 1440, refresh: 60)) }
+        wait("加虚拟屏") { added != nil && !r.virtualBusy }
+        guard added == true, let id = r.myVirtual.keys.first else {
+            problems.append("加虚拟屏失败：\(app.toast?.text ?? "无提示")")
+            return
+        }
+        if r.displays.count != before.count + 1 || before.contains(id) || r.displays.first(where: { $0.id == id })?.isVirtual != true {
+            problems.append("加虚拟屏后屏幕列表不对：\(r.displays.map(\.id))")
+        }
+        if r.displayId != id { problems.append("加虚拟屏后应切到新屏") }
+        wait("虚拟屏画面解码", timeout: 8) { r.phase == .streaming }
+        shot("\(prefix)-45b-remote-virtual-display-added", app, window: window, host: host, settle: 0.2)
+        shotView("\(prefix)-45c-remote-virtual-display-mine", app, dark: dark, size: CGSize(width: 340, height: 420)) {
+            RemoteVirtualDisplayPanel(tab: r)
+        }
+        app.toast = nil
+        Task { await r.removeVirtualDisplay(id) }
+        wait("删虚拟屏") { !r.virtualBusy && r.myVirtual.isEmpty }
+        if r.displays.contains(where: { $0.id == id }) { problems.append("删掉的虚拟屏仍在列表里") }
+        if r.displayId != primary { problems.append("删掉正在看的虚拟屏后应切回主屏") }
+        if app.toast?.isError != false { problems.append("删虚拟屏后应提示已删掉：\(app.toast?.text ?? "无提示")") }
+        wait("切回主屏后画面解码", timeout: 8) { r.phase == .streaming }
+        app.toast = nil
+    }
+
     /// 本机一侧用的假主目录（文件名、时间都固定）
     static func makeFakeHome() -> URL {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("lemongalaxy-selftest-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
@@ -782,6 +816,11 @@ enum SelfTest {
             if app.toast?.action == nil || app.toast?.isError == true { problems.append("停止录像后应提示保存位置并能在访达中显示：\(app.toast?.text ?? "无提示")") }
             shot("\(prefix)-45-remote-recording-saved", app, window: window, host: host, settle: 0.2)
             app.toast = nil
+        }
+
+        // 虚拟屏：有控制权限且对端支持才有入口；加一块后列表刷新并切过去，删掉正在看的切回主屏
+        if let r = app.activeTab as? RemoteDesktopModel {
+            checkVirtualDisplay(r, prefix: prefix, dark: dark, window: window, host: host)
         }
 
         // 复制粘贴文件

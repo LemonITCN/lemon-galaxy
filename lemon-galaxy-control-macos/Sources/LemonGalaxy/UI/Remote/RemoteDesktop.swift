@@ -45,11 +45,16 @@ final class RemoteDesktopModel: TabModel {
     /// 正在录像（内核把收到的 H.264 / Opus 原样封装成分片 MP4，不重新编码）
     @Published var recording: Recording?
     @Published var recordBusy = false
-    private var closed = false
+    /// 虚拟屏：本会话最多能加几块（0 = 不支持或没有控制权限，不显示入口）
+    @Published var virtualMax: UInt32 = 0
+    /// 本会话加的虚拟屏（id → 加的时候选的模式），只有这些能删；会话换了清空（被控端随旧会话已删掉）
+    @Published var myVirtual: [UInt32: VirtualDisplayMode] = [:]
+    @Published var virtualBusy = false
+    private(set) var closed = false
     private var peerWatch: AnyCancellable?
     let videoView = RemoteVideoNSView()
     private var channel: DisplayChannel?
-    private var sinkAdapter: VideoSinkAdapter?
+    private(set) var sinkAdapter: VideoSinkAdapter?
     nonisolated(unsafe) private let decoder = VideoDecoder()
     private var frameCount = 0
     private var byteCount = 0
@@ -94,6 +99,7 @@ final class RemoteDesktopModel: TabModel {
                 let p = try await app.peer(deviceId)
                 if peer !== p { watchPeer(p) }
                 peer = p
+                virtualMax = p.session.virtualDisplayMax()
                 displays = try await p.session.listDisplays()
                 guard let first = displays.first(where: \.primary) ?? displays.first else {
                     phase = .failed(L("remote.noDisplay"))
@@ -201,10 +207,12 @@ final class RemoteDesktopModel: TabModel {
     /// 新的会话：被控端的隐私屏随旧会话结束已自动关闭；会话断开时开关复位、声音停掉（重连打开画面后按设置再开）
     private func watchPeer(_ p: PeerConnection) {
         privacyOn = false
+        myVirtual = [:]
         stopAudio()
         peerWatch = p.$closedReason.sink { [weak self] reason in
             if reason != nil {
                 self?.privacyOn = false
+                self?.myVirtual = [:]
                 self?.stopAudio()
                 // 会话断了：录像到此为止
                 if self?.recording != nil { self?.stopRecording() }
@@ -548,6 +556,13 @@ final class RemoteDesktopModel: TabModel {
             Task { try? await session.setPrivacy(on: false) }
             privacyOn = false
         }
+        // 同理删掉本标签加的虚拟屏（会话随后断开的话被控端也会删）
+        if !myVirtual.isEmpty, let peer, peer.closedReason == nil {
+            let session = peer.session
+            let ids = Array(myVirtual.keys)
+            Task { for id in ids { try? await session.removeVirtualDisplay(displayId: id) } }
+            myVirtual = [:]
+        }
         peerWatch = nil
         channel?.stop()
         channel = nil
@@ -572,7 +587,13 @@ final class VideoSinkAdapter: VideoSink, @unchecked Sendable {
         model?.frameArrived(data, pts: ptsUs, keyframe: keyframe)
     }
     func onClosed(reason: String) {
-        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.model?.displayClosed(reason) } }
+        // 切屏后旧画面迟到的结束通知不算（例如删掉正在看的虚拟屏前已切到别的屏）
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let m = self.model, m.sinkAdapter === self else { return }
+                m.displayClosed(reason)
+            }
+        }
     }
     func onCursor(x: Int32, y: Int32, visible: Bool) {
         DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.model?.cursorMoved(x: x, y: y, visible: visible) } }
@@ -895,10 +916,11 @@ struct RemoteToolbar: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            // 多屏切换
+            // 多屏切换；我加的虚拟屏右键可删
             if tab.displays.count > 1 {
                 HStack(spacing: 2) {
                     ForEach(Array(tab.displays.enumerated()), id: \.element.id) { i, d in
+                        let mine = tab.isMyVirtual(d.id)
                         Button { Task { await tab.open(d.id) } } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: d.isVirtual ? "rectangle.dashed" : "display").font(.system(size: 10.5))
@@ -909,11 +931,19 @@ struct RemoteToolbar: View {
                             .background(RoundedRectangle(cornerRadius: 6).fill(tab.displayId == d.id ? p.accent.opacity(0.14) : .clear))
                         }
                         .buttonStyle(.plain)
-                        .help(loc("remote.screen", i + 1) + " · \(d.name) · \(d.width)×\(d.height)")
+                        .help(loc("remote.screen", i + 1) + " · \(d.name) · \(d.width)×\(d.height)"
+                              + (d.isVirtual ? " · " + loc(mine ? "remote.vd.mine.badge" : "remote.vd.badge") : ""))
+                        .contextMenu {
+                            if mine {
+                                Button(loc("remote.vd.remove")) { Task { await tab.removeVirtualDisplay(d.id) } }
+                                    .disabled(tab.virtualBusy)
+                            }
+                        }
                     }
                 }
-                divider
             }
+            if tab.virtualSupported { RemoteVirtualDisplayButton(tab: tab) }
+            if tab.displays.count > 1 || tab.virtualSupported { divider }
             Picker("", selection: $tab.scaleMode) {
                 Image(systemName: "arrow.up.left.and.arrow.down.right").help(loc("remote.fit")).tag(RemoteDesktopModel.ScaleMode.fit)
                 Text("1:1").help(loc("remote.original")).tag(RemoteDesktopModel.ScaleMode.original)

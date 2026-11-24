@@ -81,6 +81,8 @@ object Fixtures {
         // 声音默认开
         audioSupported = true,
         audioOn = true,
+        // 模拟被控端（Windows）能加 3 块虚拟屏；"Virtual 1" 是别人加的（不能删）
+        virtualMax = 3,
     )
 
     val models = AiModels(true, AiMode.FULL_TRUST, MockData.models())

@@ -120,7 +120,19 @@ enum MockData {
         if d.platform == .windows || d.platform == .macos { c += ["display", "input", "clipboard", "screenshot", "ui_tree", "privacy"] }
         // 与内核一致：对方给了听声音的权限才有 "audio"
         if (d.platform == .windows || d.platform == .macos) && permissions(for: d).audio { c.append("audio") }
+        // 与内核一致：装了虚拟屏驱动（前台那台 Windows 10 没装）且有控制权限才有，最多加 3 块
+        if (d.platform == .windows || d.platform == .macos) && d.id != "dev-reception" && permissions(for: d).control {
+            c += ["virtual_display", "virtual_display_max=3"]
+        }
         return c
+    }
+
+    /// 主控最多能加几块虚拟屏（能力 "virtual_display" + "virtual_display_max=N"，没有控制权限为 0）
+    static func virtualDisplayMax(for d: DeviceInfo) -> UInt32 {
+        let caps = capabilities(for: d)
+        guard caps.contains("virtual_display"), permissions(for: d).control else { return 0 }
+        let prefix = "virtual_display_max="
+        return caps.lazy.compactMap { $0.hasPrefix(prefix) ? UInt32($0.dropFirst(prefix.count)) : nil }.first ?? 0
     }
 
     static func displays(for d: DeviceInfo) -> [DisplayInfo] {

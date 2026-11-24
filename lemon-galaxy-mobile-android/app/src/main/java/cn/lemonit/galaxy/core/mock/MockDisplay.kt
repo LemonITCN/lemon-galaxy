@@ -58,14 +58,17 @@ internal object AnnexB {
 /**
  * 模拟远程画面：循环推送 assets 里预先编码好的 1280x720 H.264 片段（假桌面），
  * 鼠标移动时回报光标位置（和真内核一样按画面像素）。录像把推出去的帧原样写成 MP4（见 [MockRecorder]）。
+ * 关闭通知与真内核一样是异步、稍晚送达的（主控停下或被控端关流都是）。
  */
 internal class MockDisplayChannel(
     private val display: DisplayInfo,
     private val frames: List<AnnexB.AccessUnit>,
     private val sink: VideoSink,
-    scope: CoroutineScope,
+    private val scope: CoroutineScope,
     fps: Int,
 ) : DisplayChannelInterface {
+    val displayId: UInt get() = display.id
+
     @Volatile private var next = 0
     @Volatile private var stopped = false
     @Volatile private var recorder: MockRecorder? = null
@@ -111,12 +114,21 @@ internal class MockDisplayChannel(
 
     override fun setClientCursor(on: Boolean) = Unit
 
-    override fun stop() {
+    override fun stop() = close("stopped")
+
+    /** 被控端关掉这一路画面（如这块虚拟屏被删掉）。 */
+    fun closeByRemote(reason: String) = close(reason)
+
+    private fun close(reason: String) {
         // 与真内核一样：关画面时顺带结束录像
         recorder?.let { r -> recorder = null; runCatching { r.finish() } }
+        if (stopped) return
         stopped = true
         job.cancel()
-        sink.onClosed("stopped")
+        scope.launch {
+            delay(CLOSE_NOTIFY_DELAY_MS)
+            sink.onClosed(reason)
+        }
     }
 
     override suspend fun startRecording(path: String, withAudio: Boolean) {
@@ -144,5 +156,8 @@ internal class MockDisplayChannel(
         /** 预先编码好的片段尺寸 */
         const val STREAM_W = 1280
         const val STREAM_H = 720
+
+        /** 关闭通知晚到（真内核在停下后另起任务通知） */
+        const val CLOSE_NOTIFY_DELAY_MS = 120L
     }
 }

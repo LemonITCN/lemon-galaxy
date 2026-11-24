@@ -56,6 +56,7 @@ internal static class SelfTest
             CheckForwardDraft();
             CheckMarkdown();
             Clock.FrozenMs = 1_795_225_692_000;      // 2026-11-21 09:48:12（北京时间）
+            VirtualDisplayMode.LocalOverride = (2736, 1824);
             var fakeHome = MakeFakeHome();
             LocalFileSource.HomeOverride = fakeHome;
             fakeHomeDir = fakeHome;
@@ -229,6 +230,55 @@ internal static class SelfTest
         Capture($"{prefix}-47-remote-files-failed", root);
         r.DismissFileClip();
         if (r.FileClip != null) Problems.Add("复制粘贴文件：失败提示收不起来");
+    }
+
+    /// <summary>
+    /// 虚拟屏（docs/protocol.md 8.6）：加一块 2560×1440 → 屏幕列表多一块我加的虚拟屏并切过去看；弹出层（我加的列表、自定义值不合法时的范围提示）；
+    /// 删掉正在看的虚拟屏 → 切回主屏。离屏渲染不了 Popup，弹出层单独渲染。
+    /// </summary>
+    private static void CheckVirtualDisplay(AppModel app, RemoteTab r, FrameworkElement root, string prefix)
+    {
+        void Expect(bool ok, string what) { if (!ok) Problems.Add("虚拟屏：" + what); }
+        Expect(r.VirtualSupported && r.VirtualMax == MockData.VirtualDisplayMax, $"模拟的 Windows 设备应能加 {MockData.VirtualDisplayMax} 块，实际 {r.VirtualMax}");
+        if (!r.VirtualSupported) return;
+        var physical = r.Displays.Length;
+        ClearToast(app);
+
+        // 1. 加一块：记进我加的、列表多一块、切过去看
+        bool? added = null;
+        Ui.Run(async () => added = await r.AddVirtualDisplay(new VirtualDisplayMode(2560, 1440, 60)));
+        if (!Wait("加虚拟屏", () => added != null && !r.VirtualBusy)) return;
+        var id = r.DisplayId;
+        Expect(added == true, "加屏失败（" + app.CurrentToast?.Text + "）");
+        Expect(r.Displays.Length == physical + 1 && r.Display is { IsVirtual: true, Width: 2560, Height: 1440 } && r.IsMyVirtual(id), "加好后没有切到新加的虚拟屏");
+        Expect(app.CurrentToast?.Text == L.T("remote.vd.added", "2560×1440"), "加好后的提示不对（" + app.CurrentToast?.Text + "）");
+        Wait("虚拟屏画面", () => r.Phase == RemotePhase.Streaming);
+        Capture($"{prefix}-48-remote-virtual-display", root);
+        ClearToast(app);
+
+        // 2. 弹出层：表单 + 我加的虚拟屏；自定义宽 500 不合法时按钮置灰并提示范围
+        Capture($"{prefix}-49-remote-virtual-display-panel", RemoteVirtualDisplayView.Preview(r), new Size(376, 500));
+        var form = r.VirtualForm;
+        form.PickSize(VdSizeKind.Custom);
+        form.Width = "500";
+        form.Notify();
+        Expect(form.Mode == null, "宽 500 应不合法");
+        Capture($"{prefix}-49b-remote-virtual-display-custom", RemoteVirtualDisplayView.Preview(r), new Size(376, 560));
+        form.Reset();
+
+        // 3. 删掉正在看的这块：先切回主屏，列表里没了
+        var removed = false;
+        Ui.Run(async () =>
+        {
+            await r.RemoveVirtualDisplay(id);
+            removed = true;
+        });
+        if (!Wait("删虚拟屏", () => removed && !r.VirtualBusy)) return;
+        Expect(!r.IsMyVirtual(id) && r.Displays.Length == physical && r.Displays.All(d => d.Id != id), "删掉后列表里还有这块屏");
+        Expect(r.Display?.Primary == true, "删掉正在看的虚拟屏后没有切回主屏");
+        Expect(app.CurrentToast?.Text == L.T("remote.vd.removed"), "删掉后的提示不对（" + app.CurrentToast?.Text + "）");
+        Wait("切回主屏的画面", () => r.Phase == RemotePhase.Streaming);
+        ClearToast(app);
     }
 
     /// <summary>本机一侧用的假主目录（文件名、时间都固定）</summary>
@@ -708,6 +758,9 @@ internal static class SelfTest
 
         // 复制粘贴文件
         if (app.ActiveTab is RemoteTab remote4) CheckFileClip(remote4, root, prefix);
+
+        // 虚拟屏
+        if (app.ActiveTab is RemoteTab remote5) CheckVirtualDisplay(app, remote5, root, prefix);
 
         // 6. AI 聊天（docs/ai-chat-ui.md）
         RenderAi(app, root, prefix, zh);

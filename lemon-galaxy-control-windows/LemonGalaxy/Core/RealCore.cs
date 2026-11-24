@@ -88,6 +88,9 @@ internal sealed class RealPeer : ICorePeer
     public Task WakeOnLan(string mac) => s.WakeOnLan(mac);
     public Task SetPrivacy(bool on) => s.SetPrivacy(on);
     public async Task<ICoreAudio> StartAudio(float volume) => new RealAudio(await s.StartAudio(volume));
+    public uint VirtualDisplayMax() => s.VirtualDisplayMax();
+    public Task<DisplayInfo> AddVirtualDisplay(uint width, uint height, uint refresh) => s.AddVirtualDisplay(width, height, refresh);
+    public Task RemoveVirtualDisplay(uint displayId) => s.RemoveVirtualDisplay(displayId);
     public ICoreClipboardTransfer ClipboardPushFiles(string[] localPaths, TransferListener listener) => new RealClipboardTransfer(s.ClipboardPushFiles(localPaths, listener));
     public ICoreClipboardTransfer ClipboardPullFiles(string[] remotePaths, string localDir, TransferListener listener) => new RealClipboardTransfer(s.ClipboardPullFiles(remotePaths, localDir, listener));
 }

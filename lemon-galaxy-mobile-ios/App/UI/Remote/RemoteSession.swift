@@ -49,6 +49,12 @@ final class RemoteSession: ObservableObject, Identifiable {
     @Published private(set) var recordingBusy = false
     /// 停止后要给用户看的录像（弹「已保存」，可分享或存到相册）
     @Published var savedRecording: SavedRecording?
+    /// 主控最多能加几块虚拟屏（0 = 对方不支持或没有控制权限，不显示入口）；每次拿到新会话重新取
+    @Published private(set) var virtualMax = 0
+    /// 本会话加的虚拟屏（DisplayInfo 不带归属，只能自己记；只有这些能删）。会话换了或断开时清空
+    @Published private(set) var myVirtual = MyVirtualDisplays()
+    @Published private(set) var virtualAdding = false
+    @Published private(set) var virtualRemoving: Set<UInt32> = []
     /// 画面是否放大 / 是否原始像素（菜单「视图」用；只在这几项变化时发布，捏合过程中不跟着每帧刷新）
     @Published private(set) var viewFlags = ViewportFlags()
     let canvas = RemoteCanvasView()
@@ -212,12 +218,17 @@ final class RemoteSession: ObservableObject, Identifiable {
             guard let self, let app = self.app else { return }
             do {
                 let p = try await app.account.peer(deviceId)
+                // 换了会话（重连）：上一个会话加的虚拟屏已由被控端删掉
+                if p !== peer { myVirtual.reset() }
                 peer = p
+                virtualMax = Int(p.session.virtualDisplayMax())
                 closeWatch = p.$closedReason.compactMap { $0 }.receive(on: DispatchQueue.main).sink { [weak self] reason in
                     self?.status = .failed(reason.isEmpty ? L("remote.closed") : reason)
                     // 会话断了，声音通道也随之失效；录像收尾（内核还留着已写的部分）
                     self?.stopRecording(.dropped)
                     self?.stopAudio()
+                    // 被控端随会话删掉本会话加的虚拟屏
+                    self?.resetVirtual()
                 }
                 displays = try await p.session.listDisplays()
                 guard let first = displays.first(where: \.primary) ?? displays.first else {
@@ -273,9 +284,10 @@ final class RemoteSession: ObservableObject, Identifiable {
         adapter.onClose = { [weak self, weak adapter] reason in
             DispatchQueue.main.async {
                 guard let self else { return }
+                // 只算当前画面的关闭：换屏幕后旧通道迟到的关闭（"stopped"）不把新画面标成失败，也不收新画面的录像
+                guard let adapter, self.sinkAdapter === adapter else { return }
                 self.status = .failed(reason.isEmpty ? L("remote.closed") : reason)
-                // 只收当前画面的录像（换屏幕后旧通道迟到的关闭不算）
-                if let adapter, self.sinkAdapter === adapter { self.stopRecording(.dropped) }
+                self.stopRecording(.dropped)
             }
         }
         sinkAdapter = adapter
@@ -296,8 +308,69 @@ final class RemoteSession: ObservableObject, Identifiable {
         guard let peer else { return }
         Task {
             guard let list = try? await peer.session.listDisplays(), !list.isEmpty else { return }
-            displays = list
-            if let d = display { canvas.setRemoteSize(Int(d.width), Int(d.height)) }
+            applyDisplays(list)
+        }
+    }
+
+    /// 换上新的屏幕列表：被控端那边已经没有的虚拟屏不再算我加的
+    private func applyDisplays(_ list: [DisplayInfo]) {
+        displays = list
+        myVirtual.keepOnly(listed: list.map(\.id))
+        if let d = display { canvas.setRemoteSize(Int(d.width), Int(d.height)) }
+    }
+
+    // MARK: 虚拟屏
+
+    var virtualQuota: VirtualDisplayQuota { VirtualDisplayQuota(added: myVirtual.count, max: virtualMax) }
+
+    private func resetVirtual() {
+        virtualMax = 0
+        myVirtual.reset()
+        virtualRemoving.removeAll()
+    }
+
+    /// 在被控端加一块虚拟屏：记入我加的、刷新屏幕列表、直接切过去看。成功返回 true（表单收起），失败提示原因、表单不关
+    func addVirtualDisplay(_ r: VirtualDisplayRequest) async -> Bool {
+        guard let peer, !virtualAdding, !virtualQuota.full else { return false }
+        virtualAdding = true
+        defer { virtualAdding = false }
+        do {
+            let d = try await peer.session.addVirtualDisplay(width: r.width, height: r.height, refresh: r.refresh)
+            // 等待期间会话换了或界面关了：被控端随旧会话删屏，这里不再处理
+            guard peer === self.peer, !stopped else { return false }
+            myVirtual.add(d.id)
+            var list = (try? await peer.session.listDisplays()) ?? displays
+            if !list.contains(where: { $0.id == d.id }) { list.append(d) }
+            guard peer === self.peer, !stopped else { return false }
+            applyDisplays(list)
+            switchDisplay(d.id)
+            app?.showToast(L("remote.vdAdded", "\(d.width)×\(d.height)"))
+            return true
+        } catch {
+            if !isCancellation(error) { app?.showToast(L("remote.vdAddFailed", describeError(error)), error: true) }
+            return false
+        }
+    }
+
+    /// 删掉本会话加的虚拟屏（不用二次确认：会话结束本来也会删，误删可再加）。
+    /// 正在看的就是它时先切回主屏（没有主屏就第一块）再删，免得被控端关掉这路画面时闪出错误界面（与安卓端一致）
+    func removeVirtualDisplay(_ id: UInt32) {
+        guard let peer, myVirtual.contains(id), !virtualRemoving.contains(id) else { return }
+        virtualRemoving.insert(id)
+        Task {
+            defer { virtualRemoving.remove(id) }
+            do {
+                if displayId == id, let next = MyVirtualDisplays.fallback(removing: id, in: displays) { await open(next) }
+                try await peer.session.removeVirtualDisplay(displayId: id)
+                guard peer === self.peer, !stopped else { return }
+                myVirtual.remove(id)
+                let list = ((try? await peer.session.listDisplays()) ?? displays).filter { $0.id != id }
+                guard peer === self.peer, !stopped else { return }
+                if !list.isEmpty { applyDisplays(list) }
+                app?.showToast(L("remote.vdRemoved"))
+            } catch {
+                if !isCancellation(error) { app?.showToast(L("remote.vdRemoveFailed", describeError(error)), error: true) }
+            }
         }
     }
 
@@ -458,6 +531,13 @@ final class RemoteSession: ObservableObject, Identifiable {
         stopRecording(.closed)
         stopped = true
         stopAudio()
+        // 同一会话可能还被终端、文件用着：删掉本会话界面加的虚拟屏（会话随后断开的话被控端也会删）
+        if myVirtual.count > 0, let peer, peer.closedReason == nil {
+            let session = peer.session
+            let ids = myVirtual.ids
+            Task { for id in ids { try? await session.removeVirtualDisplay(displayId: id) } }
+            myVirtual.reset()
+        }
         statsTimer?.invalidate()
         channel?.stop()
         channel = nil

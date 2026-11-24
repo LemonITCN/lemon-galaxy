@@ -237,6 +237,12 @@ internal class UniffiPeer(private val p: FPeerSession) : PeerSessionInterface {
     }
 
     override suspend fun screenshot(displayId: UInt, maxWidth: UInt): ImageData = ffi { p.screenshot(displayId, maxWidth).toBridge() }
+    override fun virtualDisplayMax(): UInt = p.virtualDisplayMax()
+
+    override suspend fun addVirtualDisplay(width: UInt, height: UInt, refresh: UInt): DisplayInfo =
+        ffi { p.addVirtualDisplay(width, height, refresh).toBridge() }
+
+    override suspend fun removeVirtualDisplay(displayId: UInt) = ffi { p.removeVirtualDisplay(displayId) }
     override suspend fun clipboardGet(): ClipboardData? = ffi { p.clipboardGet()?.toBridge() }
     override suspend fun clipboardSet(data: ClipboardData) = ffi { p.clipboardSet(data.toFfi()) }
 

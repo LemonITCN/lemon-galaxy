@@ -83,6 +83,10 @@ import cn.lemonit.galaxy.ui.login.LoginScreen
 import cn.lemonit.galaxy.ui.remote.RemoteActions
 import cn.lemonit.galaxy.ui.remote.RemoteDesktopScreen
 import cn.lemonit.galaxy.ui.remote.RemotePanel
+import cn.lemonit.galaxy.ui.remote.RemoteUi
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextReplacement
 import cn.lemonit.galaxy.ui.remote.RemoteViewState
 import cn.lemonit.galaxy.core.bridge.DisplayInfo
 import androidx.compose.ui.geometry.Offset
@@ -439,6 +443,8 @@ class ScreenshotTest {
         soundOn: Boolean = true,
         recording: Boolean = false,
         displays: List<DisplayInfo>? = null,
+        addDisplay: Boolean = false,
+        edit: (RemoteUi) -> RemoteUi = { it },
         then: (RemoteViewState) -> Unit = {},
     ) {
         val bytes = context.assets.open("mock/desktop_preview.jpg").use { it.readBytes() }
@@ -448,6 +454,7 @@ class ScreenshotTest {
             .let { if (privacy) it.copy(privacySupported = true, privacyAllowed = true, privacyOn = true) else it }
             .let { if (displays != null) it.copy(displays = displays) else it }
             .copy(audioOn = soundOn, recordingSince = if (recording) MockData.NOW - 83_000 else null)
+            .let(edit)
         val ui = mutableStateOf(base)
         val actions = object : RemoteActions by noRemoteActions {
             override fun onDisplay(id: UInt) {
@@ -465,6 +472,7 @@ class ScreenshotTest {
                         initialMenuOpen = menu,
                         initialPanel = panel,
                         initialKeyboard = keyboard,
+                        initialAddDisplay = addDisplay,
                         state = view,
                     )
                 }
@@ -554,6 +562,64 @@ class ScreenshotTest {
 
     @Test @Config(qualifiers = PHONE_LAND_ZH)
     fun remoteDisplaySwitchZhDark() = displaySwitch(true)
+
+    // ---------------- 虚拟屏 ----------------
+
+    private val myVirtual = DisplayInfo(101u, "LemonGalaxy Display 1", 2560u, 1440u, 1.0f, false, true)
+
+    /** 自己加了一块虚拟屏并正在看它 */
+    private fun withMyVirtual(u: RemoteUi) = u.copy(displays = u.displays + myVirtual, displayId = myVirtual.id, myVirtualIds = setOf(myVirtual.id))
+
+    /** 加满 3 块 */
+    private fun withFullVirtual(u: RemoteUi): RemoteUi {
+        val mine = (1..3).map { n -> DisplayInfo((100 + n).toUInt(), "LemonGalaxy Display $n", 1920u, 1080u, 1.0f, false, true) }
+        // 正在看最后一块：卡片横排自动滚到最右，看得见置灰的「加虚拟屏」
+        return u.copy(displays = u.displays + mine, displayId = mine.last().id, myVirtualIds = mine.map { it.id }.toSet())
+    }
+
+    /** 显示器面板：虚拟屏卡片带「虚拟屏」，自己加的再带「我加的」和右上角删除；最后是虚线框「加虚拟屏 1 / 3」 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remotePanelVirtualZhDark() = remote(true, "remote_panel_virtual", panel = RemotePanel.DISPLAY, edit = ::withMyVirtual)
+
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remotePanelVirtualEnLight() = remote(false, "remote_panel_virtual", panel = RemotePanel.DISPLAY, edit = ::withMyVirtual)
+
+    @Test @Config(qualifiers = PHONE_ZH)
+    fun remotePanelVirtualPortraitZhDark() = remote(true, "remote_panel_virtual", panel = RemotePanel.DISPLAY, edit = ::withMyVirtual)
+
+    /** 加满：虚线框卡片置灰 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remotePanelVirtualFullZhDark() = remote(true, "remote_panel_virtual_full", panel = RemotePanel.DISPLAY, edit = ::withFullVirtual)
+
+    /** 加虚拟屏表单（在显示器面板内展开）：默认 1920×1080 @ 60 Hz，标题旁「已加 1 / 3」 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remoteAddDisplayZhDark() = remote(true, "remote_add_display", panel = RemotePanel.DISPLAY, addDisplay = true, edit = ::withMyVirtual)
+
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remoteAddDisplayEnLight() = remote(false, "remote_add_display", panel = RemotePanel.DISPLAY, addDisplay = true, edit = ::withMyVirtual)
+
+    @Test @Config(qualifiers = PHONE_ZH)
+    fun remoteAddDisplayPortraitZhDark() = remote(true, "remote_add_display", panel = RemotePanel.DISPLAY, addDisplay = true, edit = ::withMyVirtual)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun remoteAddDisplayPortraitEnDark() = remote(true, "remote_add_display", panel = RemotePanel.DISPLAY, addDisplay = true, edit = ::withMyVirtual)
+
+    /** 自定义分辨率填了超出范围的值、刷新率选自定义：按钮置灰，输入框下方写出合法范围 */
+    private fun addDisplayCustom(dark: Boolean) = remote(dark, "remote_add_display_custom", panel = RemotePanel.DISPLAY, addDisplay = true) {
+        compose.onNodeWithTag("vd-custom-res").performScrollTo().performClick()
+        compose.onNodeWithTag("vd-width").performScrollTo().performTextReplacement("9000")
+        compose.onNodeWithTag("vd-custom-hz").performScrollTo().performClick()
+    }
+
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remoteAddDisplayCustomZhDark() = addDisplayCustom(true)
+
+    @Test @Config(qualifiers = PHONE_LAND_EN)
+    fun remoteAddDisplayCustomEnLight() = addDisplayCustom(false)
+
+    /** 已加满 3 块：主按钮置灰并写「已加满 3 块」 */
+    @Test @Config(qualifiers = PHONE_LAND_ZH)
+    fun remoteAddDisplayFullZhDark() = remote(true, "remote_add_display_full", panel = RemotePanel.DISPLAY, addDisplay = true, edit = ::withFullVirtual)
 
     @Test @Config(qualifiers = PHONE_LAND_EN)
     fun remoteDisplaySwitchEnLight() = displaySwitch(false)

@@ -402,6 +402,10 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
     private weak var listener: PeerListener?
     private var currentPath: PathInfo
     private var closed = false
+    /// 本会话加的虚拟屏（与内核一致：属于加它的会话，断开时被控端自动删）
+    private let virtualLock = NSLock()
+    private var virtualDisplays: [DisplayInfo] = []
+    private var nextVirtualId: UInt32 = 101
     lazy var fileClient = MockFileClient(client: client, platform: device.platform, username: MockData.username(for: device))
     var timer: DispatchSourceTimer?
 
@@ -460,6 +464,7 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
         guard !closed else { return }
         closed = true
         timer?.cancel()
+        virtualLock.locked { virtualDisplays.removeAll() }
     }
 
     override func openTerminal(options: TerminalOptions, sink: TerminalSink) async throws -> TerminalChannel {
@@ -488,9 +493,14 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
         return ExecResult(code: out.code, stdout: out.text, stderr: "", timedOut: false, truncated: false, durationMs: 42)
     }
 
+    /// 被控端的屏幕：本机的几块 + 本会话加的虚拟屏
+    private func allDisplays() -> [DisplayInfo] {
+        MockData.displays(for: device) + virtualLock.locked { virtualDisplays }
+    }
+
     override func listDisplays() async throws -> [DisplayInfo] {
         await client.delay(150)
-        return MockData.displays(for: device)
+        return allDisplays()
     }
 
     override func openDisplay(options: DisplayOptions, sink: VideoSink) async throws -> DisplayChannel {
@@ -498,13 +508,62 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
         guard MockData.permissions(for: device).view else {
             throw GalaxyError.Permission(detail: client.zh ? "对方没有给你查看画面的权限" : "The remote owner has not granted screen access")
         }
-        let display = MockData.displays(for: device).first { $0.id == options.displayId } ?? MockData.displays(for: device)[0]
+        let all = allDisplays()
+        let display = all.first { $0.id == options.displayId } ?? all[0]
         return MockDisplayChannel(device: device, display: display, options: options, sink: sink, zh: client.zh)
+    }
+
+    // MARK: 虚拟屏（与内核一致：能力里有 virtual_display 且有控制权限才能加，最多 3 块；只能删本会话加的）
+
+    override func virtualDisplayMax() -> UInt32 {
+        MockData.virtualDisplayMax(for: device)
+    }
+
+    override func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32) async throws -> DisplayInfo {
+        await client.delay(500)
+        let zh = client.zh
+        guard MockData.capabilities(for: device).contains("virtual_display") else {
+            throw GalaxyError.Other(detail: zh ? "这台设备没有装虚拟屏驱动" : "The virtual display driver is not installed on this device")
+        }
+        guard MockData.permissions(for: device).control else {
+            throw GalaxyError.Permission(detail: zh ? "对方没有给你控制权限" : "The remote owner has not granted control")
+        }
+        let r = refresh == 0 ? 60 : refresh
+        guard VirtualDisplayLimits.sizeOk(VirtualDisplaySize(width, height)), VirtualDisplayLimits.refreshOk(r) else {
+            throw GalaxyError.Other(detail: zh ? "分辨率或刷新率不在允许范围内" : "The resolution or refresh rate is out of range")
+        }
+        let max = Int(virtualDisplayMax())
+        return try virtualLock.locked {
+            guard virtualDisplays.count < max else {
+                throw GalaxyError.Other(detail: zh ? "最多加 \(max) 块虚拟屏" : "At most \(max) virtual displays can be added")
+            }
+            let d = DisplayInfo(id: nextVirtualId, name: "LemonGalaxy Display \(nextVirtualId - 100)", width: width, height: height,
+                                scale: 1, primary: false, isVirtual: true)
+            nextVirtualId += 1
+            virtualDisplays.append(d)
+            return d
+        }
+    }
+
+    override func removeVirtualDisplay(displayId: UInt32) async throws {
+        await client.delay(250)
+        let removed = virtualLock.locked { () -> Bool in
+            guard let i = virtualDisplays.firstIndex(where: { $0.id == displayId }) else { return false }
+            virtualDisplays.remove(at: i)
+            return true
+        }
+        guard !removed else { return }
+        let zh = client.zh
+        if MockData.displays(for: device).contains(where: { $0.id == displayId && $0.isVirtual }) {
+            throw GalaxyError.Permission(detail: zh ? "只能删本会话加的虚拟屏" : "Only virtual displays added in this session can be removed")
+        }
+        throw GalaxyError.NotFound(detail: zh ? "没有这块屏" : "No such display")
     }
 
     override func screenshot(displayId: UInt32, maxWidth: UInt32) async throws -> ImageData {
         await client.delay(200)
-        let display = MockData.displays(for: device).first { $0.id == displayId } ?? MockData.displays(for: device)[0]
+        let all = allDisplays()
+        let display = all.first { $0.id == displayId } ?? all[0]
         let renderer = MockDesktopRenderer(device: device, display: display, zh: client.zh)
         return renderer.pngSnapshot(maxWidth: Int(maxWidth))
     }

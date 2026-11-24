@@ -470,6 +470,9 @@ internal sealed class MockPeer : ICorePeer
     private Timer? timer;
     private readonly object clipLock = new();
     private ClipboardData? remoteClipboard;
+    /// <summary>本会话加的虚拟屏（断开时与内核一样全部删掉）</summary>
+    private readonly List<DisplayInfo> virtualDisplays = new();
+    private uint nextVirtualId = 101;
 
     public MockPeer(MockClient client, DeviceInfo device)
     {
@@ -508,7 +511,12 @@ internal sealed class MockPeer : ICorePeer
     }
 
     public bool IsClosed() => closed;
-    public void Disconnect() { closed = true; timer?.Dispose(); }
+    public void Disconnect()
+    {
+        closed = true;
+        timer?.Dispose();
+        lock (virtualDisplays) virtualDisplays.Clear();
+    }
 
     public async Task<ICoreTerminal> OpenTerminal(TerminalOptions options, TerminalSink sink)
     {
@@ -535,14 +543,20 @@ internal sealed class MockPeer : ICorePeer
         return new ExecResult(r.code, r.text, "", false, false, 42);
     }
 
-    public async Task<DisplayInfo[]> ListDisplays() { await client.Delay(150); return MockData.Displays(device); }
+    /// <summary>对方的屏幕：固定的几块 + 本会话加的虚拟屏</summary>
+    private DisplayInfo[] AllDisplays()
+    {
+        lock (virtualDisplays) return MockData.Displays(device).Concat(virtualDisplays).ToArray();
+    }
+
+    public async Task<DisplayInfo[]> ListDisplays() { await client.Delay(150); return AllDisplays(); }
 
     public async Task<ICoreDisplay> OpenDisplay(DisplayOptions options, VideoSink sink)
     {
         await client.Delay(350);
         if (!MockData.PermissionsFor(device).View)
             throw new GalaxyException.Permission(client.Zh ? "对方没有给你查看画面的权限" : "The remote owner has not granted screen access");
-        var displays = MockData.Displays(device);
+        var displays = AllDisplays();
         if (displays.Length == 0) throw new GalaxyException.NotFound(client.Zh ? "对方没有可用的屏幕" : "No display available");
         var d = displays.FirstOrDefault(x => x.Id == options.DisplayId) ?? displays[0];
         return new MockDisplayChannel(device, d, options, sink, client.Zh, client.Options.LiveSimulation);
@@ -551,7 +565,8 @@ internal sealed class MockPeer : ICorePeer
     public async Task<ImageData> Screenshot(uint displayId, uint maxWidth)
     {
         await client.Delay(200);
-        var d = MockData.Displays(device).FirstOrDefault(x => x.Id == displayId) ?? MockData.Displays(device)[0];
+        var all = AllDisplays();
+        var d = all.FirstOrDefault(x => x.Id == displayId) ?? all[0];
         return new MockDesktopRenderer(device, client.Zh, 1280, (int)(1280.0 * d.Height / d.Width)).Png((int)maxWidth);
     }
 
@@ -585,6 +600,52 @@ internal sealed class MockPeer : ICorePeer
         if (!MockData.Capabilities(device).Contains("audio"))
             throw new GalaxyException.Permission(client.Zh ? "这台设备不能听声音" : "Sound is not available on this device");
         return new MockAudio(volume);
+    }
+
+    public uint VirtualDisplayMax()
+    {
+        const string key = "virtual_display_max=";
+        var caps = MockData.Capabilities(device);
+        if (!caps.Contains("virtual_display")) return 0;
+        var v = caps.FirstOrDefault(c => c.StartsWith(key, StringComparison.Ordinal));
+        return v != null && uint.TryParse(v.Substring(key.Length), out var n) ? n : 0;
+    }
+
+    /// <summary>与内核一样校验：要控制权限与驱动、范围合法、不超过上限；成功后屏幕列表里多一块 IsVirtual 的屏，能开画面</summary>
+    public async Task<DisplayInfo> AddVirtualDisplay(uint width, uint height, uint refresh)
+    {
+        await client.Delay(300);
+        var zh = client.Zh;
+        var max = VirtualDisplayMax();
+        if (max == 0) throw new GalaxyException.Permission(zh ? "这台设备不能加虚拟屏，或对方没有给你控制权限" : "This device cannot add virtual displays, or you do not have control permission");
+        if (refresh == 0) refresh = 60;
+        if (width is < 640 or > 7680 || height is < 480 or > 4320 || refresh is < 24 or > 240)
+            throw new GalaxyException.Protocol(zh ? "分辨率或刷新率超出范围" : "The resolution or refresh rate is out of range");
+        lock (virtualDisplays)
+        {
+            if (virtualDisplays.Count >= max) throw new GalaxyException.Other(zh ? $"最多只能加 {max} 块虚拟屏" : $"You can add at most {max} virtual displays");
+            var d = new DisplayInfo(nextVirtualId++, "LemonGalaxy Virtual Display " + (virtualDisplays.Count + 1), width, height, 1f, false, true);
+            virtualDisplays.Add(d);
+            return d;
+        }
+    }
+
+    public async Task RemoveVirtualDisplay(uint displayId)
+    {
+        await client.Delay(200);
+        var zh = client.Zh;
+        lock (virtualDisplays)
+        {
+            var i = virtualDisplays.FindIndex(d => d.Id == displayId);
+            if (i >= 0)
+            {
+                virtualDisplays.RemoveAt(i);
+                return;
+            }
+        }
+        if (MockData.Displays(device).Any(d => d.Id == displayId))
+            throw new GalaxyException.Permission(zh ? "只能删本次连接加的虚拟屏" : "You can only remove virtual displays added in this session");
+        throw new GalaxyException.NotFound(zh ? "没有这块屏幕" : "Display not found");
     }
 }
 

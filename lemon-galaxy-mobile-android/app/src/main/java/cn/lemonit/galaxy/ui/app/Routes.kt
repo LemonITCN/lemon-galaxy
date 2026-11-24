@@ -464,6 +464,8 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
                 }
             },
             onRecordingError = { msg -> container.toast(context.getString(R.string.rd_record_failed, msg)) },
+            onVirtualAddFailed = { msg -> container.toast(context.getString(R.string.rd_vd_add_failed, msg)) },
+            onVirtualRemoveFailed = { msg -> container.toast(context.getString(R.string.rd_vd_remove_failed, msg)) },
         ).also {
             it.setMouseKeys(prefs.remoteMouseKeys)
             it.setMouseKeysPos(prefs.mouseKeysX, prefs.mouseKeysY)
@@ -585,6 +587,10 @@ fun RemoteRoute(deviceId: String, container: AppContainer, nav: Navigator) {
             override fun onRotate() {
                 portrait = !portrait
             }
+
+            override fun onAddVirtualDisplay(width: Int, height: Int, refresh: Int) = controller.addVirtualDisplay(width, height, refresh)
+
+            override fun onRemoveVirtualDisplay(id: UInt) = controller.removeVirtualDisplay(id)
         },
         video = { modifier ->
             AndroidView(

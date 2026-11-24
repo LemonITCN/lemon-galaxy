@@ -2,6 +2,7 @@ package cn.lemonit.galaxy.ui.remote
 
 import android.view.Surface
 import cn.lemonit.galaxy.app.ConnectionManager
+import cn.lemonit.galaxy.app.PeerHandle
 import cn.lemonit.galaxy.app.userMessage
 import cn.lemonit.galaxy.core.bridge.AudioPlaybackInterface
 import cn.lemonit.galaxy.core.bridge.ClipboardData
@@ -13,11 +14,13 @@ import cn.lemonit.galaxy.core.bridge.PathInfo
 import cn.lemonit.galaxy.core.bridge.Platform
 import cn.lemonit.galaxy.core.bridge.RecordingInfo
 import cn.lemonit.galaxy.core.bridge.VideoCodec
+import cn.lemonit.galaxy.core.bridge.VideoSink
 import cn.lemonit.galaxy.data.VideoQuality
 import cn.lemonit.galaxy.ui.components.Clock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -72,8 +75,27 @@ data class RemoteUi(
     val recordingSince: Long? = null,
     /** 正在开始录像（等内核建文件、等关键帧） */
     val recordingBusy: Boolean = false,
+    /**
+     * 最多能在被控端加几块虚拟屏（docs/protocol.md 8.6）：0 表示不支持或没有控制权限，不显示入口。
+     * 每次拿到新会话重新取；会话断开时归零。
+     */
+    val virtualMax: Int = 0,
+    /** 本会话里自己加的虚拟屏 id：只有这些能删。会话换了或断开时清空。 */
+    val myVirtualIds: Set<UInt> = emptySet(),
+    /** 正在加虚拟屏（按钮转圈并禁用） */
+    val virtualAdding: Boolean = false,
+    /** 正在删的虚拟屏 */
+    val virtualRemoving: Set<UInt> = emptySet(),
+    /** 每加好一块加一：界面据此收起加屏表单并提示 [virtualAdded] */
+    val virtualAddedSeq: Int = 0,
+    val virtualAdded: DisplayInfo? = null,
+    /** 每删掉一块加一：界面提示已删掉 */
+    val virtualRemovedSeq: Int = 0,
 ) {
     val recording: Boolean get() = recordingSince != null
+
+    /** 已加满：自己加的块数到了上限。 */
+    val virtualFull: Boolean get() = myVirtualIds.size >= virtualMax
 
     /** 本机画光标：鼠标模式且被控端支持。 */
     val localCursor: Boolean get() = mouseMode && clientCursor
@@ -116,10 +138,16 @@ class RemoteDesktopController(
     private val onRecordingSaved: (info: RecordingInfo, auto: Boolean) -> Unit = { _, _ -> },
     /** 开始或停止录像失败（参数是原因） */
     private val onRecordingError: (String) -> Unit = {},
+    /** 加虚拟屏失败（参数是原因），界面用提示条显示，加屏表单不关 */
+    private val onVirtualAddFailed: (String) -> Unit = {},
+    /** 删虚拟屏失败（参数是原因） */
+    private val onVirtualRemoveFailed: (String) -> Unit = {},
 ) {
     private val _ui = MutableStateFlow(RemoteUi(title, platform, quality = quality, mouseMode = mouseMode))
     val ui: StateFlow<RemoteUi> = _ui.asStateFlow()
     @Volatile private var channel: DisplayChannelInterface? = null
+    /** 当前这一路画面的回调；换屏幕、离开时换掉，旧画面迟到的帧与关闭通知直接丢掉 */
+    @Volatile private var activeSink: VideoSink? = null
 
     // 声音：以下状态都只在主线程（scope 是 Main）读写
     private var audioWanted = audioWanted
@@ -130,6 +158,9 @@ class RemoteDesktopController(
     private var stopped = false
     /** 每次开始或停止录像加一：开始到一半被停掉时，迟到的结果直接收掉 */
     private var recGen = 0
+    /** 当前绑定的会话与跟着它的监听（路径、断开、自己加的虚拟屏）；换会话或离开时取消 */
+    private var boundPeer: PeerHandle? = null
+    private var peerJob: Job? = null
 
     val decoder = VideoDecoder(
         requestKeyframe = { channel?.requestKeyframe() },
@@ -154,34 +185,115 @@ class RemoteDesktopController(
         },
     )
 
+    /** 当前会话；连接断过、重新连上换了会话时重新绑定（能力、虚拟屏上限、自己加的虚拟屏）。只在 [scope] 线程上调用。 */
+    private suspend fun peer(): PeerHandle {
+        val p = conn.peer(deviceId)
+        if (p !== boundPeer) bind(p)
+        return p
+    }
+
+    private fun bind(peer: PeerHandle) {
+        val previous = boundPeer
+        boundPeer = peer
+        peerJob?.cancel()
+        val virtualMax = runCatching { peer.session.virtualDisplayMax().toInt() }.getOrDefault(0)
+        _ui.update {
+            it.copy(
+                // 换了会话：上一个会话加的虚拟屏已被被控端删掉
+                displays = if (previous != null) it.displays.filter { d -> d.id !in it.myVirtualIds } else it.displays,
+                path = peer.path.value,
+                privacySupported = "privacy" in peer.info.capabilities,
+                privacyAllowed = peer.info.permissions.control,
+                audioSupported = "audio" in peer.info.capabilities,
+                clientCursor = "client_cursor" in peer.info.capabilities,
+                virtualMax = if (peer.closed) 0 else virtualMax,
+                myVirtualIds = peer.myVirtualDisplays.value,
+                virtualRemoving = emptySet(),
+            )
+        }
+        if (previous != null) refreshDisplays()
+        peerJob = scope.launch {
+            launch { peer.path.collect { p -> _ui.update { it.copy(path = p) } } }
+            // 自己加的少了（删掉或会话结束被控端自动删）：列表里也去掉
+            launch {
+                peer.myVirtualDisplays.collect { ids ->
+                    _ui.update { u ->
+                        val gone = u.myVirtualIds - ids
+                        u.copy(myVirtualIds = ids, displays = if (gone.isEmpty()) u.displays else u.displays.filter { it.id !in gone })
+                    }
+                }
+            }
+            // 会话结束：被控端已自动关掉隐私屏、删掉本会话加的虚拟屏，开关复位、加屏入口收起；声音通道随会话失效，停掉本机播放
+            launch {
+                peer.closedReason.collect { r ->
+                    if (r != null) {
+                        _ui.update {
+                            it.copy(
+                                privacyOn = false,
+                                virtualMax = 0,
+                                displays = it.displays.filter { d -> d.id !in it.myVirtualIds },
+                                myVirtualIds = emptySet(),
+                                virtualRemoving = emptySet(),
+                            )
+                        }
+                        stopAudio()
+                        stopRecording(auto = false)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 每路画面一个回调，只有当前这一路的才交给解码器：切屏或删掉正在看的屏后，
+     * 旧画面迟到的帧、光标、关闭通知（"stopped" 或被控端关流）不会把新画面标成失败。
+     */
+    private inner class StreamSink : VideoSink {
+        private val current get() = activeSink === this
+
+        override fun onConfig(codec: VideoCodec, width: UInt, height: UInt) {
+            if (current) decoder.onConfig(codec, width, height)
+        }
+
+        override fun onFrame(data: ByteArray, ptsUs: ULong, keyframe: Boolean) {
+            if (current) decoder.onFrame(data, ptsUs, keyframe)
+        }
+
+        override fun onCursor(x: Int, y: Int, visible: Boolean) {
+            if (current) decoder.onCursor(x, y, visible)
+        }
+
+        override fun onClosed(reason: String) {
+            if (current) decoder.onClosed(reason)
+        }
+    }
+
+    /**
+     * 重新取到的屏幕列表。[asked] 是发请求时「自己加的」集合：其中列表里已经没有的，被控端那边没了
+     * （如 Windows 换控制台会话后屏消失），从集合去掉、计数腾出来。[added] 是刚加好的屏：被控端列表里暂时还没有就先补上。
+     * 请求发出之后才加好的屏，这份列表里可能还没有，保留不动。
+     */
+    private fun applyDisplays(peer: PeerHandle, fetched: List<DisplayInfo>, asked: Set<UInt>, added: DisplayInfo? = null) {
+        val list = fetched.toMutableList()
+        if (added != null && list.none { it.id == added.id }) list += added
+        val mine = peer.myVirtualDisplays.value
+        _ui.value.displays.filter { d -> d.id in mine && d.id !in asked && list.none { it.id == d.id } }.forEach { list += it }
+        val ids = list.mapTo(HashSet()) { it.id }
+        peer.retainVirtualDisplays { it in ids || it !in asked }
+        _ui.update { u ->
+            u.copy(displays = list, myVirtualIds = if (boundPeer === peer) peer.myVirtualDisplays.value else u.myVirtualIds)
+        }
+    }
+
     fun start() {
         scope.launch {
             try {
-                val peer = conn.peer(deviceId)
-                _ui.update {
-                    it.copy(
-                        path = peer.path.value,
-                        privacySupported = "privacy" in peer.info.capabilities,
-                        privacyAllowed = peer.info.permissions.control,
-                        audioSupported = "audio" in peer.info.capabilities,
-                        clientCursor = "client_cursor" in peer.info.capabilities,
-                    )
-                }
-                scope.launch { peer.path.collect { p -> _ui.update { it.copy(path = p) } } }
-                // 会话结束：被控端已自动关掉隐私屏，开关复位；声音通道随会话失效，停掉本机播放
-                scope.launch {
-                    peer.closedReason.collect { r ->
-                        if (r != null) {
-                            _ui.update { it.copy(privacyOn = false) }
-                            stopAudio()
-                            stopRecording(auto = false)
-                        }
-                    }
-                }
+                val peer = peer()
+                val asked = peer.myVirtualDisplays.value
                 val displays = peer.session.listDisplays()
                 val first = displays.firstOrNull { it.primary } ?: displays.firstOrNull()
                     ?: throw IllegalStateException("no display")
-                _ui.update { it.copy(displays = displays) }
+                applyDisplays(peer, displays, asked)
                 open(first.id)
             } catch (e: Exception) {
                 _ui.update { it.copy(status = RemoteStatus.FAILED, error = e.userMessage()) }
@@ -192,6 +304,8 @@ class RemoteDesktopController(
     private suspend fun open(displayId: UInt) {
         // 换屏幕 / 重开画面前先停录像拿到结果（关画面时内核也会结束录像，但不返回信息）
         stopRecording(auto = false)
+        // 先换掉回调：旧画面停下时的 "stopped" 不算新画面失败
+        activeSink = null
         channel?.stop()
         channel = null
         _ui.update {
@@ -205,10 +319,12 @@ class RemoteDesktopController(
             )
         }
         val q = _ui.value.quality
-        val peer = conn.peer(deviceId)
+        val peer = peer()
+        val sink = StreamSink()
+        activeSink = sink
         channel = peer.session.openDisplay(
             DisplayOptions(displayId, q.maxFps, q.bitrateKbps, VideoDecoder.supportedCodecs(), viewOnly = false),
-            decoder,
+            sink,
         )
         // 每路画面各自记着要不要画光标（默认画）：鼠标模式由本机画，告诉被控端别画
         applyClientCursor()
@@ -216,22 +332,93 @@ class RemoteDesktopController(
         if (audioWanted) startAudio()
     }
 
-    /** 重新取屏幕列表（分辨率变化后）；失败不影响画面。 */
+    /** 重新取屏幕列表（分辨率变化、换了会话后）；失败不影响画面。 */
     private fun refreshDisplays() {
         scope.launch {
-            runCatching { conn.peer(deviceId).session.listDisplays() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { list ->
-                _ui.update { it.copy(displays = list) }
+            try {
+                val peer = peer()
+                val asked = peer.myVirtualDisplays.value
+                val list = peer.session.listDisplays()
+                if (list.isNotEmpty() && boundPeer === peer) applyDisplays(peer, list, asked)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
             }
         }
     }
 
     fun switchDisplay(id: UInt) {
         if (id == _ui.value.displayId) return
+        scope.launch { switchTo(id) }
+    }
+
+    private suspend fun switchTo(id: UInt) {
+        try {
+            open(id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _ui.update { it.copy(status = RemoteStatus.FAILED, error = e.userMessage()) }
+        }
+    }
+
+    /**
+     * 加一块虚拟屏（docs/protocol.md 8.6）：记入自己加的、重新取屏幕列表、直接切过去看。
+     * 失败时经 [onVirtualAddFailed] 提示原因（界面的加屏表单不关）。
+     */
+    fun addVirtualDisplay(width: Int, height: Int, refresh: Int) {
+        val s = _ui.value
+        if (stopped || s.virtualAdding || s.virtualMax <= 0 || s.virtualFull) return
+        if (!VirtualDisplays.sizeOk(width, height) || !VirtualDisplays.refreshOk(refresh)) return
+        _ui.update { it.copy(virtualAdding = true) }
+        scope.launch {
+            val added = try {
+                val peer = peer()
+                val d = peer.session.addVirtualDisplay(width.toUInt(), height.toUInt(), refresh.toUInt())
+                peer.virtualDisplayAdded(d.id)
+                val asked = peer.myVirtualDisplays.value
+                val fetched = runCatching { peer.session.listDisplays() }.getOrNull()?.takeIf { it.isNotEmpty() } ?: _ui.value.displays
+                applyDisplays(peer, fetched, asked, added = d)
+                _ui.update { u -> u.copy(virtualAdding = false, virtualAddedSeq = u.virtualAddedSeq + 1, virtualAdded = d) }
+                d
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _ui.update { it.copy(virtualAdding = false) }
+                e.userMessage().takeIf { it.isNotEmpty() }?.let(onVirtualAddFailed)
+                null
+            }
+            // 直接切过去看（已离开界面就不开画面了：屏留在会话里，回来还能删）
+            if (added != null && !stopped) switchTo(added.id)
+        }
+    }
+
+    /**
+     * 删掉自己加的虚拟屏。正在看的就是它时先切回主屏（没有主屏就第一块）再删，
+     * 免得画面流被被控端关掉、迟到的关闭通知把新画面标成失败。失败时经 [onVirtualRemoveFailed] 提示原因。
+     */
+    fun removeVirtualDisplay(id: UInt) {
+        val s = _ui.value
+        if (stopped || id !in s.myVirtualIds || id in s.virtualRemoving) return
+        _ui.update { it.copy(virtualRemoving = it.virtualRemoving + id) }
         scope.launch {
             try {
-                open(id)
+                val peer = peer()
+                if (_ui.value.displayId == id) {
+                    val rest = _ui.value.displays.filter { it.id != id }
+                    (rest.firstOrNull { it.primary } ?: rest.firstOrNull())?.let { switchTo(it.id) }
+                }
+                peer.session.removeVirtualDisplay(id)
+                peer.virtualDisplayRemoved(id)
+                val asked = peer.myVirtualDisplays.value
+                val fetched = runCatching { peer.session.listDisplays() }.getOrNull()?.takeIf { it.isNotEmpty() } ?: _ui.value.displays
+                applyDisplays(peer, fetched.filter { it.id != id }, asked)
+                _ui.update { u -> u.copy(myVirtualIds = u.myVirtualIds - id, virtualRemoving = u.virtualRemoving - id, virtualRemovedSeq = u.virtualRemovedSeq + 1) }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _ui.update { it.copy(status = RemoteStatus.FAILED, error = e.userMessage()) }
+                _ui.update { it.copy(virtualRemoving = it.virtualRemoving - id) }
+                e.userMessage().takeIf { it.isNotEmpty() }?.let(onVirtualRemoveFailed)
             }
         }
     }
@@ -399,8 +586,11 @@ class RemoteDesktopController(
             conn.existingPeer(deviceId)?.let { p -> scope.launch { runCatching { p.session.setPrivacy(false) } } }
             _ui.update { it.copy(privacyOn = false) }
         }
+        activeSink = null
         channel?.stop()
         channel = null
         decoder.release()
+        peerJob?.cancel()
+        peerJob = null
     }
 }

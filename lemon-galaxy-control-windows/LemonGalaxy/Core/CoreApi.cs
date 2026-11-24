@@ -93,6 +93,13 @@ internal interface ICorePeer
     Task SetPrivacy(bool on);
     /// <summary>收听被控端的系统声音，内核用本机默认输出设备（WASAPI）播放；能力列表里有 "audio" 才支持。volume 0..1</summary>
     Task<ICoreAudio> StartAudio(float volume);
+    /// <summary>最多能在被控端加几块虚拟屏（能力列表 "virtual_display" + "virtual_display_max=N"）；不支持或没有控制权限时为 0</summary>
+    uint VirtualDisplayMax();
+    /// <summary>在被控端加一块虚拟屏（扩展桌面），返回它的屏幕信息（IsVirtual 为真），id 直接用于 OpenDisplay。
+    /// 宽 640–7680、高 480–4320、刷新率 24–240（0 表示 60）。属于本会话，断开时被控端自动删掉；要控制权限</summary>
+    Task<DisplayInfo> AddVirtualDisplay(uint width, uint height, uint refresh);
+    /// <summary>删掉本会话加的虚拟屏（别的会话加的、被控端自动加的无头兜底屏都删不了）</summary>
+    Task RemoveVirtualDisplay(uint displayId);
     /// <summary>复制粘贴文件（本机 → 远端）：本机文件 / 文件夹传到被控端暂存区，再把被控端剪贴板设成它们。超过 4 GB 或 1 万个文件时报错；需要剪贴板与文件权限</summary>
     ICoreClipboardTransfer ClipboardPushFiles(string[] localPaths, TransferListener listener);
     /// <summary>复制粘贴文件（远端 → 本机）：把远端剪贴板里的文件下载到 localDir，完成后 Paths() 是本机上的顶层路径</summary>

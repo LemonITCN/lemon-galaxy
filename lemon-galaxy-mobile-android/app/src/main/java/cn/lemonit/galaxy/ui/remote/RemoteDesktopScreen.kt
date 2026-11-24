@@ -47,6 +47,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -119,6 +120,12 @@ interface RemoteActions {
 
     /** 横竖屏切换。 */
     fun onRotate() = Unit
+
+    /** 在被控端加一块虚拟屏（会话的虚拟屏上限大于 0 时才有入口），加好后直接切过去。 */
+    fun onAddVirtualDisplay(width: Int, height: Int, refresh: Int) = Unit
+
+    /** 删掉自己加的虚拟屏。 */
+    fun onRemoveVirtualDisplay(id: UInt) = Unit
 }
 
 private fun click(button: PointerButton, x: Int, y: Int) = listOf(
@@ -144,11 +151,15 @@ fun RemoteDesktopScreen(
     initialMenuOpen: Boolean = false,
     initialPanel: RemotePanel? = null,
     initialKeyboard: Boolean = false,
+    /** 打开时显示器面板里已展开加虚拟屏表单（截图用） */
+    initialAddDisplay: Boolean = false,
     state: RemoteViewState = remember { RemoteViewState() },
 ) {
     val density = LocalDensity.current
     var menuOpen by remember { mutableStateOf(initialMenuOpen || initialPanel != null) }
     var panel by remember { mutableStateOf(initialPanel) }
+    // 显示器面板里展开的加虚拟屏表单
+    var addDisplayOpen by remember { mutableStateOf(initialAddDisplay && initialPanel == RemotePanel.DISPLAY) }
     var keyboardOpen by remember { mutableStateOf(initialKeyboard) }
     var notice by remember { mutableStateOf<Notice?>(null) }
     val currentUi by rememberUpdatedState(ui)
@@ -160,6 +171,8 @@ fun RemoteDesktopScreen(
     val touchHint = stringResource(R.string.rd_mode_touch_hint)
     val mouseHint = stringResource(R.string.rd_mode_mouse_hint)
     val primaryText = stringResource(R.string.rd_primary)
+    val vdAddedText = stringResource(R.string.rd_vd_added)
+    val vdRemovedText = stringResource(R.string.rd_vd_removed)
     val zoomNotice by rememberUpdatedState { v: Viewport -> notice = Notice(String.format(zoomText, (v.zoom * 100).roundToInt())) }
 
     fun showDisplay(d: DisplayInfo) {
@@ -375,6 +388,22 @@ fun RemoteDesktopScreen(
                 notice = null
             }
         }
+        // 加好虚拟屏：表单收起回到屏幕卡片（控制器已切到新屏），轻提示一下；删掉同样提示
+        var seenAdded by remember { mutableIntStateOf(ui.virtualAddedSeq) }
+        LaunchedEffect(ui.virtualAddedSeq) {
+            if (ui.virtualAddedSeq != seenAdded) {
+                seenAdded = ui.virtualAddedSeq
+                addDisplayOpen = false
+                notice = Notice(String.format(vdAddedText, ui.virtualAdded?.let { "${it.width}×${it.height}" } ?: ""))
+            }
+        }
+        var seenRemoved by remember { mutableIntStateOf(ui.virtualRemovedSeq) }
+        LaunchedEffect(ui.virtualRemovedSeq) {
+            if (ui.virtualRemovedSeq != seenRemoved) {
+                seenRemoved = ui.virtualRemovedSeq
+                notice = Notice(vdRemovedText)
+            }
+        }
         val configuration = LocalConfiguration.current
         val portrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT
         // 只在“是否放大 / 是否原始像素”变化时重组，捏合过程中不跟着每帧重组
@@ -386,13 +415,18 @@ fun RemoteDesktopScreen(
             }
         }
         BackHandler(enabled = menuOpen) {
-            if (panel != null) panel = null else menuOpen = false
+            when {
+                addDisplayOpen -> addDisplayOpen = false
+                panel != null -> panel = null
+                else -> menuOpen = false
+            }
         }
         RemoteDock(
             ui = ui,
             elapsed = elapsed,
             expanded = menuOpen,
             panel = panel,
+            addDisplayOpen = addDisplayOpen,
             view = DockView(
                 zoomed = zoomFlags.first,
                 canActualSize = zoomFlags.second,
@@ -434,9 +468,16 @@ fun RemoteDesktopScreen(
             ),
             onExpanded = { open ->
                 menuOpen = open
-                if (!open) panel = null
+                if (!open) {
+                    panel = null
+                    addDisplayOpen = false
+                }
             },
-            onPanel = { panel = it },
+            onPanel = {
+                panel = it
+                addDisplayOpen = false
+            },
+            onAddDisplayOpen = { addDisplayOpen = it },
         )
     }
 }

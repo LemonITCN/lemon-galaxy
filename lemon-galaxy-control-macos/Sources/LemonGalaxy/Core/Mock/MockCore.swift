@@ -518,6 +518,14 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
         set { clipLock.locked { _remoteClipboard = newValue } }
     }
 
+    /// 本会话加的虚拟屏（与被控端一致：属于会话，断开即没）
+    private var _addedDisplays: [DisplayInfo] = []
+    var addedDisplays: [DisplayInfo] {
+        get { clipLock.locked { _addedDisplays } }
+        set { clipLock.locked { _addedDisplays = newValue } }
+    }
+    var allDisplays: [DisplayInfo] { MockData.displays(for: device) + addedDisplays }
+
     init(client: MockGalaxyClient, device: DeviceInfo) {
         self.client = client
         self.device = device
@@ -589,7 +597,43 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
 
     override func listDisplays() async throws -> [DisplayInfo] {
         await client.delay(150)
-        return MockData.displays(for: device)
+        return allDisplays
+    }
+
+    override func virtualDisplayMax() -> UInt32 {
+        let caps = MockData.capabilities(for: device)
+        guard caps.contains("virtual_display") else { return 0 }
+        return caps.lazy.compactMap { $0.hasPrefix("virtual_display_max=") ? UInt32($0.dropFirst(20)) : nil }.first ?? 0
+    }
+
+    override func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32) async throws -> DisplayInfo {
+        await client.delay(600)
+        let max = virtualDisplayMax()
+        guard max > 0 else {
+            throw GalaxyError.Permission(detail: client.zh ? "被控端不支持虚拟屏" : "The remote device does not support virtual displays")
+        }
+        let hz = refresh == 0 ? 60 : refresh
+        guard (640...7680).contains(width), (480...4320).contains(height), (24...240).contains(hz) else {
+            throw GalaxyError.Other(detail: client.zh ? "分辨率或刷新率不合法" : "Invalid resolution or refresh rate")
+        }
+        guard addedDisplays.count < Int(max) else {
+            throw GalaxyError.Other(detail: client.zh ? "已到虚拟屏上限（\(max) 块）" : "Virtual display limit reached (\(max))")
+        }
+        let id = (allDisplays.map(\.id).max() ?? 0) + 1
+        let d = DisplayInfo(id: id, name: "LemonGalaxy Display \(addedDisplays.count + 1)", width: width, height: height, scale: 1, primary: false, isVirtual: true)
+        addedDisplays.append(d)
+        return d
+    }
+
+    override func removeVirtualDisplay(displayId: UInt32) async throws {
+        await client.delay(300)
+        if addedDisplays.contains(where: { $0.id == displayId }) {
+            addedDisplays.removeAll { $0.id == displayId }
+        } else if allDisplays.contains(where: { $0.id == displayId }) {
+            throw GalaxyError.Permission(detail: client.zh ? "只能删本会话加的虚拟屏" : "You can only remove virtual displays added in this session")
+        } else {
+            throw GalaxyError.NotFound(detail: client.zh ? "没有这块屏幕" : "No such display")
+        }
     }
 
     override func openDisplay(options: DisplayOptions, sink: VideoSink) async throws -> DisplayChannel {
@@ -597,13 +641,13 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
         guard MockData.permissions(for: device).view else {
             throw GalaxyError.Permission(detail: client.zh ? "对方没有给你查看画面的权限" : "The remote owner has not granted screen access")
         }
-        let display = MockData.displays(for: device).first { $0.id == options.displayId } ?? MockData.displays(for: device)[0]
+        let display = allDisplays.first { $0.id == options.displayId } ?? MockData.displays(for: device)[0]
         return MockDisplayChannel(device: device, display: display, options: options, sink: sink, zh: client.zh)
     }
 
     override func screenshot(displayId: UInt32, maxWidth: UInt32) async throws -> ImageData {
         await client.delay(200)
-        let display = MockData.displays(for: device).first { $0.id == displayId } ?? MockData.displays(for: device)[0]
+        let display = allDisplays.first { $0.id == displayId } ?? MockData.displays(for: device)[0]
         let renderer = MockDesktopRenderer(device: device, display: display, zh: client.zh)
         return renderer.pngSnapshot(maxWidth: Int(maxWidth))
     }

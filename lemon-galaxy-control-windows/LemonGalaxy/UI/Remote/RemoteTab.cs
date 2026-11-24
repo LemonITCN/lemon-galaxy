@@ -17,7 +17,7 @@ internal enum RemotePhase { Connecting, Streaming, Failed }
 /// 远程桌面标签：list_displays → open_display(VideoSink) → 解码线程 H.264 软解 → 界面线程写 WriteableBitmap；
 /// 鼠标键盘转 InputEvent（键盘为 USB HID 用法码，坐标为被控屏幕像素）。界面忙时只显示最新一帧，解码跟不上时丢帧并请求关键帧。
 /// </summary>
-internal sealed class RemoteTab : TabModel
+internal sealed partial class RemoteTab : TabModel
 {
     public RemotePhase Phase = RemotePhase.Connecting;
     public string FailReason = "";
@@ -121,15 +121,21 @@ internal sealed class RemoteTab : TabModel
             try
             {
                 var p = await App.Peer(DeviceId!);
+                // 新的会话：被控端随旧会话已删掉我加的虚拟屏
+                if (!ReferenceEquals(Peer, p)) ResetVirtual();
                 Peer = p;
-                // 会话断了：声音通道随之失效，停掉本机播放；正在录像的结束并提示保存位置
+                VirtualMax = QueryVirtualMax(p);
+                // 会话断了：声音通道随之失效，停掉本机播放；正在录像的结束并提示保存位置；我加的虚拟屏被控端已自动删掉
                 p.Watch(this, () =>
                 {
                     if (p.ClosedReason == null || !ReferenceEquals(Peer, p)) return;
                     StopAudio();
                     StopRecording();
+                    ResetVirtual();
+                    Notify();
                 });
                 Displays = await p.Session.ListDisplays();
+                PruneVirtual();
                 var first = Displays.FirstOrDefault(d => d.Primary) ?? Displays.FirstOrDefault();
                 if (first == null)
                 {
@@ -881,6 +887,21 @@ internal sealed class RemoteTab : TabModel
         stats?.Stop();
         clipTimer?.Stop();
         CancelFileClip();
+        VirtualUi?.Close();
+        // 同一会话可能还被终端、文件标签用着：删掉本标签加的虚拟屏（会话随后断开的话被控端也会删）
+        var vp = Peer;
+        if (vp != null && vp.ClosedReason == null && MyVirtual.Count > 0)
+        {
+            var ids = MyVirtual.Keys.ToList();
+            MyVirtual.Clear();
+            _ = Task.Run(async () =>
+            {
+                foreach (var id in ids)
+                {
+                    try { await vp.Session.RemoveVirtualDisplay(id); } catch { }
+                }
+            });
+        }
         queue.CompleteAdding();
         FullscreenWindow?.Close();
     }
@@ -906,6 +927,9 @@ internal static class RemoteView
 {
     public static FrameworkElement Build(AppModel app, RemoteTab tab)
     {
+        // 加虚拟屏的按钮与弹出层跟着视图换（换主题时按新配色重建）
+        tab.VirtualUi?.Close();
+        tab.VirtualUi = new VirtualDisplayPopover(tab);
         var dock = new DockPanel { Background = Brushes.Black };
         var bar = new Region(() => Toolbar(app, tab)).On(tab, app.Data);
         DockPanel.SetDock(bar, Dock.Top);
@@ -946,20 +970,26 @@ internal static class RemoteView
             {
                 var d = tab.Displays[i];
                 var sel = tab.DisplayId == d.Id;
+                var mine = tab.IsMyVirtual(d.Id);
                 var b = new Btn
                 {
                     Height = 26, Padding = new Thickness(8, 0, 8, 0), CornerRadius = new CornerRadius(6), Normal = sel ? Th.B(Th.P.Accent, 0.14) : Brushes.Transparent, HoverBrush = sel ? Th.B(Th.P.Accent, 0.2) : Th.Hover2,
                     Child = K.Row(4, K.Icon(d.IsVirtual ? "fit" : "display", 12, sel ? Th.Accent : Th.Secondary), K.Text((i + 1).ToString(CultureInfo.InvariantCulture), 12.5, sel ? Th.Accent : Th.Secondary, sel ? FontWeights.SemiBold : FontWeights.Normal)),
                 };
                 b.UpdateLook();
-                K.Tip(b, L.T("remote.screen", i + 1) + $" · {d.Name} · {d.Width}×{d.Height}");
+                K.Tip(b, L.T("remote.screen", i + 1) + $" · {d.Name} · {d.Width}×{d.Height}" + (d.IsVirtual ? " · " + L.T(mine ? "remote.vd.mine.badge" : "remote.vd.badge") : ""));
                 var id = d.Id;
                 b.Click += () => Ui.Run(() => tab.Open(id));
+                // 我加的虚拟屏：右键可删
+                if (mine) K.ContextMenuFor(b, () => new List<MenuEntry> { new(L.T("remote.vd.remove"), () => Ui.Run(() => tab.RemoveVirtualDisplay(id)), Enabled: !tab.VirtualBusy) });
                 screens.Children.Add(b);
             }
             items.Add(screens);
-            items.Add(Divider());
         }
+        // 加虚拟屏：支持时始终显示（只有一块屏时也在）
+        tab.VirtualUi?.Sync();
+        if (tab.VirtualSupported && tab.VirtualUi != null) items.Add(tab.VirtualUi.Anchor);
+        if (tab.Displays.Length > 1 || tab.VirtualSupported) items.Add(Divider());
         items.Add(K.Segmented(new[] { (true, L.T("remote.fit")), (false, "1:1") }, tab.FitMode, v => { tab.FitMode = v; tab.Notify(); }, height: 28));
         items.Add(QualityMenu(tab));
         items.Add(Divider());

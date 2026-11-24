@@ -9,13 +9,21 @@ struct DockPanelView: View {
     let portrait: Bool
     let onClose: () -> Void
     @Environment(\.loc) private var loc
+    /// 显示器面板里展开的加屏表单（nil 为屏幕卡片视图）。放在这里而不是 DisplayPanel：面板内容在 ViewThatFits 里有两份，状态只能有一份
+    @State private var vdForm: VirtualDisplayForm?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
-            ViewThatFits(in: .vertical) {
-                content
-                ScrollView(.vertical, showsIndicators: false) { content }
+            if panel == .display, vdForm != nil {
+                VirtualDisplayFormHeader(session: session) { vdForm = nil }
+                // 表单里有输入框：始终放在滚动区里，键盘弹出、可用高度变小时不换视图，输入框不丢焦点
+                HuggingScrollView { vdFormContent }
+            } else {
+                header
+                ViewThatFits(in: .vertical) {
+                    content
+                    ScrollView(.vertical, showsIndicators: false) { content }
+                }
             }
         }
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(DockColors.bg))
@@ -23,6 +31,11 @@ struct DockPanelView: View {
         // 吃掉面板内空白处的点按，不穿透到下面的收起层
         .contentShape(Rectangle())
         .onTapGesture {}
+        // 换到别的面板、会话断开（入口收起）时表单也收起
+        .onChange(of: panel) { _ in vdForm = nil }
+        .onChange(of: session.virtualQuota.available) { available in
+            if !available { vdForm = nil }
+        }
     }
 
     private var title: String {
@@ -53,10 +66,23 @@ struct DockPanelView: View {
         .padding(.top, 4)
     }
 
+    private var vdFormContent: some View {
+        VirtualDisplayFormView(
+            session: session,
+            form: Binding(get: { vdForm ?? VirtualDisplayForm() }, set: { if vdForm != nil { vdForm = $0 } }),
+            onAdded: { vdForm = nil }
+        )
+        .padding(.horizontal, 14)
+        .padding(.bottom, 14)
+    }
+
     @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             switch panel {
-            case .display: DisplayPanel(session: session, actions: actions, portrait: portrait)
+            case .display:
+                DisplayPanel(session: session, actions: actions, portrait: portrait) {
+                    vdForm = VirtualDisplayForm(local: LocalScreen.virtualDisplaySize)
+                }
             case .shortcuts: ShortcutsPanel(session: session)
             case .tools: ToolsPanel(session: session, actions: actions)
             }
@@ -138,16 +164,18 @@ struct DockGrid<Item, Cell: View>: View {
 
 // MARK: 显示器
 
-/// 显示器：屏幕卡片、画质五档、视图（适应屏幕 / 原始像素 / 横竖屏）、连接路径与分辨率
+/// 显示器：屏幕卡片（被控端支持时最后一张是「加虚拟屏」）、画质五档、视图（适应屏幕 / 原始像素 / 横竖屏）、连接路径与分辨率
 struct DisplayPanel: View {
     @ObservedObject var session: RemoteSession
     let actions: DockActions
     let portrait: Bool
+    /// 点「加虚拟屏」卡片：在同一面板内展开加屏表单
+    let onAddVirtual: () -> Void
     @Environment(\.loc) private var loc
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if !session.displays.isEmpty { displays }
+            if !session.displays.isEmpty || session.virtualQuota.available { displays }
             PanelSectionTitle(text: loc("remote.quality"))
             qualityRow
             PanelSectionTitle(text: loc("remote.view"))
@@ -164,7 +192,14 @@ struct DisplayPanel: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(Array(session.displays.enumerated()), id: \.element.id) { i, d in
-                        DisplayCard(index: i, display: d, selected: d.id == session.displayId) { actions.pickDisplay(d.id) }
+                        let mine = session.myVirtual.contains(d.id)
+                        DisplayCard(index: i, display: d, selected: d.id == session.displayId, mine: mine,
+                                    removing: session.virtualRemoving.contains(d.id),
+                                    onRemove: mine ? { session.removeVirtualDisplay(d.id) } : nil) { actions.pickDisplay(d.id) }
+                    }
+                    let quota = session.virtualQuota
+                    if quota.available {
+                        AddVirtualDisplayCard(quota: quota, enabled: !quota.full && !session.virtualAdding, action: onAddVirtual)
                     }
                 }
                 .padding(.top, 4)
@@ -196,10 +231,15 @@ struct DisplayPanel: View {
     }
 }
 
+/// 屏幕卡片：序号、名称、「分辨率 · 主屏 · 虚拟屏 · 我加的」；我加的虚拟屏右上角有删除按钮
 private struct DisplayCard: View {
     let index: Int
     let display: DisplayInfo
     let selected: Bool
+    var mine = false
+    var removing = false
+    /// 只给本会话加的虚拟屏
+    var onRemove: (() -> Void)?
     let action: () -> Void
     @Environment(\.loc) private var loc
 
@@ -207,13 +247,36 @@ private struct DisplayCard: View {
         var s: String = "\(display.width)×\(display.height)"
         if display.primary { s += " · " + loc("remote.primary") }
         if display.isVirtual { s += " · " + loc("remote.virtual") }
+        if mine { s += " · " + loc("remote.vdMine") }
         return s
     }
 
     var body: some View {
-        Button(action: action) { face }
-            .buttonStyle(.plain)
-            .accessibilityAddTraits(selected ? .isSelected : [])
+        ZStack(alignment: .topTrailing) {
+            Button(action: action) { face }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            if let onRemove { removeButton(onRemove) }
+        }
+    }
+
+    /// 右上角的小删除按钮（看得见的是 18 点的圆，触控区 32 点）；删除中转圈
+    private func removeButton(_ remove: @escaping () -> Void) -> some View {
+        Button(action: remove) {
+            ZStack {
+                Circle().fill(Color.white.opacity(0.16)).frame(width: 18, height: 18)
+                if removing {
+                    ProgressView().tint(.white).scaleEffect(0.55)
+                } else {
+                    Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
+                }
+            }
+            .frame(width: 32, height: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(removing)
+        .accessibilityLabel(loc("remote.vdRemove"))
     }
 
     private var face: some View {
@@ -226,11 +289,15 @@ private struct DisplayCard: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(display.name).font(.caption).foregroundStyle(.white).lineLimit(1)
                 Text(detail).font(.system(size: 11).monospacedDigit()).foregroundStyle(DockColors.dim).lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
         }
-        .padding(.horizontal, 10)
+        .padding(.leading, 10)
+        // 右上角的删除按钮不压住文字
+        .padding(.trailing, onRemove == nil ? 10 : 26)
         .padding(.vertical, 8)
-        .frame(minWidth: 128, maxWidth: 180, alignment: .leading)
+        // 虚拟屏的副标题多两个标识，卡片放宽一些
+        .frame(minWidth: 128, maxWidth: display.isVirtual ? 220 : 180, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(selected ? DockColors.accent.opacity(0.14) : DockColors.chip))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(selected ? DockColors.accent : .clear, lineWidth: 1))
     }

@@ -5,6 +5,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,11 +18,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -34,15 +37,22 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.systemGestureExclusion
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
@@ -64,41 +74,59 @@ import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.ZoomIn
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.zIndex
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import cn.lemonit.galaxy.R
 import cn.lemonit.galaxy.core.bridge.ComboKey
+import cn.lemonit.galaxy.core.bridge.DisplayInfo
 import cn.lemonit.galaxy.core.bridge.InputEvent
 import cn.lemonit.galaxy.core.bridge.PathInfo
 import cn.lemonit.galaxy.core.bridge.PathKind
@@ -165,11 +193,13 @@ internal fun RemoteDock(
     elapsed: String?,
     expanded: Boolean,
     panel: RemotePanel?,
+    addDisplayOpen: Boolean,
     view: DockView,
     actions: RemoteActions,
     callbacks: DockCallbacks,
     onExpanded: (Boolean) -> Unit,
     onPanel: (RemotePanel?) -> Unit,
+    onAddDisplayOpen: (Boolean) -> Unit,
 ) {
     val density = LocalDensity.current
     val gestures = WindowInsets.mandatorySystemGestures
@@ -223,6 +253,8 @@ internal fun RemoteDock(
                     val panelMaxW = (this@BoxWithConstraints.maxWidth - RailW - 24.dp).coerceIn(200.dp, 384.dp)
                     DockPanel(
                         panel, ui, elapsed, view, actions, callbacks,
+                        addDisplayOpen = addDisplayOpen,
+                        onAddDisplayOpen = onAddDisplayOpen,
                         onClose = { onPanel(null) },
                         modifier = Modifier
                             .widthIn(max = panelMaxW)
@@ -531,10 +563,14 @@ private fun DockPanel(
     view: DockView,
     actions: RemoteActions,
     callbacks: DockCallbacks,
+    addDisplayOpen: Boolean,
+    onAddDisplayOpen: (Boolean) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier,
 ) {
     val shape = RoundedCornerShape(16.dp)
+    // 加虚拟屏表单在显示器面板内展开（会话断开、入口消失时自动收起）
+    val adding = addDisplayOpen && panel == RemotePanel.DISPLAY && ui.virtualMax > 0
     Column(
         modifier
             .clip(shape)
@@ -544,7 +580,9 @@ private fun DockPanel(
             // 吃掉面板内空白处的点按，不穿透到下面的收起层
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
     ) {
-        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (adding) {
+            AddDisplayHeader(ui, onBack = { onAddDisplayOpen(false) })
+        } else Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 stringResource(
                     when (panel) {
@@ -564,9 +602,15 @@ private fun DockPanel(
             ) { Icon(Icons.Rounded.Close, stringResource(R.string.close), tint = DockColors.Dim, modifier = Modifier.size(20.dp)) }
         }
         // 面板内容按网格排，常规屏幕上一屏放得下；极矮的屏幕才需要滚动（面板不承担切换显示器手势）
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
+        // 屏幕卡片与加屏表单各自从顶部开始
+        val scroll = key(panel, adding) { rememberScrollState() }
+        Column(Modifier.verticalScroll(scroll).padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
             when (panel) {
-                RemotePanel.DISPLAY -> DisplayPanel(ui, view, actions, callbacks)
+                RemotePanel.DISPLAY -> if (adding) {
+                    AddDisplayForm(ui, actions)
+                } else {
+                    DisplayPanel(ui, view, actions, callbacks, onAddDisplay = { onAddDisplayOpen(true) })
+                }
                 RemotePanel.SHORTCUTS -> ShortcutsPanel(ui.platform, actions)
                 RemotePanel.TOOLS -> ToolsPanel(ui, elapsed, actions)
             }
@@ -585,40 +629,37 @@ private fun SectionTitle(text: String) {
     Text(text, color = DockColors.Dim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp))
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun DisplayPanel(ui: RemoteUi, view: DockView, actions: RemoteActions, callbacks: DockCallbacks) {
-    if (ui.displays.isNotEmpty()) {
-        Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun DisplayPanel(ui: RemoteUi, view: DockView, actions: RemoteActions, callbacks: DockCallbacks, onAddDisplay: () -> Unit) {
+    // 当前屏幕的卡片滚进可见范围（如刚加好的虚拟屏在横排最右边）；看的是最后一块时连「加虚拟屏」卡片一起露出来
+    val selectedCard = remember { BringIntoViewRequester() }
+    val revealAddCard = ui.virtualMax > 0 && ui.displays.lastOrNull()?.id == ui.displayId
+    LaunchedEffect(ui.displayId, ui.displays.size) {
+        // 等这一帧排好版再滚
+        withFrameNanos { }
+        selectedCard.bringIntoView()
+    }
+    if (ui.displays.isNotEmpty() || ui.virtualMax > 0) {
+        // 卡片等高（副标题放不下时换行）；最后一张是虚线框「加虚拟屏」
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp).height(IntrinsicSize.Max),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             ui.displays.forEachIndexed { i, d ->
-                val on = d.id == ui.displayId
-                val cardShape = RoundedCornerShape(10.dp)
-                Row(
-                    Modifier
-                        .widthIn(min = 128.dp, max = 180.dp)
-                        .clip(cardShape)
-                        .background(if (on) DockColors.Accent.copy(alpha = 0.14f) else DockColors.Chip)
-                        .border(1.dp, if (on) DockColors.Accent else Color.Transparent, cardShape)
-                        .clickable { callbacks.onPickDisplay(d.id) }
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        Modifier.size(24.dp).clip(RoundedCornerShape(6.dp)).background(if (on) DockColors.Accent else Color.White.copy(alpha = 0.14f)),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("${i + 1}", color = if (on) DockColors.OnAccent else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
-                    Spacer(Modifier.width(8.dp))
-                    Column {
-                        Text(d.name, color = Color.White, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            "${d.width}×${d.height}" +
-                                (if (d.primary) " · " + stringResource(R.string.rd_primary) else "") +
-                                (if (d.isVirtual) " · " + stringResource(R.string.rd_virtual) else ""),
-                            color = DockColors.Dim,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                        )
-                    }
-                }
+                DisplayCard(
+                    modifier = if (d.id == ui.displayId && !revealAddCard) Modifier.bringIntoViewRequester(selectedCard) else Modifier,
+                    index = i,
+                    display = d,
+                    selected = d.id == ui.displayId,
+                    mine = d.id in ui.myVirtualIds,
+                    removing = d.id in ui.virtualRemoving,
+                    onClick = { callbacks.onPickDisplay(d.id) },
+                    onRemove = { actions.onRemoveVirtualDisplay(d.id) },
+                )
+            }
+            if (ui.virtualMax > 0) {
+                AddDisplayCard(ui, if (revealAddCard) Modifier.bringIntoViewRequester(selectedCard) else Modifier, onAddDisplay)
             }
         }
         if (ui.displays.size > 1) {
@@ -652,6 +693,303 @@ private fun DisplayPanel(ui: RemoteUi, view: DockView, actions: RemoteActions, c
             DarkInfo(stringResource(R.string.path_info))
         }
     }
+}
+
+// ---------------- 虚拟屏 ----------------
+
+private val CardShape = RoundedCornerShape(10.dp)
+
+/** 屏幕卡片：序号 + 名字 + 分辨率与标识（主屏 / 虚拟屏 / 我加的）；自己加的虚拟屏右上角有删除按钮。 */
+@Composable
+private fun DisplayCard(
+    modifier: Modifier,
+    index: Int,
+    display: DisplayInfo,
+    selected: Boolean,
+    mine: Boolean,
+    removing: Boolean,
+    onClick: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val d = display
+    Box(modifier.fillMaxHeight()) {
+        Row(
+            Modifier
+                .fillMaxHeight()
+                .widthIn(min = 128.dp, max = 220.dp)
+                .clip(CardShape)
+                .background(if (selected) DockColors.Accent.copy(alpha = 0.14f) else DockColors.Chip)
+                .border(1.dp, if (selected) DockColors.Accent else Color.Transparent, CardShape)
+                .clickable(onClick = onClick)
+                // 右上角留出删除按钮的位置
+                .padding(start = 10.dp, end = if (mine) 28.dp else 10.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier.size(24.dp).clip(RoundedCornerShape(6.dp)).background(if (selected) DockColors.Accent else Color.White.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center,
+            ) { Text("${index + 1}", color = if (selected) DockColors.OnAccent else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+            Spacer(Modifier.width(8.dp))
+            Column {
+                Text(d.name, color = Color.White, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                // 放不下时只在标识之间换行，标识本身不拆开（「我加的」不会断成「我 / 加的」）
+                Text(
+                    "${d.width}×${d.height}" +
+                        (if (d.primary) " · " + unbreakable(stringResource(R.string.rd_primary)) else "") +
+                        (if (d.isVirtual) " · " + unbreakable(stringResource(R.string.rd_virtual)) else "") +
+                        (if (mine) " · " + unbreakable(stringResource(R.string.rd_vd_mine)) else ""),
+                    color = DockColors.Dim,
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (mine) {
+            // 删除：触控区 32dp，看得见的是右上角一个小圆
+            val removeText = stringResource(R.string.rd_vd_remove)
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .clickable(enabled = !removing, onClick = onRemove)
+                    .semantics { contentDescription = removeText }
+                    .testTag("vd-remove-${d.id}"),
+                contentAlignment = Alignment.TopEnd,
+            ) {
+                // 看得见的小圆贴着卡片右上角
+                val dot = Modifier.padding(top = 6.dp, end = 6.dp).size(18.dp)
+                if (removing) {
+                    CircularProgressIndicator(color = DockColors.Dim, strokeWidth = 1.5.dp, modifier = dot.padding(2.dp))
+                } else {
+                    Box(dot.clip(CircleShape).background(Color.White.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.Close, null, tint = Color.White, modifier = Modifier.size(12.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 不在中间换行：空格换成不换行空格，字与字之间加零宽连接符（中文默认每个字之间都能换行）。 */
+private fun unbreakable(text: String): String = text.replace(' ', '\u00A0').toList().joinToString("\u2060")
+
+/** 屏幕卡片横排最后的虚线框卡片：加号 +「加虚拟屏」+ 已加块数 n / N，加满时置灰。 */
+@Composable
+private fun AddDisplayCard(ui: RemoteUi, modifier: Modifier, onClick: () -> Unit) {
+    val enabled = !ui.virtualFull
+    val fg = if (enabled) Color.White else Color.White.copy(alpha = 0.35f)
+    val line = if (enabled) Color.White.copy(alpha = 0.34f) else Color.White.copy(alpha = 0.16f)
+    Row(
+        modifier
+            .fillMaxHeight()
+            .widthIn(min = 128.dp)
+            .clip(CardShape)
+            .drawBehind {
+                val stroke = 1.dp.toPx()
+                drawRoundRect(
+                    color = line,
+                    topLeft = Offset(stroke / 2, stroke / 2),
+                    size = Size(size.width - stroke, size.height - stroke),
+                    cornerRadius = CornerRadius(10.dp.toPx()),
+                    style = Stroke(width = stroke, pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 3.dp.toPx()))),
+                )
+            }
+            .clickable(enabled = enabled, onClick = onClick)
+            .testTag("vd-add-card")
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(24.dp).clip(RoundedCornerShape(6.dp)).background(Color.White.copy(alpha = 0.08f)), contentAlignment = Alignment.Center) {
+            Icon(Icons.Rounded.Add, null, tint = fg, modifier = Modifier.size(18.dp))
+        }
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text(stringResource(R.string.rd_vd_add), color = fg, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+            Text("${ui.myVirtualIds.size} / ${ui.virtualMax}", color = if (enabled) DockColors.Dim else fg, fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1)
+        }
+    }
+}
+
+/** 加虚拟屏表单的标题行：返回（收起回到屏幕卡片）+「加虚拟屏」+ 已加 n / N + 说明。 */
+@Composable
+private fun AddDisplayHeader(ui: RemoteUi, onBack: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onBack).testTag("vd-back"),
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, stringResource(R.string.back), tint = DockColors.Dim, modifier = Modifier.size(20.dp)) }
+        Text(stringResource(R.string.rd_vd_title), color = Color.White, style = MaterialTheme.typography.titleSmall, maxLines = 1)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            stringResource(R.string.rd_vd_count, ui.myVirtualIds.size, ui.virtualMax),
+            color = DockColors.Dim,
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        DarkInfo(stringResource(R.string.rd_vd_info))
+    }
+}
+
+/** 本机主屏物理像素（取横屏方向）；超出虚拟屏合法范围时为 null（不显示「本机屏幕」）。 */
+@Composable
+private fun localScreenSize(): VdSize? {
+    val view = LocalView.current
+    return remember(view) {
+        val mode = view.display?.mode
+        val metrics = view.resources.displayMetrics
+        val w = mode?.physicalWidth ?: metrics.widthPixels
+        val h = mode?.physicalHeight ?: metrics.heightPixels
+        VirtualDisplays.localScreen(w, h)
+    }
+}
+
+/** 分辨率网格里的一格。 */
+private sealed interface ResOption {
+    data class Preset(val size: VdSize) : ResOption
+    data object Local : ResOption
+    data object Custom : ResOption
+}
+
+/**
+ * 加虚拟屏表单（在显示器面板内展开）：分辨率档位（含本机屏幕、自定义）、刷新率档位（含自定义），底部主按钮。
+ * 自定义值不合法时按钮置灰，输入框下方写出合法范围。
+ */
+@Composable
+private fun AddDisplayForm(ui: RemoteUi, actions: RemoteActions) {
+    val local = localScreenSize()
+    var form by remember { mutableStateOf(VirtualDisplayForm()) }
+    val focus = LocalFocusManager.current
+    val options = buildList {
+        VirtualDisplays.PRESETS.forEach { add(ResOption.Preset(it)) }
+        if (local != null) add(ResOption.Local)
+        add(ResOption.Custom)
+    }
+    Column(Modifier.testTag("vd-form")) {
+        SectionTitle(stringResource(R.string.rd_vd_resolution))
+        Grid(options, 3, Modifier) { o, m ->
+            when (o) {
+                is ResOption.Preset -> Chip(o.size.label, selected = form.resolution == VdResolution.Preset(o.size), modifier = m) {
+                    form = form.selectPreset(o.size)
+                }
+                ResOption.Local -> Chip(stringResource(R.string.rd_vd_local), selected = form.resolution == VdResolution.Local, modifier = m.testTag("vd-local")) {
+                    form = form.selectLocal()
+                }
+                ResOption.Custom -> Chip(stringResource(R.string.rd_vd_custom), selected = form.resolution == VdResolution.Custom, modifier = m.testTag("vd-custom-res")) {
+                    form = form.selectCustom(local)
+                }
+            }
+        }
+        if (form.resolution == VdResolution.Custom) {
+            Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                NumberField(form.width, { form = form.withWidth(it) }, stringResource(R.string.rd_vd_width), null, form.sizeInvalid, Modifier.weight(1f).testTag("vd-width"))
+                Text("×", color = DockColors.Dim, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 6.dp))
+                NumberField(form.height, { form = form.withHeight(it) }, stringResource(R.string.rd_vd_height), null, form.sizeInvalid, Modifier.weight(1f).testTag("vd-height"))
+            }
+            if (form.sizeInvalid) RangeHint()
+        }
+        SectionTitle(stringResource(R.string.rd_vd_refresh))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            VirtualDisplays.REFRESH_RATES.forEach { hz ->
+                Chip(stringResource(R.string.rd_vd_hz, hz), selected = form.refresh == hz, modifier = Modifier.weight(1f)) { form = form.selectRefresh(hz) }
+            }
+            // 「自定义」字多一点，窄屏上也放得下
+            Chip(stringResource(R.string.rd_vd_custom), selected = form.refresh == null, modifier = Modifier.weight(1.3f).testTag("vd-custom-hz")) {
+                form = form.selectCustomRefresh()
+            }
+        }
+        if (form.refresh == null) {
+            Row(Modifier.padding(top = 6.dp)) {
+                NumberField(form.customRefresh, { form = form.withCustomRefresh(it) }, null, "Hz", form.refreshInvalid, Modifier.weight(1f).testTag("vd-refresh"))
+                Spacer(Modifier.weight(1f))
+            }
+            // 分辨率那里已写出范围（含刷新率）就不重复
+            if (form.refreshInvalid && !form.sizeInvalid) RangeHint()
+        }
+        val full = ui.virtualFull
+        val enabled = form.canSubmit(local, ui.myVirtualIds.size, ui.virtualMax, ui.virtualAdding)
+        Spacer(Modifier.height(14.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(42.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (enabled || ui.virtualAdding) DockColors.Accent else DockColors.Chip)
+                .clickable(enabled = enabled) {
+                    val size = form.size(local) ?: return@clickable
+                    val hz = form.refreshHz() ?: return@clickable
+                    focus.clearFocus()
+                    actions.onAddVirtualDisplay(size.width, size.height, hz)
+                }
+                .testTag("vd-submit"),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (ui.virtualAdding) {
+                CircularProgressIndicator(color = DockColors.OnAccent, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+            } else {
+                Text(
+                    if (full) stringResource(R.string.rd_vd_full, ui.virtualMax) else stringResource(R.string.rd_vd_add),
+                    color = if (enabled) DockColors.OnAccent else Color.White.copy(alpha = 0.35f),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+/** 自定义值不合法时输入框下方的范围说明（校验提示）。 */
+@Composable
+private fun RangeHint() {
+    Text(
+        stringResource(R.string.rd_vd_range),
+        color = DockColors.Danger,
+        fontSize = 11.sp,
+        lineHeight = 14.sp,
+        modifier = Modifier.padding(top = 4.dp).testTag("vd-range-hint"),
+    )
+}
+
+/** 深色面板上的数字输入框（数字键盘）：左侧可带标签（宽 / 高），右侧可带单位（Hz）。 */
+@Composable
+private fun NumberField(value: String, onChange: (String) -> Unit, label: String?, suffix: String?, error: Boolean, modifier: Modifier) {
+    val focus = LocalFocusManager.current
+    val shape = RoundedCornerShape(8.dp)
+    BasicTextField(
+        value = value,
+        onValueChange = onChange,
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done, autoCorrectEnabled = false),
+        keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }),
+        textStyle = TextStyle(color = Color.White, fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+        cursorBrush = SolidColor(DockColors.Accent),
+        modifier = modifier,
+        decorationBox = { inner ->
+            Row(
+                Modifier
+                    .height(36.dp)
+                    .clip(shape)
+                    .background(DockColors.Chip)
+                    .border(1.dp, if (error) DockColors.Danger.copy(alpha = 0.7f) else Color.Transparent, shape)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (label != null) {
+                    Text(label, color = DockColors.Dim, fontSize = 12.sp, maxLines = 1)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Box(Modifier.weight(1f)) { inner() }
+                if (suffix != null) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(suffix, color = DockColors.Dim, fontSize = 12.sp, maxLines = 1)
+                }
+            }
+        },
+    )
 }
 
 @Composable

@@ -89,6 +89,9 @@ internal static class MockData
         ? new Permissions(true, true, false, true, true, false, AiMode.ConfirmAll)
         : new Permissions(true, true, true, true, true, true, AiMode.FullTrust);
 
+    /// <summary>主控最多能在被控端加几块虚拟屏</summary>
+    public const uint VirtualDisplayMax = 3;
+
     public static string[] Capabilities(DeviceInfo d)
     {
         var c = new List<string> { "terminal", "files", "exec", "port_forward" };
@@ -96,6 +99,8 @@ internal static class MockData
         if (d.Platform == Platform.Windows) c.Add("privacy");
         // 与内核一致：对方给了听声音的权限才有 "audio"
         if ((d.Platform is Platform.Windows or Platform.Macos) && PermissionsFor(d).Audio) c.Add("audio");
+        // 与内核一致：被控端装了虚拟屏驱动、主控有控制权限才有（Windows、macOS 最多 3 块）
+        if ((d.Platform is Platform.Windows or Platform.Macos) && PermissionsFor(d).Control) c.AddRange(new[] { "virtual_display", "virtual_display_max=" + VirtualDisplayMax });
         return c.ToArray();
     }
 
