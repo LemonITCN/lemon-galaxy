@@ -527,23 +527,36 @@ impl PeerSession {
                 }
             }
         });
-        // 重组
+        // 重组：收不齐、跳号的帧都算丢帧；丢帧后到关键帧之前的帧不交给解码器，并要关键帧（见 Reassembler）
         let ch2 = Arc::downgrade(&ch);
         tokio::spawn(async move {
             let mut asm = Reassembler::default();
-            let mut last_kf_req = std::time::Instant::now() - Duration::from_secs(10);
-            while let Some(d) = rx.recv().await {
-                let Some((h, pos)) = VideoFragHeader::decode(&d) else { continue };
-                let (complete, lost) = asm.push(h, d.slice(pos..));
-                if let Some((data, pts, kf)) = complete {
+            // 刚打开时被控端第一帧就是关键帧，先等一会再催
+            let mut last_kf_req = std::time::Instant::now();
+            loop {
+                // 没有新数据时也要定时检查：收不齐的帧超时、等关键帧时重催
+                let got = match tokio::time::timeout(KEYFRAME_POLL, rx.recv()).await {
+                    Ok(Some(d)) => Some(d),
+                    Ok(None) => break,
+                    Err(_) => None,
+                };
+                let now = std::time::Instant::now();
+                let step = match got.as_ref().and_then(|d| VideoFragHeader::decode(d).map(|(h, pos)| (h, d.slice(pos..)))) {
+                    Some((h, payload)) => asm.push(h, payload, now),
+                    None => asm.tick(now),
+                };
+                if let Some((data, pts, kf)) = step.frame {
                     if let Some(r) = recorder.lock().clone() {
                         r.on_video(&data, kf);
                     }
                     sink.on_frame(data, pts, kf);
                 }
-                if lost && last_kf_req.elapsed() > Duration::from_millis(500) {
-                    last_kf_req = std::time::Instant::now();
-                    if let Some(c) = ch2.upgrade() {
+                if asm.waiting_keyframe() {
+                    // 刚发现丢帧立刻要；之后关键帧也可能丢，隔一会再催
+                    let gap = if step.new_loss { KEYFRAME_REQ_MIN_GAP } else { KEYFRAME_RETRY };
+                    if now.duration_since(last_kf_req) >= gap {
+                        last_kf_req = now;
+                        let Some(c) = ch2.upgrade() else { break };
                         c.request_keyframe().await;
                     }
                 }
@@ -711,42 +724,216 @@ impl DisplayChannel {
     }
 }
 
-/// 画面分片重组：帧在 100 毫秒内收不齐就丢弃并报告丢失。
+/// 一帧的分片隔这么久没有新的到达，就认为剩下的丢了。按「最后一片」算而不是「第一片」：
+/// 码率低时一个大关键帧本身就要传几百毫秒，按第一片算会把正在传的关键帧当丢失，再要、再丢，一直循环。
+const FRAME_STALL: Duration = Duration::from_millis(150);
+/// 发现丢帧后立刻要关键帧，只防同一瞬间重复要
+const KEYFRAME_REQ_MIN_GAP: Duration = Duration::from_millis(100);
+/// 等关键帧期间每隔这么久再催一次（关键帧本身也可能丢）
+const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
+/// 没有新数据时多久检查一次超时与重催
+const KEYFRAME_POLL: Duration = Duration::from_millis(100);
+
+/// `a` 不晚于 `b`（帧号回绕也对）
+fn seq_le(a: u32, b: u32) -> bool {
+    b.wrapping_sub(a) < 1 << 31
+}
+
+struct Partial {
+    last_seen: std::time::Instant,
+    parts: Vec<Option<Bytes>>,
+    pts: u64,
+    keyframe: bool,
+}
+
 #[derive(Default)]
+struct Assembled {
+    /// 可以交给解码器的完整帧
+    frame: Option<(Vec<u8>, u64, bool)>,
+    /// 这一步刚发现丢帧（之前没在等关键帧）
+    new_loss: bool,
+}
+
+/// 画面分片重组与丢帧处理。
+///
+/// 各被控端都是无限 GOP、只在被要求时出关键帧，P 帧引用上一帧：中间丢了一帧，后面的 P 帧送去解码就是花屏，
+/// 而且不会自己好（只有变化过的区域慢慢被重画）。所以：
+/// - 丢帧的判定：帧收不齐超时；后一帧先收齐（前面没收齐的再也用不上）；帧号跳号（整帧一片都没收到，
+///   小变化、光标移动时一帧往往只有一两片，最常见）。
+/// - 丢帧后到下一个关键帧之前，收齐的帧也不交给解码器，画面停在最后一张好的帧上，调用方去要关键帧。
+/// - 刚打开时也一样：从第一个关键帧开始交。
 struct Reassembler {
-    frames: HashMap<u32, (std::time::Instant, u16, Vec<Option<Bytes>>, u64, bool)>,
+    frames: HashMap<u32, Partial>,
+    /// 最后一个收齐的帧号（不管交没交给解码器）
     last_done: Option<u32>,
+    want_key: bool,
+}
+
+impl Default for Reassembler {
+    fn default() -> Self {
+        Self { frames: HashMap::new(), last_done: None, want_key: true }
+    }
 }
 
 impl Reassembler {
-    fn push(&mut self, h: VideoFragHeader, payload: Bytes) -> (Option<(Vec<u8>, u64, bool)>, bool) {
-        if let Some(ld) = self.last_done {
-            if h.frame_id <= ld && ld.wrapping_sub(h.frame_id) < 1_000_000 {
-                return (None, false);
-            }
+    fn waiting_keyframe(&self) -> bool {
+        self.want_key
+    }
+
+    fn mark_lost(&mut self, out: &mut Assembled) {
+        if !self.want_key {
+            self.want_key = true;
+            out.new_loss = true;
         }
-        let e = self.frames.entry(h.frame_id).or_insert_with(|| (std::time::Instant::now(), h.frag_count, vec![None; h.frag_count as usize], 0, false));
-        if (h.frag_idx as usize) < e.2.len() {
-            e.2[h.frag_idx as usize] = Some(payload);
+    }
+
+    /// 没有新分片时调用：清掉卡住的帧
+    fn tick(&mut self, now: std::time::Instant) -> Assembled {
+        let mut out = Assembled::default();
+        let before = self.frames.len();
+        self.frames.retain(|_, p| now.duration_since(p.last_seen) < FRAME_STALL);
+        if self.frames.len() < before {
+            self.mark_lost(&mut out);
+        }
+        out
+    }
+
+    fn push(&mut self, h: VideoFragHeader, payload: Bytes, now: std::time::Instant) -> Assembled {
+        if self.last_done.is_some_and(|ld| seq_le(h.frame_id, ld)) {
+            // 已经收齐或已经放弃的帧，迟到的分片
+            return self.tick(now);
+        }
+        let id = h.frame_id;
+        let e = self.frames.entry(id).or_insert_with(|| Partial { last_seen: now, parts: vec![None; h.frag_count as usize], pts: 0, keyframe: false });
+        e.last_seen = now;
+        if let Some(slot) = e.parts.get_mut(h.frag_idx as usize) {
+            *slot = Some(payload);
         }
         if h.frag_idx == 0 {
-            e.3 = h.pts_us;
+            e.pts = h.pts_us;
         }
-        e.4 |= h.keyframe;
-        let mut out = None;
-        if e.2.iter().all(|x| x.is_some()) {
-            let (_, _, parts, pts, kf) = self.frames.remove(&h.frame_id).unwrap();
-            let mut data = Vec::with_capacity(parts.iter().map(|p| p.as_ref().unwrap().len()).sum());
-            for p in parts {
-                data.extend_from_slice(&p.unwrap());
+        e.keyframe |= h.keyframe;
+        if !e.parts.iter().all(|x| x.is_some()) {
+            return self.tick(now);
+        }
+        let p = self.frames.remove(&id).expect("刚取到");
+        let mut data = Vec::with_capacity(p.parts.iter().map(|x| x.as_ref().map_or(0, |b| b.len())).sum());
+        for part in p.parts.into_iter().flatten() {
+            data.extend_from_slice(&part);
+        }
+        let mut out = self.tick(now);
+        // 前面没收齐的帧再也用不上了；帧号不连续说明中间有帧整个没收到
+        let expected = self.last_done.map(|ld| ld.wrapping_add(1));
+        self.frames.retain(|fid, _| !seq_le(*fid, id));
+        self.last_done = Some(id);
+        if expected.is_some_and(|x| x != id) {
+            self.mark_lost(&mut out);
+        }
+        if self.want_key {
+            if !p.keyframe {
+                return out;
             }
-            self.last_done = Some(h.frame_id);
-            out = Some((data, pts, kf));
+            self.want_key = false;
+            out.new_loss = false;
         }
-        let before = self.frames.len();
-        let done = self.last_done;
-        self.frames.retain(|id, f| f.0.elapsed() < Duration::from_millis(100) && done.map(|d| *id > d).unwrap_or(true));
-        let lost = self.frames.len() < before && out.is_none() || self.frames.len() < before.saturating_sub(1);
-        (out, lost)
+        out.frame = Some((data, p.pts, p.keyframe));
+        out
+    }
+}
+
+#[cfg(test)]
+mod reassembler_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn frag(id: u32, idx: u16, count: u16, key: bool) -> (VideoFragHeader, Bytes) {
+        (VideoFragHeader { channel: 1, frame_id: id, frag_idx: idx, frag_count: count, keyframe: key, pts_us: id as u64 }, Bytes::from(vec![id as u8, idx as u8]))
+    }
+
+    /// 整帧按顺序送进去，返回交给解码器的帧号
+    fn feed(a: &mut Reassembler, id: u32, count: u16, key: bool, now: Instant) -> (Option<u32>, bool) {
+        let mut last = Assembled::default();
+        let mut loss = false;
+        for i in 0..count {
+            let (h, p) = frag(id, i, count, key);
+            last = a.push(h, p, now);
+            loss |= last.new_loss;
+        }
+        (last.frame.map(|f| f.1 as u32), loss)
+    }
+
+    #[test]
+    fn waits_for_first_keyframe() {
+        let mut a = Reassembler::default();
+        let t = Instant::now();
+        assert_eq!(feed(&mut a, 0, 1, false, t).0, None);
+        assert!(a.waiting_keyframe());
+        assert_eq!(feed(&mut a, 1, 3, true, t).0, Some(1));
+        assert!(!a.waiting_keyframe());
+        assert_eq!(feed(&mut a, 2, 1, false, t).0, Some(2));
+    }
+
+    #[test]
+    fn whole_frame_missing_holds_until_keyframe() {
+        let mut a = Reassembler::default();
+        let t = Instant::now();
+        feed(&mut a, 0, 2, true, t);
+        assert_eq!(feed(&mut a, 1, 1, false, t).0, Some(1));
+        // 帧 2 一片都没到
+        let (f, loss) = feed(&mut a, 3, 1, false, t);
+        assert_eq!(f, None);
+        assert!(loss && a.waiting_keyframe());
+        assert_eq!(feed(&mut a, 4, 1, false, t), (None, false));
+        assert_eq!(feed(&mut a, 5, 4, true, t).0, Some(5));
+        assert_eq!(feed(&mut a, 6, 1, false, t).0, Some(6));
+    }
+
+    #[test]
+    fn superseded_partial_frame_counts_as_loss() {
+        let mut a = Reassembler::default();
+        let t = Instant::now();
+        feed(&mut a, 0, 1, true, t);
+        // 帧 1 只到了一片
+        let (h, p) = frag(1, 0, 3, false);
+        assert!(a.push(h, p, t).frame.is_none());
+        let (f, loss) = feed(&mut a, 2, 1, false, t);
+        assert_eq!(f, None);
+        assert!(loss);
+        // 帧 1 迟到的分片不再理会
+        let (h, p) = frag(1, 1, 3, false);
+        assert!(a.push(h, p, t).frame.is_none());
+        assert!(a.waiting_keyframe());
+    }
+
+    #[test]
+    fn stalled_frame_times_out_but_slow_keyframe_survives() {
+        let mut a = Reassembler::default();
+        let t = Instant::now();
+        feed(&mut a, 0, 1, true, t);
+        // 大关键帧慢慢传：每片间隔 100 毫秒，总共 600 毫秒，不能被当成丢失
+        for i in 0..6u16 {
+            let (h, p) = frag(1, i, 7, true);
+            let now = t + Duration::from_millis(100 * i as u64);
+            assert!(a.push(h, p, now).frame.is_none());
+            assert!(!a.tick(now + Duration::from_millis(50)).new_loss);
+        }
+        let (h, p) = frag(1, 6, 7, true);
+        assert_eq!(a.push(h, p, t + Duration::from_millis(600)).frame.map(|f| f.1), Some(1));
+        // 卡住不动的帧超时算丢
+        let (h, p) = frag(2, 0, 2, false);
+        a.push(h, p, t + Duration::from_millis(700));
+        assert!(!a.tick(t + Duration::from_millis(800)).new_loss);
+        assert!(a.tick(t + Duration::from_millis(900)).new_loss);
+        assert!(a.waiting_keyframe());
+    }
+
+    #[test]
+    fn frame_id_wraps() {
+        let mut a = Reassembler::default();
+        let t = Instant::now();
+        assert!(feed(&mut a, u32::MAX, 1, true, t).0.is_some());
+        let (h, p) = frag(0, 0, 1, false);
+        assert!(a.push(h, p, t).frame.is_some());
+        assert!(!a.waiting_keyframe());
     }
 }
