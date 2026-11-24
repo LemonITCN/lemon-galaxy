@@ -2,7 +2,7 @@
 
 - 日期：2026-11-24
 - 范围：lemon-galaxy-worker-windows 出 32 位版本，Windows XP SP3（重点）、Vista、Windows 7 的 32 位系统装成被控端，能被远程桌面、终端、文件控制。**只做被控，不做主控**（WPF 主控端要 .NET Framework 4.8，XP 装不了）。
-- 方法：读依赖源码（tokio / mio / quinn-udp / socket2 / getrandom / windows 0.62 / Rust 标准库 win7 分支）；下载 YY-Thunks 1.2.3、VC-LTL5 5.3.1 的发布包核对（SHA-256 与 GitHub 发布页一致）；本机用 llvm-mingw 交叉编 32 位程序，列出导入表，对照 YY-Thunks 包里带的 XP / Vista / Win7 系统 DLL 导出表。**还没有在 XP / Vista / Win7 实机或虚拟机上跑过。**
+- 方法：读依赖源码（tokio / mio / quinn-udp / socket2 / getrandom / windows 0.62 / Rust 标准库 win7 分支）；下载 YY-Thunks 1.2.3、VC-LTL5 5.3.1 的发布包核对（SHA-256 与 GitHub 发布页一致）；本机用 llvm-mingw 交叉编 32 位程序，列出导入表，对照 YY-Thunks 包里带的 XP / Vista / Win7 系统 DLL 导出表；CI 上用 MSVC 编正式包再核一遍，并在 Windows Server 2025 上跑完整端到端测试。**还没有在 XP / Vista / Win7 实机或虚拟机上跑过。**
 - 标记：【已核实】= 源码、发布包或本机实验直接看到；【推测】= 按机制推断；【待验证】= 必须上实机测。
 
 ---
@@ -88,6 +88,17 @@
   - 改之前，Win7 缺 `combase.dll!CoTaskMemFree`；Vista 另缺 `QueryDisplayConfig`、`GetDisplayConfigBufferSizes`、`SetDisplayConfig`、`DisplayConfigGetDeviceInfo`、`newdev.dll!DiUninstallDevice`；XP 另缺 `SetDisplayConfig`、`DiUninstallDevice`、`WSASendMsg`。
   - 改之后（`CoTaskMemFree` 从 ole32 导入，显示配置与设备卸载运行时加载，XP 补 `WSASendMsg`），XP、Vista、Win7 三个导出表全部覆盖。
 - 正式包的标准库（win7 目标）与 C 运行库（XP 用 VC-LTL）由 CI 核对。
+
+### 3.1 CI 结果（2026-11-24，构建 0.1.0.42）【已核实】
+
+| 版本 | PE 头 | 导入表 | Server 2025 上 |
+|---|---|---|---|
+| XP 兼容版（windowsxp-x86） | x86，子系统版本 5.01 | 376 个函数、20 个 DLL（含系统自带的 msvcrt.dll），XP 全有 | 截屏（DXGI，YY-Thunks 转给真接口）+ openh264 编码自检通过；端到端全部通过 |
+| Vista / 7 32 位版（windows7-x86） | x86，6.00 | 352 个函数、20 个 DLL，Vista 全有 | 端到端全部通过 |
+| Win7 x64 版（windows7-x86_64） | x64，6.00 | 354 个函数、21 个 DLL，Win7 全有 | 端到端全部通过 |
+| 主控端兼容包的 galaxy_ffi.dll | x64 | Win7 没有：`combase.dll`（`CoTaskMemFree`、`CoCreateFreeThreadedMarshaler`）、`mmdevapi.dll!ActivateAudioInterfaceAsync`、`api-ms-win-core-winrt-error-l1-1-0.dll!RoOriginateErrorW` | 不挡发布，主控端 Win7 兼容包要另修 |
+
+端到端测试包括：登录、自动选路执行命令、终端断线继承、远端声音测试音、8 MB 文件上传下载、复制粘贴文件、强制 UDP / TCP 中转、远程开机、装成 SYSTEM 服务后以指定账号执行命令与写文件。
 
 ## 4. 代码改动
 
