@@ -105,6 +105,28 @@ impl hp::HostPlatform for PlatformBridge {
     fn capabilities(&self) -> Vec<String> {
         self.0.capabilities()
     }
+    fn virtual_display_max(&self) -> u32 {
+        self.0.virtual_display_max()
+    }
+    fn add_virtual_display(&self, width: u32, height: u32, refresh: u32) -> std::result::Result<pp::DisplayInfo, String> {
+        let r = self.0.add_virtual_display(width, height, refresh);
+        match (r.display, r.error) {
+            (Some(d), _) => Ok(pp::DisplayInfo { is_virtual: true, ..d.into() }),
+            (None, e) => Err(e.filter(|e| !e.is_empty()).unwrap_or_else(|| "加虚拟屏失败".into())),
+        }
+    }
+    fn remove_virtual_display(&self, id: u32) -> std::result::Result<(), String> {
+        match self.0.remove_virtual_display(id) {
+            None => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
+    fn virtual_display_ids(&self) -> Vec<u32> {
+        self.0.virtual_display_ids()
+    }
+    fn needs_headless_display(&self) -> bool {
+        self.0.needs_headless_display()
+    }
 }
 
 struct EventsBridge {
@@ -184,6 +206,25 @@ impl HostService {
         self.inner.lock_on_end()
     }
 
+    /// 无头兜底屏设置（与命令行 `lemon-galaxy-worker headless-display` 相同）：本机没有亮着的显示器时，
+    /// 主控打开屏幕列表就自动加一块虚拟屏，最后一个会话结束 10 秒后删掉。
+    /// 返回 "" = 默认（1920x1080@60）、"off" = 关闭、"宽x高@刷新率" = 自定义。
+    pub fn headless_display(&self) -> String {
+        // 手改 host.json 写错的值内核当作关闭，这里同样显示为关闭
+        normalize_headless(&self.inner.state().headless_display).unwrap_or_else(|| "off".into())
+    }
+
+    /// 改无头兜底屏设置：""（或 "default"）、"off"、"宽x高[@刷新率]"。写法不对或分辨率不支持时返回 false，设置不变。
+    pub fn set_headless_display(&self, value: String) -> bool {
+        match normalize_headless(&value) {
+            Some(v) => {
+                self.inner.set_headless_display(&v);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn set_listener(&self, listener: Arc<dyn HostListener>) {
         self.inner.set_events(Arc::new(EventsBridge { listener, pending: self.pending.clone(), host: Arc::downgrade(&self.inner) }));
     }
@@ -249,6 +290,34 @@ impl HostService {
 
     pub fn recent_events(&self, limit: u32) -> Vec<HostEvent> {
         self.inner.recent_events(limit as usize).into_iter().map(Into::into).collect()
+    }
+}
+
+/// 无头兜底屏设置的规范写法：默认为 ""，关闭为 "off"，自定义为 "宽x高@刷新率"；写法不对或分辨率不支持为 None。
+fn normalize_headless(v: &str) -> Option<String> {
+    let t = v.trim().to_ascii_lowercase();
+    if t.is_empty() || t == "default" {
+        return Some(String::new());
+    }
+    // 关闭的几种写法与内核 parse_headless_display 一致
+    if matches!(t.as_str(), "off" | "no" | "false" | "0") {
+        return Some("off".into());
+    }
+    galaxy_host::accounts::parse_headless_display(&t).map(|(w, h, hz)| format!("{w}x{h}@{hz}"))
+}
+
+#[cfg(test)]
+mod headless_tests {
+    use super::normalize_headless as n;
+    #[test]
+    fn normalize() {
+        assert_eq!(n("").as_deref(), Some(""));
+        assert_eq!(n(" Default ").as_deref(), Some(""));
+        assert_eq!(n("OFF").as_deref(), Some("off"));
+        assert_eq!(n("2560x1440").as_deref(), Some("2560x1440@60"));
+        assert_eq!(n("3840X2160@30").as_deref(), Some("3840x2160@30"));
+        assert_eq!(n("100x100"), None);
+        assert_eq!(n("abc"), None);
     }
 }
 

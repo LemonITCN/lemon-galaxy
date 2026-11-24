@@ -169,6 +169,7 @@ accounts() -> [HostAccount{user_id, username, display_name, status, policy: Host
 update_account_policy(user_id, HostPolicy{system_user, view, control, files, terminal, clipboard, audio, ai_cap, notify})
 set_remote_enabled(Bool) / disconnect_all() / stop_ai()
 set_lock_on_end(Bool) / lock_on_end()   远程看过桌面的会话都结束 10 秒后自动锁屏（默认关；断线重连不算结束）
+set_headless_display(value) -> Bool / headless_display()   无头兜底屏（host.json 的 headless_display）："" 默认 1920x1080@60、"off" 关闭、"宽x高@刷新率" 自定义；写法不对返回 false
 async start_assist() -> AssistInfo{device_code, code}
 stop_assist() / set_assist_code(code?) / respond_assist(request_id, allow)
 recent_events(limit) -> [HostEvent]
@@ -179,6 +180,10 @@ recent_events(limit) -> [HostEvent]
 `set_privacy(on) -> Bool`、`set_cursor_in_video(display_id, show)`、`start_audio(AudioPcmSink) -> Bool`、`stop_audio()`、`capabilities() -> [String]`
 （支持 `set_cursor_in_video` 的平台在 capabilities 里列 "client_cursor"；show 为 false 时画面里不画光标，并用 `EncodedFrameSink.set_cursor` 报光标位置）
 （已获得系统授权的能力：`display`、`screenshot`、`input`、`ui_tree`、`clipboard`、`privacy`、`audio`）。
+虚拟屏（归属、上限、无头兜底屏的时机由内核 galaxy-host 的 vdisplay.rs 管，平台层只管加删；都在内核的阻塞线程里调，可以阻塞几秒）：
+`virtual_display_max() -> u32`（0 = 不支持）、`add_virtual_display(width, height, refresh) -> VirtualDisplayResult{display?, error?}`、
+`remove_virtual_display(display_id) -> String?`（成功或已不存在为空，失败为原因）、`virtual_display_ids() -> [u32]`、`needs_headless_display() -> Bool`（没有亮着的显示器，不算自己的虚拟屏）。
+macOS 用 CGVirtualDisplay 实现（`Platform/VirtualDisplays.swift`），安卓、iOS 不实现 HostPlatform；以后别的语言实现时不支持就返回 0 / 带原因的结果 / 空。
 `EncodedFrameSink`（内核实现）：`push(annexb, pts_us, keyframe)`、`set_resolution(width, height)`、`set_cursor(x, y, visible)`（画面像素，变化时调用）。
 `AudioPcmSink`（内核实现）：`push(pcm, sample_rate, channels)`，`pcm` 是交错排列的 32 位浮点样本（小端），格式随系统；内核统一转成 48 kHz 立体声、Opus 编码一次后分发给所有在听的会话。
 

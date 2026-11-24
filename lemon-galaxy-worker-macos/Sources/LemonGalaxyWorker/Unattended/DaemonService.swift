@@ -312,6 +312,8 @@ final class DaemonService: @unchecked Sendable {
         case IPCMethod.events: reply.ok(CEvents(events: s.recentEvents(limit: try m.decode(CLimit.self).limit)))
         case IPCMethod.lockOnEnd: reply.ok(PBool(value: s.lockOnEnd()))
         case IPCMethod.setLockOnEnd: s.setLockOnEnd(on: try m.decode(POn.self).on); reply.ok()
+        case IPCMethod.headlessDisplay: reply.ok(PText(text: s.headlessDisplay()))
+        case IPCMethod.setHeadlessDisplay: reply.ok(PBool(value: s.setHeadlessDisplay(value: try m.decode(PText.self).text ?? "")))
         case IPCMethod.setRemoteEnabled: s.setRemoteEnabled(enabled: try m.decode(CEnabled.self).enabled); reply.ok()
         case IPCMethod.disconnectAll: s.disconnectAll(); reply.ok()
         case IPCMethod.disconnectSession: reply.ok(PBool(value: s.disconnectSession(id: try m.decode(CId.self).id)))

@@ -51,6 +51,8 @@ final class WorkerModel: ObservableObject {
     @Published var disconnecting: Set<String> = []
     /// 远程看过桌面的会话都结束 10 秒后自动锁屏（被控服务里的本机设置，默认关）
     @Published var lockOnEnd = false
+    /// 无头兜底屏设置（""=默认 / "off" / "宽x高@刷新率"，见 HeadlessDisplaySetting）
+    @Published var headlessDisplay = ""
     let updater: WorkerUpdater
     let unattended: UnattendedController
     private var cancellables: Set<AnyCancellable> = []
@@ -161,6 +163,8 @@ final class WorkerModel: ObservableObject {
         if !selfTest && !core.isRemote {
             let p = platform ?? MacHostPlatform()
             platform = p
+            // 换了被控服务（换服务器重启）：旧服务加的虚拟屏没人管了，删掉（新服务需要时会再加）
+            if !VirtualDisplays.shared.ids.isEmpty { DispatchQueue.global().async { VirtualDisplays.shared.removeAll() } }
             s.setPlatform(platform: p)
         }
         refresh()
@@ -180,6 +184,7 @@ final class WorkerModel: ObservableObject {
         accounts = status.accounts
         events = s.recentEvents(limit: 300)
         lockOnEnd = s.lockOnEnd()
+        headlessDisplay = s.headlessDisplay()
         let live = Set(status.sessions.map(\.id))
         aiActivity = aiActivity.filter { live.contains($0.key) }
         UIHooks.update(self)
@@ -253,6 +258,15 @@ final class WorkerModel: ObservableObject {
         guard let service else { return }
         service.setLockOnEnd(on: on)
         lockOnEnd = service.lockOnEnd()
+    }
+
+    /// 改无头兜底屏设置；被控服务不接受（写法不对）时返回 false
+    @discardableResult
+    func setHeadlessDisplay(_ v: String) -> Bool {
+        guard let service else { return false }
+        let ok = service.setHeadlessDisplay(value: v)
+        headlessDisplay = service.headlessDisplay()
+        return ok
     }
 
     /// 断开一个会话

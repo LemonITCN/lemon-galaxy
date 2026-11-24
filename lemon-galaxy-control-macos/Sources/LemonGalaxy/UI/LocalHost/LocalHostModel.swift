@@ -17,6 +17,8 @@ final class LocalHostModel: ObservableObject {
     @Published var eventFilter = "all"
     /// 远程看过桌面的会话都结束 10 秒后自动锁屏（被控服务里的本机设置）
     @Published var lockOnEnd = false
+    /// 无头兜底屏设置（""=默认 / "off" / "宽x高@刷新率"，见 HeadlessDisplaySetting）
+    @Published var headlessDisplay = ""
     private(set) var service: HostService?
     private var adapter: HostListenerAdapter?
     private var platform: MacHostPlatform?
@@ -40,6 +42,8 @@ final class LocalHostModel: ObservableObject {
         if !selfTest {
             let p = MacHostPlatform()
             platform = p
+            // 换了被控服务（重新登录）：旧服务加的虚拟屏没人管了，删掉（新服务需要时会再加）
+            if !VirtualDisplays.shared.ids.isEmpty { DispatchQueue.global().async { VirtualDisplays.shared.removeAll() } }
             s.setPlatform(platform: p)
         }
         refresh()
@@ -52,6 +56,7 @@ final class LocalHostModel: ObservableObject {
         accounts = s.accounts()
         events = s.recentEvents(limit: 200)
         lockOnEnd = s.lockOnEnd()
+        headlessDisplay = s.headlessDisplay()
         ControlBanner.shared.update(self)
         StatusMenu.shared.update(self)
     }
@@ -98,6 +103,15 @@ final class LocalHostModel: ObservableObject {
         guard let service else { return }
         service.setLockOnEnd(on: on)
         lockOnEnd = service.lockOnEnd()
+    }
+
+    /// 改无头兜底屏设置；被控服务不接受（写法不对）时返回 false
+    @discardableResult
+    func setHeadlessDisplay(_ v: String) -> Bool {
+        guard let service else { return false }
+        let ok = service.setHeadlessDisplay(value: v)
+        headlessDisplay = service.headlessDisplay()
+        return ok
     }
     func stopAi() { service?.stopAi(); aiActivity = [:]; refresh() }
 

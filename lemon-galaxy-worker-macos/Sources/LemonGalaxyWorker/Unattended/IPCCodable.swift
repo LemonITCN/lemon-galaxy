@@ -349,6 +349,9 @@ struct PClipboard: Codable { var data: ClipboardData? }
 struct POn: Codable { var on: Bool }
 struct PBool: Codable { var value: Bool }
 struct PStrings: Codable { var values: [String] }
+/// 虚拟屏：加一块（应答 DisplayInfo，失败时应答错误）、代理现有的虚拟屏与本会话有没有亮着的真实显示器
+struct PVirtualAdd: Codable { var width: UInt32; var height: UInt32; var refresh: UInt32 }
+struct PVirtualState: Codable { var ids: [UInt32]; var needsHeadless: Bool }
 struct AFrame: Codable { var display: UInt32; var pts: UInt64; var key: Bool }
 struct AResolution: Codable { var display: UInt32; var width: UInt32; var height: UInt32 }
 /// 光标热点位置（这块屏幕画面的像素）
@@ -463,6 +466,9 @@ enum IPCMethod {
     static let capabilities = "p.capabilities"
     static let stopAll = "p.stopAll"
     static let agentExit = "p.exit"
+    static let virtualAdd = "p.vdAdd"
+    static let virtualRemove = "p.vdRemove"
+    static let virtualState = "p.vdState"
     // 界面 → 后台服务
     static let hello = "c.hello"
     static let setLocale = "c.setLocale"
@@ -480,6 +486,8 @@ enum IPCMethod {
     static let events = "s.events"
     static let lockOnEnd = "s.lockOnEnd"
     static let setLockOnEnd = "s.setLockOnEnd"
+    static let headlessDisplay = "s.headlessDisplay"
+    static let setHeadlessDisplay = "s.setHeadlessDisplay"
     static let setRemoteEnabled = "s.setRemoteEnabled"
     static let disconnectAll = "s.disconnectAll"
     static let disconnectSession = "s.disconnectSession"

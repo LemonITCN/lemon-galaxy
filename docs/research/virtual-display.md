@@ -385,6 +385,35 @@
 
 **还没做的**：各端主控界面（加屏入口、分辨率 / 刷新率选择、标出虚拟屏）；macOS CGVirtualDisplay；`SET_RENDER_ADAPTER`（双显卡上让虚拟屏和编码器在同一块显卡）；断开后保留；隐私屏联动（只留虚拟路径）；SignPath 签名与正式包随 worker 发布；ARM64 驱动。
 
+### 5.10 macOS 实施记录（2026-11-24）：CGVirtualDisplay 接入 Mac 主控端与纯被控端
+
+**实现**：
+- `lemon-galaxy-control-macos/Sources/CGVirtualDisplayBridge/`：Objective-C 薄封装 `LGVirtualDisplay`（SwiftPM 的 C 语言族 target，纯被控端在 `CSources/` 下用符号链接共用）。
+  私有接口声明照 DeskPad（MIT）的 `CGVirtualDisplayPrivate.h` 与 Chromium 测试代码的用法写，成员类型按 macOS 27.2.1 运行时 `class_copyPropertyList / class_copyMethodList` 读到的编码核对（`CGVirtualDisplayMode` 宽高是 `unsigned int`）。
+  类全部用 `NSClassFromString` 取，不产生静态链接引用；`LGVirtualDisplayAvailable()` 探测类与方法，缺了就报不支持。另有应急开关：环境变量 `LEMONGALAXY_NO_VIRTUAL_DISPLAY=1`。
+- `Platform/VirtualDisplays.swift`（纯被控端经符号链接共用）：一个进程一份，持有 `LGVirtualDisplay`，释放即删屏。建屏、删屏放到主线程（DeskPad、Chromium 都在主线程），内核线程等最多 10 秒，超时报错且晚到的屏立即删掉。
+  每块屏只给一个模式（要求的宽高与刷新率），非 HiDPI（协议里没有 HiDPI 参数；`LEMONGALAXY_VD_HIDPI=1` 时按 2 倍建，未验证）；物理尺寸按约 110 PPI 算。
+  厂商号 0x30F8（EDID 厂商码 LGX，与 Windows 驱动一致），型号区分主控端（1）与纯被控端（2），序列号 = 0x4C470000 | 系统用户号 << 4 | 槽位，同机多个进程、多个用户同时有屏也不撞号（macOS 14 要求序列号互不相同）。
+  建好后等它进 `CGGetActiveDisplayList`（5 秒）与 ScreenCaptureKit 的屏幕列表（3 秒，有「屏幕录制」授权时），返回 `DisplayInfo`（id = CGDirectDisplayID，is_virtual 为真），现有截屏按 id 直接采集。
+  删屏后等它从屏幕列表消失（3 秒）。系统自己结束屏（terminationHandler）时从表里去掉，内核下次对账即知。
+- 「没有亮着的显示器」：`CGGetActiveDisplayList` 里除了本进程加的虚拟屏一块都没有（合盖且没接外接屏的笔记本、没接显示器的 Mac mini）。别的应用的虚拟屏（DeskPad、隔空播放、随航）算有屏。`LEMON_GALAXY_TEST_HEADLESS=1` 时恒为真（与 Windows 相同的测试开关）。
+- 能力：有 CGVirtualDisplay 且有「屏幕录制」授权（登录界面的代理不看授权）时上限 3，`capabilities()` 里同时带 `virtual_display_max=3`（给无人值守的后台服务读）。
+- FFI：`HostPlatform` 加 `virtual_display_max / add_virtual_display -> VirtualDisplayResult / remove_virtual_display -> String? / virtual_display_ids / needs_headless_display`（uniffi 外部实现的接口没有默认实现，Swift 各实现都补上了；安卓、iOS、Windows 主控端没有实现方）。
+  `HostService` 加 `headless_display() / set_headless_display(value) -> Bool`，Mac 主控端「本机被控 → 概览」与纯被控端「通用 → 显示」里可以选关闭 / 默认 / 自定义（宽 × 高 @ 刷新率）。
+
+**无人值守（root 后台服务 + 会话代理）下谁持有虚拟屏**：
+- 后台服务是 launchd 守护进程、不连窗口服务器，建不了（go-macos/virtualdisplay 文档：没有图形会话的进程会失败）。虚拟屏一律由**负责画面的会话代理**建并持有：后台服务的 `DaemonPlatform` 把加、删、列 id、判断无头转给它（IPC 方法 `p.vdAdd / p.vdRemove / p.vdState`），上限从代理报的能力列表里读。
+- 代理不再负责画面（离开屏幕、换会话、与后台服务断开）时删掉自己的全部虚拟屏；还有虚拟屏时不做「用过 AppKit 后空闲退出」。内核每次操作前按当前代理报的 id 对账：换会话后主控加的屏作废（与 Windows 画面代理重启时相同，主控要重新加），无头兜底屏在主控下次打开屏幕列表时由新代理重新加。
+- 登录界面的代理（root，LoginWindow 会话）也建屏：没接显示器的 Mac mini 开机停在登录界面时靠它。用户登录后系统结束这个代理，屏随之消失，用户会话的代理接手后重新加。【推测：登录界面里能否建 CGVirtualDisplay、建出来能否被截屏，要在真机上测】
+
+**必须真机验证**（本机只编译，没有建过屏：建屏会改动正在使用的这台 Mac 的显示布局，且系统会记住虚拟屏的排列）：
+1. 没接显示器的 Mac mini（Apple 芯片与 Intel 各一台）：用户会话里主控打开屏幕列表时自动加 1920x1080，画面能开、键鼠落点正确；最后一个会话结束 10 秒后删掉。也要看系统在无头时是否自带一块「假屏」（若有，`needs_headless_display` 会认为有屏而不加，要按实测改判断）。
+2. 合盖的 MacBook（接电源、`pmset disablesleep 1` 或外接键鼠保持唤醒）同上。
+3. 主控连加 3 块（2560x1440@60、3840x2160@30 等），第 4 块被拒；删屏后 1 秒内从列表消失；断开后自动删。
+4. 无人值守：登录界面的代理建屏与截屏；登录、注销、快速切换用户时旧代理删屏、新代理接手。
+5. 加删虚拟屏时正在看的另一块屏不断流（调研 4.4 的 FB17797423：SCK 可能抓错屏，必要时拓扑变化后重建采集）。
+6. macOS 13、14、15、26、27 回归；Intel 机型用过虚拟屏后是否出现无显示（Jump Desktop 修过的问题）。
+
 ## 6. 来源（访问日期均为 2026-11-22）
 
 **Windows 驱动项目**

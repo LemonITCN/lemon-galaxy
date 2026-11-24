@@ -322,4 +322,49 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
         }
         return lock.locked { a.capabilities }
     }
+
+    // MARK: 虚拟屏
+    // 虚拟屏建在负责画面的代理里、由它持有（CGVirtualDisplay 要连着窗口服务器，本进程是 launchd 守护进程，不碰屏幕）。
+    // 换会话时旧代理把自己的屏全部删掉（AgentClient.stopAll），内核下次操作前按新代理报的 id 对账：
+    // 主控加的屏随之作废（与 Windows 画面代理重启时相同），无头兜底屏在主控下次打开屏幕列表时由新代理重新加。
+
+    /// 上限取负责画面的代理在能力列表里报的 virtual_display_max（不另发请求：内核握手时刚刷新过能力列表）
+    func virtualDisplayMax() -> UInt32 {
+        guard let a = active() else { return 0 }
+        return VirtualDisplays.capabilityMax(lock.locked { a.capabilities })
+    }
+
+    func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32) -> VirtualDisplayResult {
+        guard let a = active(wait: 3) else { return VirtualDisplayResult(display: nil, error: "没有负责画面的会话代理") }
+        do {
+            let m = try a.conn.call(IPCMethod.virtualAdd, PVirtualAdd(width: width, height: height, refresh: refresh), timeout: 30)
+            return VirtualDisplayResult(display: try m.decode(DisplayInfo.self), error: nil)
+        } catch {
+            return VirtualDisplayResult(display: nil, error: IPCFault(error).detail)
+        }
+    }
+
+    func removeVirtualDisplay(displayId: UInt32) -> String? {
+        lock.locked { _ = captures.removeValue(forKey: displayId) }
+        // 没有负责画面的代理：屏随代理进程一起没了
+        guard let a = active() else { return nil }
+        do {
+            _ = try a.conn.call(IPCMethod.virtualRemove, PDisplay(display: displayId), timeout: 15)
+            return nil
+        } catch {
+            return IPCFault(error).detail
+        }
+    }
+
+    func virtualDisplayIds() -> [UInt32] {
+        guard let m = request(IPCMethod.virtualState, IPCEmpty(), timeout: 10), let st = try? m.decode(PVirtualState.self) else { return [] }
+        return st.ids
+    }
+
+    func needsHeadlessDisplay() -> Bool {
+        // 测试用：当作本机没有亮着的显示器（与 Windows 相同的开关；会话代理里同样认这个环境变量）
+        if ProcessInfo.processInfo.environment["LEMON_GALAXY_TEST_HEADLESS"] == "1" { return true }
+        guard let m = request(IPCMethod.virtualState, IPCEmpty(), wait: 5, timeout: 10), let st = try? m.decode(PVirtualState.self) else { return false }
+        return st.needsHeadless
+    }
 }

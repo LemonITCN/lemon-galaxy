@@ -211,13 +211,19 @@ final class AgentClient: @unchecked Sendable {
         for d in displays { platform.stopCapture(displayId: d) }
         if audio { platform.stopAudio() }
         if privacy { _ = platform.setPrivacy(on: false) }
+        // 本代理不再负责画面（离开屏幕、换会话、与后台服务断开）：它加的虚拟屏一并删掉。
+        // 后台服务的内核按负责画面的代理对账，这些屏留着就没人管了
+        let virtuals = platform.virtualDisplayIds()
+        for id in virtuals { _ = platform.removeVirtualDisplay(displayId: id) }
+        if !virtuals.isEmpty { NSLog("LemonGalaxy 会话代理：不再负责画面，删掉本代理加的 %d 块虚拟屏", virtuals.count) }
         recycleIfIdle()
     }
 
-    /// 用过 AppKit（隐私屏）的代理在空闲时退出，launchd 随即重启一个没有登记到 LaunchServices 的
+    /// 用过 AppKit（隐私屏）的代理在空闲时退出，launchd 随即重启一个没有登记到 LaunchServices 的。
+    /// 还有虚拟屏时不退出（屏随本进程存亡）
     private func recycleIfIdle() {
         guard recycleWhenIdle?() == true else { return }
-        let idle = lock.locked { capturing.isEmpty && !audioOn && !privacyOn }
+        let idle = lock.locked { capturing.isEmpty && !audioOn && !privacyOn } && platform.virtualDisplayIds().isEmpty
         guard idle else { return }
         NSLog("LemonGalaxy 会话代理：隐私屏用完且空闲，退出后由 launchd 重启")
         exitHandler(true)
@@ -277,6 +283,29 @@ final class AgentClient: @unchecked Sendable {
                 reply.ok(PBool(value: ok))
             case IPCMethod.capabilities:
                 reply.ok(PStrings(values: capabilities()))
+            case IPCMethod.virtualAdd:
+                let p = try m.decode(PVirtualAdd.self)
+                let r = platform.addVirtualDisplay(width: p.width, height: p.height, refresh: p.refresh)
+                if let d = r.display {
+                    reply.ok(d)
+                } else {
+                    reply.fail(.other(r.error ?? "加虚拟屏失败"))
+                }
+            case IPCMethod.virtualRemove:
+                let p = try m.decode(PDisplay.self)
+                // 正在采集这块屏的先停掉
+                if lock.locked({ capturing.remove(p.display) != nil }) {
+                    lock.locked { sinks[p.display] = nil; cursorOff.remove(p.display) }
+                    platform.stopCapture(displayId: p.display)
+                }
+                if let err = platform.removeVirtualDisplay(displayId: p.display) {
+                    reply.fail(.other(err))
+                } else {
+                    reply.ok()
+                }
+                recycleIfIdle()
+            case IPCMethod.virtualState:
+                reply.ok(PVirtualState(ids: platform.virtualDisplayIds(), needsHeadless: platform.needsHeadlessDisplay()))
             default:
                 reply.fail(.other("未知方法 \(m.method)"))
             }
@@ -402,8 +431,32 @@ final class AgentPlatform: HostPlatform, @unchecked Sendable {
         if screenAllowed { c += ["display", "screenshot", "client_cursor"] }
         if inputAllowed { c.append("input") }
         if SystemPermissions.accessibilityGranted { c.append("ui_tree") }
+        let vd = virtualDisplayMax()
+        if vd > 0 { c.append(VirtualDisplays.capability(vd)) }
         return c
     }
+
+    // MARK: 虚拟屏
+    // 建在本代理里、由本代理持有（CGVirtualDisplay 要在连着窗口服务器的进程里建，后台服务是 launchd 守护进程，建不了）。
+    // 登录界面的代理同样能建（没接显示器的 Mac mini 开机停在登录界面时就靠它）；用户登录后登录界面的代理被系统结束，
+    // 它的屏随之消失，内核对账后在用户会话的代理里重新加。本代理不再负责画面时由 AgentClient.stopAll 全部删掉。
+
+    func virtualDisplayMax() -> UInt32 {
+        guard loginWindow else { return mac.virtualDisplayMax() }
+        return VirtualDisplays.shared.available && screenAllowed ? VirtualDisplays.controllerMax : 0
+    }
+
+    func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32) -> VirtualDisplayResult {
+        mac.addVirtualDisplay(width: width, height: height, refresh: refresh)
+    }
+
+    func removeVirtualDisplay(displayId: UInt32) -> String? {
+        stopOwn(displayId)
+        return mac.removeVirtualDisplay(displayId: displayId)
+    }
+
+    func virtualDisplayIds() -> [UInt32] { mac.virtualDisplayIds() }
+    func needsHeadlessDisplay() -> Bool { mac.needsHeadlessDisplay() }
 
     func listDisplays() -> [DisplayInfo] { mac.listDisplays() }
 

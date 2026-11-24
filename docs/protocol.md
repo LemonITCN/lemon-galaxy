@@ -228,10 +228,10 @@ channel u8 | seq u32 LE | 一个 Opus 包（48 kHz 立体声，20 毫秒）
 
 ### 8.6 虚拟屏
 
-被控端用虚拟屏驱动加出“看不见的显示器”，扩展进桌面，主控像普通屏幕一样开画面（Windows：LemonGalaxy Display 驱动，见 `lemon-galaxy-worker-windows/driver/`；macOS 还没有）。
+被控端用虚拟屏驱动加出“看不见的显示器”，扩展进桌面，主控像普通屏幕一样开画面（Windows：LemonGalaxy Display 驱动，见 `lemon-galaxy-worker-windows/driver/`；macOS：系统私有接口 CGVirtualDisplay，见 docs/research/virtual-display.md 5.10）。
 
-- 能力：被控端装了驱动、主控有控制权限时，能力列表里有 `virtual_display` 和 `virtual_display_max=N`（主控最多能加的块数，Windows 为 3）。
-  取值用 `galaxy_proto::peer::capability_value`。Linux / macOS 被控端、没装驱动的 Windows 都没有这两项。
+- 能力：被控端装了驱动、主控有控制权限时，能力列表里有 `virtual_display` 和 `virtual_display_max=N`（主控最多能加的块数，Windows、macOS 为 3）。
+  取值用 `galaxy_proto::peer::capability_value`。Linux 被控端、没装驱动的 Windows、系统没有 CGVirtualDisplay 或没授权「屏幕录制」的 macOS 都没有这两项。
 - `MgmtReq::VirtualDisplayAdd { width, height, refresh }`：要控制权限。宽 640–7680、高 480–4320、刷新率 24–240（0 表示 60）。
   成功回 `MgmtResp::Display(DisplayInfo)`（`is_virtual` 为真），主控拿它的 `id` 开 `Display` 流；之后 `ListDisplays` 里它也带 `is_virtual: true`。
   失败：`permission_denied`、`unsupported`（没有驱动）、`bad_request`（分辨率不合法）、`limit`（已到上限）、`virtual_display`（驱动或系统报错，`message` 是原因）。
@@ -244,3 +244,5 @@ channel u8 | seq u32 LE | 一个 Opus 包（48 kHz 立体声，20 毫秒）
 - 消息变体都追加在枚举最后（`MgmtReq` 第 11、12 号，`MgmtResp::Display` 第 7 号），老版本的编码不变；老被控端解不出新请求会直接关流。
 - Windows 实现要点：驱动句柄放在会话里的画面代理里，代理退出或崩溃（服务停止、控制台会话切换）时驱动随句柄删屏，不会留下幽灵屏；
   控制台会话切换后代理换会话重启，原来的虚拟屏随之消失，主控要重新加（无头兜底屏在下次列屏时自动补）。
+- macOS 实现要点：虚拟屏由有窗口服务器连接的进程建并持有（主控端、菜单栏被控端；无人值守时是负责画面的会话代理，root 后台服务不建），
+  进程退出系统即回收；每块屏只有要求的那一个模式（非 HiDPI）。无人值守下换会话时旧代理删掉自己的屏，同样要主控重新加。

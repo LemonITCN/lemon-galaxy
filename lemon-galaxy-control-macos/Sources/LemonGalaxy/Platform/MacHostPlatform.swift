@@ -59,6 +59,9 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
         if ax { caps += ["input", "ui_tree", "computer_use"] }
         // 隐私屏：拦截本地键鼠要「辅助功能」；没有画面时开隐私屏没有意义
         if screen && ax { caps.append("privacy") }
+        // 虚拟屏上限（内核另按 virtual_display_max() 报给主控；这里带上是给无人值守的后台服务读，见 DaemonPlatform）
+        let vd = virtualDisplayMax()
+        if vd > 0 { caps.append(VirtualDisplays.capability(vd)) }
         return caps
     }
 
@@ -74,15 +77,16 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
         return ids.prefix(Int(count)).map { id in
             let b = CGDisplayBounds(id)
             let scale = displayScale(id)
-            let name = DisplayNames.name(id)
+            let name = VirtualDisplays.shared.name(id) ?? DisplayNames.name(id)
             return DisplayInfo(id: id, name: name, width: UInt32(b.width * scale), height: UInt32(b.height * scale),
                                scale: Float(scale), primary: id == main, isVirtual: isVirtual(id, name: name))
         }
     }
 
     private func isVirtual(_ id: CGDirectDisplayID, name: String) -> Bool {
-        // 系统虚拟显示（CGVirtualDisplay / 隔空投送副屏）没有厂商号
-        CGDisplayVendorNumber(id) == 0 && CGDisplayIsBuiltin(id) == 0 || name.lowercased().contains("virtual")
+        // 我们自己加的虚拟屏；别的系统虚拟显示（其他应用的 CGVirtualDisplay / 隔空投送副屏）没有厂商号
+        VirtualDisplays.shared.contains(id)
+            || CGDisplayVendorNumber(id) == 0 && CGDisplayIsBuiltin(id) == 0 || name.lowercased().contains("virtual")
     }
 
     func startCapture(displayId: UInt32, options: CaptureOptions, sink: EncodedFrameSink) -> CaptureStarted? {
@@ -127,6 +131,30 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
     func requestKeyframe(displayId: UInt32) { lock.locked { captures[displayId] }?.requestKeyframe() }
     func setBitrate(displayId: UInt32, kbps: UInt32) { lock.locked { captures[displayId] }?.setBitrate(Int(kbps)) }
     func setCursorInVideo(displayId: UInt32, show: Bool) { lock.locked { captures[displayId] }?.setCursorInVideo(show) }
+
+    // MARK: 虚拟屏（CGVirtualDisplay，见 VirtualDisplays.swift；归属与无头兜底屏的时机由内核管）
+
+    /// 系统有 CGVirtualDisplay 且有「屏幕录制」授权（没有授权时加了屏也看不到，不报能力）
+    func virtualDisplayMax() -> UInt32 {
+        VirtualDisplays.shared.available && SystemPermissions.screenRecordingGranted ? VirtualDisplays.controllerMax : 0
+    }
+
+    func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32) -> VirtualDisplayResult {
+        switch VirtualDisplays.shared.add(width: width, height: height, refresh: refresh) {
+        case .success(let d): return VirtualDisplayResult(display: d, error: nil)
+        case .failure(let e): return VirtualDisplayResult(display: nil, error: e.message)
+        }
+    }
+
+    func removeVirtualDisplay(displayId: UInt32) -> String? {
+        // 正在采集这块屏的先停掉（内核随后也会停，这里先停免得采集在屏消失时报错）
+        stopCapture(displayId: displayId)
+        return VirtualDisplays.shared.remove(displayId)
+    }
+
+    func virtualDisplayIds() -> [UInt32] { VirtualDisplays.shared.ids }
+
+    func needsHeadlessDisplay() -> Bool { VirtualDisplays.shared.needsHeadless() }
 
     // MARK: 输入
 

@@ -726,6 +726,14 @@
   "pf.delete.title": "删除端口映射",
   "pf.delete.message": "删除「{0}」？正在运行的映射会先停止，各台主控端上的这条规则都会删掉。",
   "local.lockOnEnd": "远程结束后自动锁屏",
-  "local.lockOnEnd.info": "别人远程看过这台 Mac 的桌面后，等这些会话全部结束 10 秒自动锁屏；断线后自动重连不会触发。只看终端、文件的会话不算。"
+  "local.lockOnEnd.info": "别人远程看过这台 Mac 的桌面后，等这些会话全部结束 10 秒自动锁屏；断线后自动重连不会触发。只看终端、文件的会话不算。",
+  "headless.title": "无头兜底屏",
+  "headless.info": "这台 Mac 没有亮着的显示器时（没接显示器的 Mac mini、合上盖子的笔记本），有人远程打开屏幕列表就自动加一块虚拟屏，远程桌面照常能用；所有远程会话结束 10 秒后自动删掉。默认 1920×1080、60 Hz。",
+  "headless.off": "关闭",
+  "headless.default": "默认",
+  "headless.custom": "自定义",
+  "headless.apply": "应用",
+  "headless.range": "宽 640–7680，高 480–4320，刷新率 24–240 Hz",
+  "headless.unsupported": "这台 Mac 的系统不支持虚拟屏，不会自动加屏"
  }
 }

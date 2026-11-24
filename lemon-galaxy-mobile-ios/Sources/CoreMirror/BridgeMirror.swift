@@ -1363,6 +1363,26 @@ public struct VaultEntry: Equatable, Hashable {
 extension VaultEntry: Sendable {}
 #endif
 
+public struct VirtualDisplayResult: Equatable, Hashable {
+    public var display: DisplayInfo?
+    public var error: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(display: DisplayInfo?, error: String?) {
+        self.display = display
+        self.error = error
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension VirtualDisplayResult: Sendable {}
+#endif
+
 public enum AccountStatus: Equatable, Hashable {
     
     case active
@@ -2302,6 +2322,31 @@ public protocol HostPlatform: AnyObject, Sendable {
      */
     func capabilities()  -> [String]
     
+    /**
+     * 主控最多能加几块虚拟屏（不含无头兜底屏）；0 表示不支持。
+     */
+    func virtualDisplayMax()  -> UInt32
+    
+    /**
+     * 加一块虚拟屏并扩展进桌面：成功时 display 有值（is_virtual 为真，id 可直接开画面），失败时 error 是原因。
+     */
+    func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32)  -> VirtualDisplayResult
+    
+    /**
+     * 删掉一块虚拟屏；已经不存在也算成功。成功返回 None，失败返回原因。
+     */
+    func removeVirtualDisplay(displayId: UInt32)  -> String?
+    
+    /**
+     * 现存的虚拟屏 id（平台层的虚拟屏可能自己消失，内核据此对账）。
+     */
+    func virtualDisplayIds()  -> [UInt32]
+    
+    /**
+     * 本机没有任何亮着的显示器（不算我们自己的虚拟屏），远程桌面需要一块无头兜底屏。
+     */
+    func needsHeadlessDisplay()  -> Bool
+    
 }
 
 public protocol HostServiceProtocol: AnyObject, Sendable {
@@ -2315,6 +2360,13 @@ public protocol HostServiceProtocol: AnyObject, Sendable {
      */
     func disconnectSession(id: String)  -> Bool
     
+    /**
+     * 无头兜底屏设置（与命令行 `lemon-galaxy-worker headless-display` 相同）：本机没有亮着的显示器时，
+     * 主控打开屏幕列表就自动加一块虚拟屏，最后一个会话结束 10 秒后删掉。
+     * 返回 "" = 默认（1920x1080@60）、"off" = 关闭、"宽x高@刷新率" = 自定义。
+     */
+    func headlessDisplay()  -> String
+    
     func lockOnEnd()  -> Bool
     
     func recentEvents(limit: UInt32)  -> [HostEvent]
@@ -2325,6 +2377,11 @@ public protocol HostServiceProtocol: AnyObject, Sendable {
      * 自定义验证码（8 到 16 位字母数字），None 为每次随机。
      */
     func setAssistCode(code: String?) 
+    
+    /**
+     * 改无头兜底屏设置：""（或 "default"）、"off"、"宽x高[@刷新率]"。写法不对或分辨率不支持时返回 false，设置不变。
+     */
+    func setHeadlessDisplay(value: String)  -> Bool
     
     func setListener(listener: HostListener) 
     
@@ -2771,10 +2828,12 @@ open class HostService: HostServiceProtocol, @unchecked Sendable {
     open func accounts()  -> [HostAccount] { bridgeUnimplemented() }
     open func disconnectAll() { bridgeUnimplemented() }
     open func disconnectSession(id: String)  -> Bool { bridgeUnimplemented() }
+    open func headlessDisplay()  -> String { bridgeUnimplemented() }
     open func lockOnEnd()  -> Bool { bridgeUnimplemented() }
     open func recentEvents(limit: UInt32)  -> [HostEvent] { bridgeUnimplemented() }
     open func respondAssist(requestId: String, allow: Bool) { bridgeUnimplemented() }
     open func setAssistCode(code: String?) { bridgeUnimplemented() }
+    open func setHeadlessDisplay(value: String)  -> Bool { bridgeUnimplemented() }
     open func setListener(listener: HostListener) { bridgeUnimplemented() }
     open func setLockOnEnd(on: Bool) { bridgeUnimplemented() }
     open func setPlatform(platform: HostPlatform) { bridgeUnimplemented() }

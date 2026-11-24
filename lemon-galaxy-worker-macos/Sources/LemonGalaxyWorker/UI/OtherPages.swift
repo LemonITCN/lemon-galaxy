@@ -241,6 +241,11 @@ struct GeneralPage: View {
                           info: loc("general.lockOnEnd.info"))
             }
             .disabled(model.service == nil)
+            SectionLabel(text: loc("general.display"))
+            Card {
+                HeadlessDisplaySetting(value: model.headlessDisplay) { model.setHeadlessDisplay($0) }
+            }
+            .disabled(model.service == nil)
             HStack(spacing: 4) {
                 SectionLabel(text: loc("general.notify"))
                 InfoButton(text: loc("general.menuIconHint"))

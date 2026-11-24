@@ -726,6 +726,14 @@
   "pf.delete.title": "Delete Port Forward",
   "pf.delete.message": "Delete \"{0}\"? It is stopped first if running, and the rule is removed from all your controllers.",
   "local.lockOnEnd": "Lock screen when remote sessions end",
-  "local.lockOnEnd.info": "After someone has viewed this Mac's desktop remotely, the screen locks 10 seconds after all such sessions have ended. Automatic reconnects after a dropped connection do not trigger it, and terminal- or file-only sessions do not count."
+  "local.lockOnEnd.info": "After someone has viewed this Mac's desktop remotely, the screen locks 10 seconds after all such sessions have ended. Automatic reconnects after a dropped connection do not trigger it, and terminal- or file-only sessions do not count.",
+  "headless.title": "Headless display",
+  "headless.info": "When this Mac has no active display (a Mac mini without a monitor, a laptop with its lid closed), a virtual display is added as soon as someone opens the display list remotely, so remote desktop keeps working. It is removed 10 seconds after all remote sessions end. Default: 1920×1080 at 60 Hz.",
+  "headless.off": "Off",
+  "headless.default": "Default",
+  "headless.custom": "Custom",
+  "headless.apply": "Apply",
+  "headless.range": "Width 640–7680, height 480–4320, refresh rate 24–240 Hz",
+  "headless.unsupported": "This version of macOS doesn't support virtual displays, so none will be added"
  }
 }

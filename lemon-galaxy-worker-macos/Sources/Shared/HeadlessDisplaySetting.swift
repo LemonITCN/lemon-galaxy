@@ -1,0 +1,1 @@
+../../../lemon-galaxy-control-macos/Sources/LemonGalaxy/UI/Common/HeadlessDisplaySetting.swift

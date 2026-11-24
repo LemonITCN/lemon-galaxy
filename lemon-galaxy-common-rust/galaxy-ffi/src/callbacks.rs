@@ -78,6 +78,20 @@ pub trait HostPlatform: Send + Sync {
     fn stop_audio(&self);
     /// 已获得的系统授权对应的能力："display" "screenshot" "input" "ui_tree" "clipboard" "privacy" "audio"
     fn capabilities(&self) -> Vec<String>;
+
+    // ---------------- 虚拟屏（内核 galaxy-host 的 vdisplay.rs 管归属与上限，这里只管加删） ----------------
+    // 都在内核的阻塞线程里调用，可以阻塞几秒。不支持的平台：上限返回 0，其余照下面的「不支持」写法返回。
+
+    /// 主控最多能加几块虚拟屏（不含无头兜底屏）；0 表示不支持。
+    fn virtual_display_max(&self) -> u32;
+    /// 加一块虚拟屏并扩展进桌面：成功时 display 有值（is_virtual 为真，id 可直接开画面），失败时 error 是原因。
+    fn add_virtual_display(&self, width: u32, height: u32, refresh: u32) -> VirtualDisplayResult;
+    /// 删掉一块虚拟屏；已经不存在也算成功。成功返回 None，失败返回原因。
+    fn remove_virtual_display(&self, display_id: u32) -> Option<String>;
+    /// 现存的虚拟屏 id（平台层的虚拟屏可能自己消失，内核据此对账）。
+    fn virtual_display_ids(&self) -> Vec<u32>;
+    /// 本机没有任何亮着的显示器（不算我们自己的虚拟屏），远程桌面需要一块无头兜底屏。
+    fn needs_headless_display(&self) -> bool;
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
@@ -85,6 +99,13 @@ pub struct CaptureStarted {
     pub width: u32,
     pub height: u32,
     pub codec: VideoCodec,
+}
+
+/// HostPlatform.add_virtual_display 的结果（不用 Result：各语言实现回调里抛错的写法不一，用记录最省事）。
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct VirtualDisplayResult {
+    pub display: Option<DisplayInfo>,
+    pub error: Option<String>,
 }
 
 #[uniffi::export(with_foreign)]

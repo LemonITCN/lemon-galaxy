@@ -18,6 +18,7 @@ let hasRealCore = env["LEMONGALAXY_NO_CORE"] != "1"
 
 var appDependencies: [Target.Dependency] = [
     .product(name: "SwiftTerm", package: "SwiftTerm"),
+    "CGVirtualDisplayBridge",
 ]
 var appSwiftSettings: [SwiftSetting] = [
     .unsafeFlags(["-Osize"], .when(configuration: .release)),
@@ -71,6 +72,13 @@ let package = Package(
                 // 强链接时 macOS 13 一启动就因找不到符号退出；弱链接后这些符号在旧系统上为空，cpal 不会去调
                 .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "CoreAudio"]),
             ]
+        ),
+        // 虚拟屏：CoreGraphics 私有类 CGVirtualDisplay 的 Objective-C 薄封装（运行时取类，不静态链接私有符号）。
+        // 纯被控端（lemon-galaxy-worker-macos）用符号链接共用同一份源码
+        .target(
+            name: "CGVirtualDisplayBridge",
+            path: "Sources/CGVirtualDisplayBridge",
+            linkerSettings: [.linkedFramework("CoreGraphics")]
         ),
     ] + extraTargets,
     swiftLanguageVersions: [.v5]

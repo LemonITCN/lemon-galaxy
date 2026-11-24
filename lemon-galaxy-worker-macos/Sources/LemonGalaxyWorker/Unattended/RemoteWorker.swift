@@ -243,6 +243,7 @@ final class RemoteHostService: HostService, @unchecked Sendable {
     private var listener: HostListener?
     private var status_: HostStatus?
     private var lockOnEnd_ = false
+    private var headless_ = ""
     private var events_: [HostEvent] = []
 
     init() { super.init(noHandle: NoHandle()) }
@@ -271,9 +272,11 @@ final class RemoteHostService: HostService, @unchecked Sendable {
             guard let self, let host = self.host,
                   let m = try? host.callSync(IPCMethod.status, IPCEmpty()), let s = try? m.decode(CStatus.self).status else { return }
             let lo = (try? host.callSync(IPCMethod.lockOnEnd, IPCEmpty()).decode(PBool.self).value) ?? false
+            let hd = try? host.callSync(IPCMethod.headlessDisplay, IPCEmpty()).decode(PText.self).text
             let l = self.lock.locked { () -> HostListener? in
                 self.status_ = s
                 self.lockOnEnd_ = lo
+                if let hd { self.headless_ = hd }
                 return self.listener
             }
             l?.onStatus(status: s)
@@ -336,6 +339,14 @@ final class RemoteHostService: HostService, @unchecked Sendable {
     override func setLockOnEnd(on: Bool) {
         fire(IPCMethod.setLockOnEnd, POn(on: on))
         if let v = try? host?.callSync(IPCMethod.lockOnEnd, IPCEmpty()).decode(PBool.self).value { lock.locked { lockOnEnd_ = v } }
+    }
+
+    override func headlessDisplay() -> String { lock.locked { headless_ } }
+
+    override func setHeadlessDisplay(value: String) -> Bool {
+        let ok = (try? host?.callSync(IPCMethod.setHeadlessDisplay, PText(text: value)).decode(PBool.self).value) ?? false
+        if let v = try? host?.callSync(IPCMethod.headlessDisplay, IPCEmpty()).decode(PText.self).text { lock.locked { headless_ = v } }
+        return ok
     }
 
     override func setRemoteEnabled(enabled: Bool) { fire(IPCMethod.setRemoteEnabled, CEnabled(enabled: enabled)) }

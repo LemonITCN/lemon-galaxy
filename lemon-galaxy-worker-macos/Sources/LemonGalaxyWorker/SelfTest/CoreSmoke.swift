@@ -270,6 +270,16 @@ private struct SmokeRunner {
             guard !service.lockOnEnd() else { throw fail("关掉后读回仍为开") }
         }) == nil { failures += 1 }
 
+        // 6c. 无头兜底屏设置（改完读回，最后恢复原值）
+        if await step("set_headless_display", { () async throws -> Void in
+            let before = service.headlessDisplay()
+            defer { _ = service.setHeadlessDisplay(value: before) }
+            guard service.setHeadlessDisplay(value: "2560X1440"), service.headlessDisplay() == "2560x1440@60" else { throw fail("自定义没有按规范写法存下：\(service.headlessDisplay())") }
+            guard !service.setHeadlessDisplay(value: "100x100"), service.headlessDisplay() == "2560x1440@60" else { throw fail("不合法的分辨率应被拒绝且不改设置") }
+            guard service.setHeadlessDisplay(value: "off"), service.headlessDisplay() == "off" else { throw fail("关闭没有生效") }
+            guard service.setHeadlessDisplay(value: "default"), service.headlessDisplay() == "" else { throw fail("默认没有生效") }
+        }) == nil { failures += 1 }
+
         // 7. 临时协助
         if let a = await step("start_assist", { try await service.startAssist() }) {
             log("  设备码 \(a.deviceCode) 验证码 \(a.code)")

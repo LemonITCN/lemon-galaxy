@@ -306,6 +306,22 @@ enum IPCSelfTest {
         let audio = TestAudio()
         check("开始采集声音", dp.startAudio(sink: audio))
         check("声音样本到达", wait { audio.bytes >= 3 * 3840 && audio.lastTag == 0xA1 })
+
+        // 虚拟屏：转给负责画面的代理，由代理建、代理持有
+        check("虚拟屏上限来自代理的能力列表", dp.virtualDisplayMax() == 3)
+        fa.needsHeadless = true
+        check("有没有亮着的显示器由代理判断", dp.needsHeadlessDisplay())
+        fa.needsHeadless = false
+        check("有亮着的显示器时不要兜底屏", !dp.needsHeadlessDisplay())
+        let vr = dp.addVirtualDisplay(width: 2560, height: 1440, refresh: 60)
+        check("加虚拟屏转给代理", vr.display?.width == 2560 && vr.display?.isVirtual == true && fa.virtualIds == [vr.display?.id ?? 0],
+              vr.error ?? "")
+        check("虚拟屏 id 按代理对账", dp.virtualDisplayIds() == fa.virtualIds)
+        let bad = dp.addVirtualDisplay(width: 1, height: 1, refresh: 60)
+        check("加虚拟屏失败时带回代理的原因", bad.display == nil && bad.error?.contains("假平台拒绝") == true, bad.error ?? "")
+        check("删虚拟屏", dp.removeVirtualDisplay(displayId: vr.display?.id ?? 0) == nil && fa.virtualIds.isEmpty)
+        // 留一块给换会话的检查（旧代理离开屏幕时要删掉它）
+        _ = dp.addVirtualDisplay(width: 1920, height: 1080, refresh: 60)
         return (fa, ca)
     }
 
@@ -341,6 +357,8 @@ enum IPCSelfTest {
         check("新会话自动重开画面", wait { fb.capturing.contains(1) })
         check("新会话自动重开隐私屏与声音", wait { fb.privacy && fb.audioOn })
         check("旧会话停掉采集与隐私屏", wait { fa.capturing.isEmpty && !fa.privacy && !fa.audioOn })
+        check("旧会话删掉自己加的虚拟屏", wait { fa.virtualIds.isEmpty })
+        check("换会话后虚拟屏按新代理对账", dp.virtualDisplayIds().isEmpty)
         let sink = (fb.sinkFor(1) as? ForwardingFrameSink)
         check("新会话的画面帧到达同一个内核输出", wait { (dp.debugSink(1) as? TestSink)?.count(tag: 0xB2) ?? 0 >= 10 }, sink == nil ? "没有转发对象" : "")
         check("换会话后告诉内核新分辨率", (dp.debugSink(1) as? TestSink)?.resolutions.contains { $0 == (2560, 1600) } == true)
@@ -553,11 +571,14 @@ final class FakePlatform: HostPlatform, @unchecked Sendable {
     private var _bitrates: [UInt32] = []
     private var _cursorInVideo: [UInt32: Bool] = [:]
     private var _exit: [Bool] = []
+    private var _virtual: [UInt32] = []
+    private var _nextVirtual: UInt32 = 100
+    private var _needsHeadless = false
 
     init(tag: UInt8) {
         self.tag = tag
         displays = [DisplayInfo(id: 1, name: "Fake \(tag)", width: 1920, height: 1080, scale: 2, primary: true, isVirtual: false)]
-        caps = ["display", "screenshot", "input", "clipboard", "privacy", "audio", "tag-\(tag)"]
+        caps = ["display", "screenshot", "input", "clipboard", "privacy", "audio", "tag-\(tag)", VirtualDisplays.capability(3)]
         shot = ImageData(mime: "image/png", data: Data((0..<300_000).map { UInt8(($0 + Int(tag)) % 256) }), width: 800, height: 450)
     }
 
@@ -577,6 +598,11 @@ final class FakePlatform: HostPlatform, @unchecked Sendable {
         set { lock.locked { _exit = newValue } }
     }
     func sinkFor(_ d: UInt32) -> EncodedFrameSink? { lock.locked { _sinks[d] } }
+    var virtualIds: [UInt32] { lock.locked { _virtual } }
+    var needsHeadless: Bool {
+        get { lock.locked { _needsHeadless } }
+        set { lock.locked { _needsHeadless = newValue } }
+    }
 
     func listDisplays() -> [DisplayInfo] { displays }
     func capabilities() -> [String] { caps }
@@ -643,6 +669,25 @@ final class FakePlatform: HostPlatform, @unchecked Sendable {
     }
 
     func stopAudio() { lock.locked { _audio = nil } }
+
+    func virtualDisplayMax() -> UInt32 { 3 }
+    /// 宽为 1 时假装失败（检查错误原因能带回内核）
+    func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32) -> VirtualDisplayResult {
+        if width == 1 { return VirtualDisplayResult(display: nil, error: "假平台拒绝 \(tag)") }
+        let id = lock.locked { () -> UInt32 in
+            defer { _nextVirtual += 1 }
+            _virtual.append(_nextVirtual)
+            return _nextVirtual
+        }
+        return VirtualDisplayResult(display: DisplayInfo(id: id, name: "Virtual \(tag)", width: width, height: height, scale: 1, primary: false, isVirtual: true),
+                                    error: nil)
+    }
+    func removeVirtualDisplay(displayId: UInt32) -> String? {
+        lock.locked { _virtual.removeAll { $0 == displayId } }
+        return nil
+    }
+    func virtualDisplayIds() -> [UInt32] { virtualIds }
+    func needsHeadlessDisplay() -> Bool { needsHeadless }
 }
 
 struct CursorReport: Equatable { var x: Int32; var y: Int32; var visible: Bool }

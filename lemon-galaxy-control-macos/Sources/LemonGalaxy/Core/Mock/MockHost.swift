@@ -10,6 +10,7 @@ final class MockHostService: HostService, @unchecked Sendable {
     private var listener: HostListener?
     private var remoteEnabled = true
     private var lockOnEndOn = false
+    private var headlessSetting = ""
     private var sessions: [HostSessionInfo] = []
     private var assist: AssistInfo?
     private var policies: [UInt64: HostPolicy] = [:]
@@ -96,6 +97,17 @@ final class MockHostService: HostService, @unchecked Sendable {
         log("policy", "", on ? (zh ? "已开启远程结束后自动锁屏" : "Lock screen when remote sessions end: on")
                              : (zh ? "已关闭远程结束后自动锁屏" : "Lock screen when remote sessions end: off"))
         notify()
+    }
+
+    override func headlessDisplay() -> String { lock.locked { headlessSetting } }
+
+    override func setHeadlessDisplay(value: String) -> Bool {
+        guard let v = HeadlessDisplayMode.normalize(value) else { return false }
+        lock.locked { headlessSetting = v }
+        let shown = v.isEmpty ? (zh ? "默认" : "default") : v == "off" ? (zh ? "关闭" : "off") : v
+        log("policy", "", zh ? "无头兜底屏：\(shown)" : "Headless display: \(shown)")
+        notify()
+        return true
     }
 
     override func disconnectAll() {

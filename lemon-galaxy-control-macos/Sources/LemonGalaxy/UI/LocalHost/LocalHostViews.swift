@@ -147,6 +147,14 @@ struct LocalOverview: View {
                 }
             }
             .disabled(host.service == nil)
+            Card {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "rectangle.dashed").font(.system(size: 14)).foregroundStyle(p.secondaryText).frame(width: 20)
+                        .padding(.top, 4)
+                    HeadlessDisplaySetting(value: host.headlessDisplay) { host.setHeadlessDisplay($0) }
+                }
+            }
+            .disabled(host.service == nil)
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     SectionLabel(text: loc("local.sessions"))
