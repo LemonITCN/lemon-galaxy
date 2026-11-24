@@ -4,6 +4,8 @@
 //! - 运行目录 /run/lemon-galaxy-worker/vd-<uid>/（普通用户运行时在 $XDG_RUNTIME_DIR 下）：Xauthority、日志、状态文件，
 //!   也当作虚拟桌面里的 XDG_RUNTIME_DIR（用户没登录时系统不会建 /run/user/<uid>）。
 //! - Xvfb 与桌面都以该用户身份运行；Xvfb 开访问控制（独立的 MIT-MAGIC-COOKIE），不监听 TCP。
+//! - 没有 Xvfb（或没有 X11 桌面会话，比如 GNOME 49 起的 Ubuntu）但有 GNOME 时，用系统自带的
+//!   `gnome-shell --headless --virtual-monitor 宽x高` 开无头 Wayland 桌面（自带 PipeWire），画面走 Mutter 后端。
 
 use super::session::{GuiSession, Kind};
 use galaxy_host::sysuser::SysUser;
@@ -18,6 +20,12 @@ use std::time::{Duration, Instant};
 struct Saved {
     user: String,
     uid: u32,
+    /// "x11"（Xvfb）或 "gnome"（gnome-shell 无头）
+    #[serde(default = "x11_kind")]
+    kind: String,
+    /// GNOME 无头桌面的会话总线地址
+    #[serde(default)]
+    bus: String,
     display: String,
     xvfb_pid: u32,
     session_pid: u32,
@@ -34,6 +42,10 @@ struct VDesktop {
 }
 
 static DESKTOPS: Mutex<Option<HashMap<u32, VDesktop>>> = Mutex::new(None);
+
+fn x11_kind() -> String {
+    "x11".into()
+}
 
 fn base_dir() -> PathBuf {
     if nix::unistd::getuid().is_root() {
@@ -69,10 +81,11 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 fn alive(v: &mut VDesktop) -> bool {
-    let x = match v.xvfb.as_mut() {
-        Some(c) => matches!(c.try_wait(), Ok(None)),
-        None => pid_alive(v.saved.xvfb_pid),
-    };
+    let x = v.saved.kind != "x11"
+        || match v.xvfb.as_mut() {
+            Some(c) => matches!(c.try_wait(), Ok(None)),
+            None => pid_alive(v.saved.xvfb_pid),
+        };
     let s = match v.session.as_mut() {
         Some(c) => matches!(c.try_wait(), Ok(None)),
         None => pid_alive(v.saved.session_pid),
@@ -167,12 +180,20 @@ fn sessions() -> Vec<(String, String, String)> {
     v
 }
 
+/// 有 GNOME（能开无头 Wayland 桌面）：gnome-shell 与 PipeWire、WirePlumber 都在
+fn gnome_headless_available() -> bool {
+    which("gnome-shell").is_some() && which("pipewire").is_some() && which("wireplumber").is_some() && which("dbus-run-session").is_some()
+}
+
 /// 能不能开虚拟桌面；不能时返回原因（含安装命令）
 pub fn availability() -> Result<String, String> {
-    let xvfb = which("Xvfb").ok_or_else(|| "没有可用的虚拟桌面：请安装 Xvfb 和一个桌面环境，例如 Ubuntu / Debian：sudo apt install xvfb xfce4；CentOS / RHEL / Fedora：sudo dnf install xorg-x11-server-Xvfb @xfce-desktop-environment".to_string())?;
-    let s = sessions();
-    let first = s.first().ok_or_else(|| "没有可用的虚拟桌面：没有装桌面环境，例如 Ubuntu / Debian：sudo apt install xfce4；CentOS / RHEL / Fedora：sudo dnf groupinstall Xfce".to_string())?;
-    Ok(format!("{}，{}", xvfb.display(), first.0))
+    if let (Some(xvfb), Some(first)) = (which("Xvfb"), sessions().into_iter().next()) {
+        return Ok(format!("{}，{}", xvfb.display(), first.0));
+    }
+    if gnome_headless_available() {
+        return Ok("GNOME 无头桌面（gnome-shell --headless）".into());
+    }
+    Err("没有可用的虚拟桌面：请安装 Xvfb 和一个桌面环境，例如 Ubuntu / Debian：sudo apt install xvfb xfce4；CentOS / RHEL / Fedora：sudo dnf install xorg-x11-server-Xvfb @xfce-desktop-environment".into())
 }
 
 fn random_cookie() -> [u8; 16] {
@@ -230,6 +251,16 @@ pub fn any_session() -> Option<GuiSession> {
 
 fn to_session(v: &VDesktop) -> GuiSession {
     let s = &v.saved;
+    if s.kind == "gnome" {
+        let env = vec![
+            ("DBUS_SESSION_BUS_ADDRESS".to_string(), s.bus.clone()),
+            ("XDG_RUNTIME_DIR".to_string(), v.dir.join("run").to_string_lossy().to_string()),
+            ("WAYLAND_DISPLAY".to_string(), "wayland-0".to_string()),
+            ("XDG_SESSION_TYPE".to_string(), "wayland".to_string()),
+            ("XDG_CURRENT_DESKTOP".to_string(), "GNOME".to_string()),
+        ];
+        return GuiSession { id: format!("virtual:{}", s.user), kind: Kind::Wayland, uid: s.uid, user: s.user.clone(), greeter: false, virtual_desktop: true, desktop: "gnome".into(), env };
+    }
     let env = vec![
         ("DISPLAY".to_string(), s.display.clone()),
         ("XAUTHORITY".to_string(), v.dir.join("Xauthority").to_string_lossy().to_string()),
@@ -268,8 +299,10 @@ pub fn ensure(user: &str, w: u32, h: u32) -> Result<GuiSession, String> {
         return Ok(s);
     }
     availability()?;
-    let xvfb = which("Xvfb").ok_or("没有 Xvfb")?;
-    let (sname, exec, names) = sessions().into_iter().next().ok_or("没有桌面环境")?;
+    let x11 = which("Xvfb").zip(sessions().into_iter().next());
+    let Some((xvfb, (sname, exec, names))) = x11 else {
+        return ensure_gnome(&u, w, h);
+    };
     let num = free_display().ok_or("没有空闲的显示号")?;
     let display = format!(":{num}");
     let dir = base_dir().join(format!("vd-{}", u.uid));
@@ -340,11 +373,83 @@ pub fn ensure(user: &str, w: u32, h: u32) -> Result<GuiSession, String> {
             return Err(format!("启动桌面会话失败：{e}"));
         }
     };
-    let saved = Saved { user: u.name.clone(), uid: u.uid, display: display.clone(), xvfb_pid: xchild.id(), session_pid: schild.id(), desktop: desktop.clone(), width: w, height: h };
+    let saved = Saved { user: u.name.clone(), uid: u.uid, kind: "x11".into(), bus: String::new(), display: display.clone(), xvfb_pid: xchild.id(), session_pid: schild.id(), desktop: desktop.clone(), width: w, height: h };
     let _ = std::fs::write(dir.join("state.json"), serde_json::to_vec(&saved).unwrap_or_default());
     let msg = format!("已为用户 {} 开虚拟桌面 {}（{}，{}x{}）", u.name, display, sname, w, h);
     tracing::info!("{msg}");
     let v = VDesktop { saved, xvfb: Some(xchild), session: Some(schild), dir };
+    let s = to_session(&v);
+    with(|m| m.insert(u.uid, v));
+    Ok(s)
+}
+
+/// GNOME 无头 Wayland 桌面：dbus-run-session 里起 PipeWire、WirePlumber，再起 gnome-shell --headless。
+fn ensure_gnome(u: &SysUser, w: u32, h: u32) -> Result<GuiSession, String> {
+    let dir = base_dir().join(format!("vd-{}", u.uid));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("run")).map_err(|e| format!("建运行目录失败：{e}"))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(base_dir(), std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(dir.join("run"), std::fs::Permissions::from_mode(0o700));
+    }
+    // 会话脚本：记下会话总线地址，起 PipeWire（画面要经它传）与 WirePlumber，最后换成 gnome-shell
+    let script = "#!/bin/sh\n\
+echo \"$DBUS_SESSION_BUS_ADDRESS\" > \"$1/bus\"\n\
+pipewire >\"$1/pipewire.log\" 2>&1 &\n\
+sleep 0.5\n\
+wireplumber >\"$1/wireplumber.log\" 2>&1 &\n\
+command -v pipewire-pulse >/dev/null 2>&1 && pipewire-pulse >/dev/null 2>&1 &\n\
+exec gnome-shell --headless --virtual-monitor \"$2\"\n";
+    std::fs::write(dir.join("session.sh"), script).map_err(|e| e.to_string())?;
+    for p in [dir.as_path(), &dir.join("run"), &dir.join("session.sh")] {
+        chown(p, u);
+    }
+    let log = |name: &str| std::fs::File::create(dir.join(name)).map(|f| {
+        chown(&dir.join(name), u);
+        Stdio::from(f)
+    });
+    let mut env = galaxy_host::sysuser::child_env(u);
+    env.retain(|(k, _)| k != "TERM" && k != "COLORTERM" && k != "LEMON_GALAXY");
+    env.extend([
+        ("XDG_RUNTIME_DIR".to_string(), dir.join("run").to_string_lossy().to_string()),
+        ("XDG_SESSION_TYPE".to_string(), "wayland".to_string()),
+        ("XDG_CURRENT_DESKTOP".to_string(), "GNOME".to_string()),
+        ("XDG_SESSION_DESKTOP".to_string(), "gnome".to_string()),
+        ("XDG_SESSION_CLASS".to_string(), "user".to_string()),
+    ]);
+    let mut cmd = Command::new("dbus-run-session");
+    cmd.args(["--", "/bin/sh"]).arg(dir.join("session.sh")).arg(&dir).arg(format!("{w}x{h}"));
+    cmd.env_clear().envs(env).current_dir(&u.home).stdin(Stdio::null()).stdout(log("session.log").unwrap_or(Stdio::null())).stderr(log("session.err.log").unwrap_or(Stdio::null()));
+    galaxy_host::sysuser::prepare_command(&mut cmd, u, false);
+    let mut child = cmd.spawn().map_err(|e| format!("启动 GNOME 无头桌面失败：{e}"))?;
+    // 等会话总线地址和 Wayland 套接字出现（gnome-shell 起来了）
+    let t = Instant::now();
+    let sock = dir.join("run").join("wayland-0");
+    loop {
+        if !matches!(child.try_wait(), Ok(None)) {
+            let detail = std::fs::read_to_string(dir.join("session.err.log")).unwrap_or_default();
+            return Err(format!("GNOME 无头桌面没起来：{}", detail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("")));
+        }
+        if sock.exists() && dir.join("bus").exists() {
+            break;
+        }
+        if t.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("GNOME 无头桌面 20 秒内没起来".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let bus = std::fs::read_to_string(dir.join("bus")).unwrap_or_default().trim().to_string();
+    // gnome-shell 建好套接字后还要把远程桌面接口挂上总线
+    std::thread::sleep(Duration::from_secs(2));
+    let saved = Saved { user: u.name.clone(), uid: u.uid, kind: "gnome".into(), bus, display: format!("wayland:{}", u.uid), xvfb_pid: 0, session_pid: child.id(), desktop: "GNOME".into(), width: w, height: h };
+    let _ = std::fs::write(dir.join("state.json"), serde_json::to_vec(&saved).unwrap_or_default());
+    let msg = format!("已为用户 {} 开 GNOME 无头桌面（{}x{}）", u.name, w, h);
+    tracing::info!("{msg}");
+    let v = VDesktop { saved, xvfb: None, session: Some(child), dir };
     let s = to_session(&v);
     with(|m| m.insert(u.uid, v));
     Ok(s)

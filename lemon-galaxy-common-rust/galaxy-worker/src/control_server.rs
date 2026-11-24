@@ -652,6 +652,15 @@ impl Control {
                 .await?;
                 Response::ok()
             }
+            Request::SetUnlockOnConnect { enabled } => {
+                self.check(c, Need::Manage).await?;
+                self.edit(c, |st| {
+                    st.unlock_on_connect = enabled;
+                    Ok(())
+                })
+                .await?;
+                Response::ok()
+            }
             Request::SetHeadlessDisplay { value } => {
                 self.check(c, Need::Manage).await?;
                 let v = value.trim().to_string();
@@ -807,6 +816,7 @@ impl Control {
         Settings {
             auto_update: st.auto_update,
             lock_on_end: st.lock_on_end,
+            unlock_on_connect: st.unlock_on_connect,
             headless_display: galaxy_host::accounts::parse_headless_display(&st.headless_display).map(|(width, height, refresh)| DisplayMode { width, height, refresh }),
             assist_code: st.assist_code.clone(),
             autostart: self.autostart(c).await,

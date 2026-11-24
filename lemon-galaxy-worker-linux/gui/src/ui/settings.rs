@@ -66,6 +66,17 @@ pub fn build(ctx: &Rc<Ctx>) -> (gtk::Widget, Rc<dyn Fn()>) {
     let lock = Toggle::new();
     r_lock.suffix.pack_start(&lock.switch, false, false, 0);
     s2.list.add(&r_lock.row);
+    let r_unlock = row(
+        tr!("远程连入时自动解锁", "Unlock when someone connects"),
+        None,
+        Some(tr!(
+            "GNOME 等 Wayland 桌面锁屏后，系统不允许远程桌面，远程也看不到锁屏界面、没法输密码。打开后，有控制权限的账号打开远程桌面时会先解锁屏幕，所有远程都结束后重新锁上。解锁期间本机屏幕会显示桌面，请只在无人值守、放在安全地方的电脑上打开。",
+            "On GNOME and other Wayland desktops the system blocks remote desktop while the screen is locked, and the lock screen cannot be shown remotely. When on, the screen is unlocked when an account with control permission opens the remote desktop, and locked again after all remote sessions end. The local monitor shows the desktop meanwhile, so only turn this on for unattended computers in a safe place."
+        )),
+    );
+    let unlock = Toggle::new();
+    r_unlock.suffix.pack_start(&unlock.switch, false, false, 0);
+    s2.list.add(&r_unlock.row);
     content.pack_start(&s2.root, false, false, 0);
 
     // 显示
@@ -147,6 +158,11 @@ pub fn build(ctx: &Rc<Ctx>) -> (gtk::Widget, Rc<dyn Fn()>) {
     lock.on_toggle(move |on| {
         let c = c.clone();
         async move { c.call(Request::SetLockOnEnd { enabled: on }).await.is_some() }
+    });
+    let c = ctx.clone();
+    unlock.on_toggle(move |on| {
+        let c = c.clone();
+        async move { c.call(Request::SetUnlockOnConnect { enabled: on }).await.is_some() }
     });
     let c = ctx.clone();
     au.on_toggle(move |on| {
@@ -270,6 +286,7 @@ pub fn build(ctx: &Rc<Ctx>) -> (gtk::Widget, Rc<dyn Fn()>) {
         let manage = r.can_manage();
         let (c, loading) = (c.clone(), loading.clone());
         let (boot, lock, au, vd, x11, sizes, q) = (boot.clone(), lock.clone(), au.clone(), vd.clone(), x11.clone(), sizes.clone(), quiet_sizes.clone());
+        let unlock = unlock.clone();
         let (boot_sub, x11_sub, ver_sub) = (r_boot_row.subtitle.clone(), r_x11_row.subtitle.clone(), r_ver_sub.clone());
         let tray = tray2.clone();
         spawn(async move {
@@ -285,6 +302,7 @@ pub fn build(ctx: &Rc<Ctx>) -> (gtk::Widget, Rc<dyn Fn()>) {
             // 已经打开但这个系统不能再打开（没有 X11 会话）：只允许关
             x11.switch.set_sensitive(manage && s.login_screen_x11.available);
             lock.set(s.lock_on_end);
+            unlock.set(s.unlock_on_connect);
             au.set(s.auto_update);
             x11.set(s.login_screen_x11.enabled);
             x11.switch.set_sensitive(manage && s.login_screen_x11.available);
@@ -303,7 +321,7 @@ pub fn build(ctx: &Rc<Ctx>) -> (gtk::Widget, Rc<dyn Fn()>) {
             }
             q.set(false);
             sizes.set_sensitive(manage && s.headless_display.is_some());
-            for t in [&lock, &au, &vd] {
+            for t in [&lock, &unlock, &au, &vd] {
                 t.switch.set_sensitive(manage);
             }
             // 托盘开关只影响自己，任何人都能改

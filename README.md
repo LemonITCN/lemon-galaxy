@@ -46,7 +46,7 @@
 3. Linux 被控端：
    - 有桌面的机器：装 `.deb`（`sudo apt install ./lemon-galaxy-worker_<版本>_amd64.deb`）或 `.rpm`（`sudo dnf install ./lemon-galaxy-worker-<版本>.x86_64.rpm`），从应用菜单打开「LemonGalaxy 被控端」登录。服务开机自启，托盘显示状态。
    - 服务器：单文件 `./lemon-galaxy-worker login`，再 `sudo ./lemon-galaxy-worker install-service`。想远程看桌面就装 Xvfb 和一个桌面环境（如 `sudo apt install xvfb xfce4`），连上时自动开虚拟桌面。
-   - Ubuntu 22.04 起默认是 Wayland：GNOME 不用额外设置；KDE 等第一次连接要有人在被控机上点一次「允许」。登录界面（GDM）是 Wayland 时远程看不到，`sudo lemon-galaxy-worker login-screen x11 on` 改成 X11 登录界面。
+   - Ubuntu 22.04 起默认是 Wayland：GNOME 不用额外设置；KDE 等第一次连接要有人在被控机上点一次「允许」。Wayland 锁屏时系统禁止远程桌面：远程期间被控端会阻止自动锁屏；无人值守的电脑可在被控端设置里打开「远程连入时自动解锁」（`sudo lemon-galaxy-worker unlock-on-connect on`，远程结束后自动重新锁上）。没人登录时自动开虚拟桌面（有 Xvfb 用 Xvfb，没有就用系统自带的 GNOME 无头桌面）。GNOME 48 及更早的 GDM 登录界面可用 `sudo lemon-galaxy-worker login-screen x11 on` 改成 X11，远程就能看到。
 4. Windows 被控端：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service`。服务以 SYSTEM 运行，锁屏和 UAC 界面也能远程操作。
 5. 在 Mac、Windows 或手机上用同一个服务器地址和账号登录。
 

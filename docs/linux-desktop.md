@@ -57,6 +57,13 @@ systemd: lemon-galaxy-worker run（root）
 
 Mutter 的这两个接口在用户自己的会话总线上，不弹授权，无人值守可用（gnome-remote-desktop 也用它们）。
 
+**锁屏**：GNOME 等 Wayland 桌面锁屏时，系统禁止一切远程桌面与录屏（Mutter 拒绝建会话，已有的会话被关），远程看不到锁屏界面、也没法输密码。处理：
+
+- 远程看画面期间，画面代理向会话申请「禁止闲置」（GNOME 用 `org.gnome.SessionManager.Inhibit`，其他桌面用 `org.freedesktop.ScreenSaver.Inhibit`），不会因为闲置自动锁屏；本机手动锁屏照样生效。
+- 已经锁屏时，主控打开画面会收到明确原因「被控机屏幕已锁定……」。
+- 被控端设置「远程连入时自动解锁」（`unlock-on-connect on|off`，界面「设置 → 安全」，默认关）：打开后，有控制权限的会话打开屏幕列表时被控端先 `loginctl unlock-session`，所有画面都停了 10 秒后 `loginctl lock-session` 重新锁上（只锁自己解开的）。只建议在无人值守、放在安全地方的电脑上打开。
+- X11 不受影响：锁屏界面本身就能看到和操作。
+
 Wayland 的登录界面看不到：GDM 默认用 Wayland。命令 `lemon-galaxy-worker login-screen x11 on`（界面里也有开关）改 GDM 配置 `WaylandEnable=false`，让登录界面（以及之后登录的桌面）用 X11。不改的话，登录界面时远程看到的是虚拟桌面（第 5 节）。
 
 键盘：协议里是 USB HID 用法码，统一先换成 Linux evdev 键码（`hidmap.rs`）：Mutter 与门户直接用 evdev 键码；X11 用「evdev 键码 + 8」，键盘布局里没有的字符（输入文字）临时改一个空闲键码的映射再按。
@@ -67,14 +74,16 @@ Wayland 的登录界面看不到：GDM 默认用 Wayland。命令 `lemon-galaxy-
 
 - 分辨率用 `headless-display`（默认 1920x1080，`off` 关闭）。
 - 有 `Xvfb` 时：`Xvfb :N`（N 从 90 起找空闲，`-nolisten tcp`，独立 Xauthority），再以该用户身份起桌面会话：从 `/usr/share/xsessions/*.desktop` 里按 Xfce、MATE、Cinnamon、LXQt、LXDE、KDE Plasma（X11）、GNOME（Xorg）的顺序选第一个装了的（`dbus-run-session` 包着）。
-- 没有 Xvfb 但有 GNOME（`gnome-shell` 支持 `--headless`）：`gnome-shell --wayland --headless --virtual-monitor 宽x高`，再按 GNOME Wayland 后端接。
+- 没有 Xvfb（或没有 X11 桌面会话，比如 GNOME 49 起的 Ubuntu 25.10 / 26.04）但有 GNOME：`dbus-run-session` 里起 PipeWire、WirePlumber，再 `gnome-shell --headless --virtual-monitor 宽x高`（系统自带，不用装任何东西），按 GNOME Wayland 后端接。2026-11-24 在 Ubuntu 26.04（GNOME 50）真机实测：没登录的用户开出虚拟桌面，画面、NVENC 编码、声音都正常。
 - 都没有：报错「没有可用的虚拟桌面：请安装 xvfb 和一个桌面环境（如 `sudo apt install xvfb xfce4`）」。
 - 断开后保留，下次连接接着用；同一个系统用户只有一个虚拟桌面；该用户在真屏幕上登录后，虚拟桌面关掉（同一用户两个桌面会互相干扰）。
 - 屏幕列表里虚拟桌面的 `is_virtual` 为真，名字「虚拟桌面」。
 
 root 账号默认不开虚拟桌面（服务带环境变量 `LEMON_GALAXY_ALLOW_ROOT_DESKTOP=1` 才开），避免远程拿到 root 图形桌面。
 
-命令：`lemon-galaxy-worker desktop` 看屏幕上的会话与虚拟桌面，`desktop stop <用户>` 关掉某个用户的虚拟桌面。
+命令：`lemon-galaxy-worker desktop` 看屏幕上的会话与虚拟桌面，`desktop start <用户> [宽x高]` 先开好，`desktop stop <用户>` 关掉；`selftest-capture --user <用户>` 在某个用户的虚拟桌面里做画面自检。
+
+以 root 运行、按别的用户身份起画面代理时，程序经 `/proc/self/fd/N`（root 打开的描述符）执行：程序放在那个用户进不去的目录（比如 0750 的家目录）里也能起来，只要求程序文件本身 0755。
 
 ## 6. 编码
 

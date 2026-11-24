@@ -18,6 +18,15 @@ struct CaptureCtl {
     bitrate: AtomicU32,
     reconfig: AtomicBool,
     cursor_in_video: AtomicBool,
+    /// 要一张截图：采集线程下一轮把当前画面（含光标）交出来。正在采集的屏不能再另开一路流
+    /// （Mutter / 门户的一路流同时只给一个接收方），也省得重复截屏。
+    shot: parking_lot::Mutex<Option<mpsc::Sender<Frame>>>,
+}
+
+impl CaptureCtl {
+    fn new(bitrate: u32) -> Self {
+        Self { stop: AtomicBool::new(false), keyframe: AtomicBool::new(true), bitrate: AtomicU32::new(bitrate), reconfig: AtomicBool::new(false), cursor_in_video: AtomicBool::new(true), shot: parking_lot::Mutex::new(None) }
+    }
 }
 
 enum UiJob {
@@ -122,6 +131,9 @@ pub fn main() -> i32 {
 
     let mut captures: HashMap<u32, Arc<CaptureCtl>> = HashMap::new();
     let mut audio_stop: Option<Arc<AtomicBool>> = None;
+    // 有画面在看时不让会话闲置锁屏（虚拟桌面不用）
+    let mut idle_inhibit: Option<super::inhibit::IdleInhibit> = None;
+    let want_inhibit = std::env::var("LG_VIRTUAL").map(|v| v != "1").unwrap_or(true);
     let stdin = std::io::stdin();
     let mut r = std::io::BufReader::new(stdin.lock());
     loop {
@@ -141,14 +153,23 @@ pub fn main() -> i32 {
                 if let Some(old) = captures.remove(&display) {
                     old.stop.store(true, Ordering::Relaxed);
                 }
-                let ctl = Arc::new(CaptureCtl { stop: AtomicBool::new(false), keyframe: AtomicBool::new(true), bitrate: AtomicU32::new(bitrate_kbps), reconfig: AtomicBool::new(false), cursor_in_video: AtomicBool::new(true) });
+                let ctl = Arc::new(CaptureCtl::new(bitrate_kbps));
                 captures.insert(display, ctl.clone());
+                if want_inhibit && idle_inhibit.is_none() {
+                    match super::inhibit::IdleInhibit::start() {
+                        Ok(i) => idle_inhibit = Some(i),
+                        Err(e) => log(&out_tx, false, format!("远程期间没能阻止自动锁屏：{e}")),
+                    }
+                }
                 let (out, backend) = (out_tx.clone(), backend.clone());
                 std::thread::spawn(move || capture_thread(id, display, max_fps.clamp(1, 60), ctl, out, backend));
             }
             ToAgent::StopCapture { display } => {
                 if let Some(c) = captures.remove(&display) {
                     c.stop.store(true, Ordering::Relaxed);
+                }
+                if captures.is_empty() {
+                    idle_inhibit = None;
                 }
             }
             ToAgent::RequestKeyframe { display } => {
@@ -178,8 +199,18 @@ pub fn main() -> i32 {
             }
             ToAgent::Screenshot { id, display, max_w, max_h } => {
                 let (out, backend) = (out_tx.clone(), backend.clone());
+                let active = captures.get(&display).cloned();
                 std::thread::spawn(move || {
-                    let image = screenshot(&*backend, display, max_w, max_h);
+                    // 这块屏正在采集：要采集线程的当前帧
+                    let from_capture = active.and_then(|c| {
+                        let (tx, rx) = mpsc::channel();
+                        *c.shot.lock() = Some(tx);
+                        rx.recv_timeout(Duration::from_secs(3)).ok()
+                    });
+                    let image = match from_capture {
+                        Some(f) => jpeg(&f.data, f.width, f.height, max_w, max_h).ok().map(|(data, width, height)| ImageData { mime: "image/jpeg".into(), data, width, height }),
+                        None => screenshot(&*backend, display, max_w, max_h),
+                    };
                     let _ = out.send(FromAgent::Screenshot { id, image });
                 });
             }
@@ -204,6 +235,8 @@ pub fn main() -> i32 {
             }
         }
     }
+    // 服务关了管道（退出、换会话）：停掉采集与声音后直接退出进程。
+    // 不等写线程：键鼠、采集、声音线程还拿着输出通道，写线程不会自己结束。
     for c in captures.values() {
         c.stop.store(true, Ordering::Relaxed);
     }
@@ -211,8 +244,9 @@ pub fn main() -> i32 {
         s.store(true, Ordering::Relaxed);
     }
     drop(out_tx);
-    let _ = writer.join();
-    0
+    drop(writer);
+    std::thread::sleep(Duration::from_millis(200));
+    std::process::exit(0)
 }
 
 fn find_monitor(backend: &dyn Backend, display: u32) -> Option<Monitor> {
@@ -221,6 +255,14 @@ fn find_monitor(backend: &dyn Backend, display: u32) -> Option<Monitor> {
 }
 
 fn screenshot(backend: &dyn Backend, display: u32, max_w: u32, max_h: u32) -> Option<ImageData> {
+    // 刚停掉的采集可能还没放开 Mutter / 门户的流：失败时稍等再试一次
+    shot_once(backend, display, max_w, max_h).or_else(|| {
+        std::thread::sleep(Duration::from_millis(600));
+        shot_once(backend, display, max_w, max_h)
+    })
+}
+
+fn shot_once(backend: &dyn Backend, display: u32, max_w: u32, max_h: u32) -> Option<ImageData> {
     let m = find_monitor(backend, display)?;
     let mut cap = backend.capturer(&m).ok()?;
     let mut f = Frame::default();
@@ -307,6 +349,23 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
                 continue;
             }
         };
+        if have {
+            let want = ctl.shot.lock().take();
+            if let Some(tx) = want {
+                let mut f = frame.clone();
+                if !cap.cursor_embedded() {
+                    if let Some((p, img)) = cap.cursor() {
+                        if let Some(i) = img {
+                            cursor_img = Some(i);
+                        }
+                        if let Some(i) = cursor_img.as_ref() {
+                            draw_cursor(&mut f, i, p);
+                        }
+                    }
+                }
+                let _ = tx.send(f);
+            }
+        }
         if !have {
             if !started && t0.elapsed() > Duration::from_secs(8) {
                 let _ = out.send(FromAgent::Started { id, result: Err("拿不到屏幕画面".into()) });

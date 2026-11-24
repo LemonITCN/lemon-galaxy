@@ -12,6 +12,7 @@ mod backend;
 mod clipfmt;
 pub mod encode;
 mod hidmap;
+mod inhibit;
 mod ipc;
 mod proxy;
 mod session;
@@ -22,6 +23,13 @@ mod x11;
 use galaxy_host::platform::HostPlatform;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+
+/// 被控端数据目录（读 host.json 里画面相关的设置用）：命令行 --data-dir > 环境变量 > 系统默认
+pub fn data_dir() -> std::path::PathBuf {
+    let args: Vec<String> = std::env::args().collect();
+    let arg = args.iter().position(|a| a == "--data-dir").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
+    galaxy_worker::data_dir(&crate::os::LinuxOs, arg)
+}
 
 pub fn platform() -> Arc<dyn HostPlatform> {
     static P: OnceLock<Arc<proxy::LinuxPlatform>> = OnceLock::new();
@@ -39,22 +47,35 @@ pub fn extra_command(cmd: &str, rest: &[String], _dir: &Path) -> Option<i32> {
         "selftest-capture" => Some(selftest_cmd(rest)),
         "desktop" => Some(desktop_cmd(rest)),
         "login-screen" => Some(login_screen_cmd(rest)),
+        "unlock-on-connect" => Some(unlock_on_connect_cmd(rest)),
         _ => None,
     }
 }
 
 pub fn extra_help() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
-        ("desktop", "查看图形会话与虚拟桌面；desktop stop <用户> 关掉某个用户的虚拟桌面", "Show graphical sessions and virtual desktops; `desktop stop <user>` closes one"),
+        ("desktop", "查看图形会话与虚拟桌面；desktop start <用户> [宽x高] 开虚拟桌面，desktop stop <用户> 关掉", "Show graphical sessions and virtual desktops; `desktop start <user> [WxH]` / `desktop stop <user>`"),
         ("login-screen", "login-screen x11 on|off：GDM 登录界面改用 X11（远程才能看到登录界面），重启或注销后生效", "login-screen x11 on|off: make the GDM login screen use X11 so it can be viewed remotely"),
+        ("unlock-on-connect", "unlock-on-connect on|off：远程连入时自动解锁（GNOME 等 Wayland 锁屏时禁止远程桌面），远程结束后重新锁上；默认关", "unlock-on-connect on|off: unlock the screen when someone connects (Wayland desktops block remote desktop while locked), lock again afterwards; off by default"),
         ("selftest-capture", "画面自检：找到的会话、屏幕、截屏与各编码器耗时、声音", "Capture self-test: session, screens, capture and encoder timing, audio"),
     ]
 }
 
 /// 自检：在会话里跑 `__lg-selftest`（root 时以会话用户身份）
 fn selftest_cmd(rest: &[String]) -> i32 {
-    let secs = rest.first().cloned().unwrap_or_else(|| "3".into());
-    let target = session::find_seat().filter(|s| !(s.greeter && s.kind == session::Kind::Wayland)).or_else(vdesktop::any_session).or_else(session::from_own_env);
+    // selftest-capture [秒数] [--user <用户>]：指定用户时测他的虚拟桌面
+    let user = rest.iter().position(|a| a == "--user").and_then(|i| rest.get(i + 1)).cloned();
+    let secs = rest.iter().find(|a| a.parse::<u64>().is_ok()).cloned().unwrap_or_else(|| "3".into());
+    let target = match user {
+        Some(u) => match galaxy_host::sysuser::SysUser::lookup(&u).and_then(|x| vdesktop::session_for(x.uid)) {
+            Some(s) => Some(s),
+            None => {
+                println!("{}", if zh() { "这个用户没有虚拟桌面（先运行 desktop start <用户>）" } else { "This user has no virtual desktop (run `desktop start <user>` first)" });
+                return 1;
+            }
+        },
+        None => session::find_seat().filter(|s| !(s.greeter && s.kind == session::Kind::Wayland)).or_else(vdesktop::any_session).or_else(session::from_own_env),
+    };
     let Some(s) = target else {
         println!("{}", if zh() { "没有找到可看的图形会话（没有人登录桌面）。" } else { "No graphical session found." });
         match vdesktop::availability() {
@@ -86,6 +107,24 @@ fn selftest_cmd(rest: &[String]) -> i32 {
 }
 
 fn desktop_cmd(rest: &[String]) -> i32 {
+    if rest.first().map(|s| s.as_str()) == Some("start") {
+        let Some(name) = rest.get(1) else {
+            eprintln!("lemon-galaxy-worker desktop start <user> [WxH]");
+            return 2;
+        };
+        let (w, h, _) = galaxy_host::accounts::parse_headless_display(rest.get(2).map(|s| s.as_str()).unwrap_or("")).unwrap_or((1920, 1080, 60));
+        // 虚拟桌面的进程脱离本命令继续运行，被控服务按状态文件认领
+        return match vdesktop::ensure(name, w, h) {
+            Ok(s) => {
+                println!("{}{}", if zh() { "已开：" } else { "Started: " }, s.describe());
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        };
+    }
     if rest.first().map(|s| s.as_str()) == Some("stop") {
         let Some(name) = rest.get(1) else {
             eprintln!("lemon-galaxy-worker desktop stop <user>");
@@ -155,4 +194,25 @@ fn login_screen_cmd(rest: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// 远程连入时自动解锁（docs/linux-desktop.md 第 4 节）
+fn unlock_on_connect_cmd(rest: &[String]) -> i32 {
+    let path = data_dir().join("host.json");
+    let mut st = galaxy_host::accounts::HostState::load(&path);
+    let label = if zh() { "远程连入时自动解锁" } else { "Unlock when someone connects" };
+    match rest.first().map(|s| s.as_str()) {
+        Some("on") => st.unlock_on_connect = true,
+        Some("off") => st.unlock_on_connect = false,
+        _ => {
+            println!("{label}: {}", if st.unlock_on_connect { "on" } else { "off" });
+            return 0;
+        }
+    }
+    if let Err(e) = st.save(&path) {
+        eprintln!("{e}");
+        return 1;
+    }
+    println!("{label}: {}", if st.unlock_on_connect { "on" } else { "off" });
+    0
 }

@@ -374,6 +374,7 @@ impl HostService {
                 || cur.lock_on_end != disk.lock_on_end
                 || cur.headless_display != disk.headless_display
                 || cur.auto_update != disk.auto_update
+                || cur.unlock_on_connect != disk.unlock_on_connect
         };
         if !changed {
             return false;
@@ -388,6 +389,7 @@ impl HostService {
             st.headless_display = disk.headless_display;
             // 不读进来的话，服务下次保存会把命令行 / 界面改的自动更新开关写回旧值
             st.auto_update = disk.auto_update;
+            st.unlock_on_connect = disk.unlock_on_connect;
         }
         self.refresh_lan_keys();
         let has_active = self.state.read().active().count() > 0;

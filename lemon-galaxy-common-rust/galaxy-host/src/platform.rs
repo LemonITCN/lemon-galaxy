@@ -66,8 +66,9 @@ pub trait HostPlatform: Send + Sync {
 
     /// 主控打开屏幕列表前调用（在阻塞线程里，可能要几秒）。`system_user` 是这个会话的账号在本机绑定的
     /// 系统用户（临时协助时是屏幕前的用户，可能为空）。Linux 在没有可看的图形会话时据此给该用户开虚拟桌面
-    /// （docs/linux-desktop.md 第 5 节）；`mode` 是无头兜底屏设置（None 为关闭）。其他平台不用管。
-    fn prepare_desktop(&self, _system_user: &str, _mode: Option<(u32, u32, u32)>) {}
+    /// （docs/linux-desktop.md 第 5 节）；`mode` 是无头兜底屏设置（None 为关闭）；`can_control` 是这个会话有没有控制权限
+    /// （锁屏时自动解锁只给有控制权限的会话）。其他平台不用管。
+    fn prepare_desktop(&self, _system_user: &str, _mode: Option<(u32, u32, u32)>, _can_control: bool) {}
 
     // ---------------- 虚拟屏 ----------------
     // 内核负责归属（哪个会话加的、无头兜底屏）与上限，平台层只管加删。这些调用可能阻塞几秒，内核在阻塞线程里调。

@@ -46,7 +46,35 @@ struct Inner {
     failed: Mutex<Option<(String, Instant, String)>>,
     /// 当前目标会话（每 2 秒刷新）
     target: Mutex<Option<GuiSession>>,
+    /// 我们为远程解锁的 logind 会话号：所有画面都停了以后重新锁上
+    unlocked_by_us: Mutex<Option<String>>,
+    /// 最近一次列到的屏幕（锁屏等原因列不出来时还给主控，让它开画面时看到原因）
+    last_displays: Mutex<Vec<DisplayInfo>>,
 }
+
+/// logind 会话是否锁屏；不是 logind 会话或查不到时 None
+fn session_locked(id: &str) -> Option<bool> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let out = Command::new("loginctl").args(["show-session", id, "-p", "LockedHint", "--value"]).output().ok()?;
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn loginctl(action: &str, id: &str) -> bool {
+    Command::new("loginctl").args([action, id]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// 被控端设置里打开了「远程连入时自动解锁」没有（读 host.json，命令行与界面改了立即生效）
+fn unlock_on_connect() -> bool {
+    galaxy_host::accounts::HostState::load(&super::data_dir().join("host.json")).unlock_on_connect
+}
+
+const LOCKED_HINT: &str = "被控机屏幕已锁定：GNOME 等 Wayland 桌面锁屏时系统禁止远程桌面。请在被控机上解锁，或由机主在被控端设置里打开「远程连入时自动解锁」。";
 
 pub struct LinuxPlatform {
     inner: Arc<Inner>,
@@ -98,6 +126,8 @@ impl LinuxPlatform {
                 wanted_user: Mutex::new(None),
                 failed: Mutex::new(None),
                 target: Mutex::new(None),
+                unlocked_by_us: Mutex::new(None),
+                last_displays: Mutex::new(vec![]),
             }),
         });
         let w = Arc::downgrade(&me.inner);
@@ -130,14 +160,24 @@ impl LinuxPlatform {
     }
 }
 
+/// 本程序的一个打开着的文件描述符，子进程经 /proc/self/fd/N 执行它。
+/// 以别的用户身份启动代理时用：程序可能放在那个用户进不去的目录里（比如 0750 的家目录），
+/// 经描述符执行不用再走一遍目录，只要程序文件本身对其他用户可执行（0755）。
+fn exe_via_fd() -> Option<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+    static F: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
+    F.get_or_init(|| std::env::current_exe().ok().and_then(|p| std::fs::File::open(p).ok())).as_ref().map(|f| std::path::PathBuf::from(format!("/proc/self/fd/{}", f.as_raw_fd())))
+}
+
 /// 以会话用户身份、带会话环境变量运行本程序的 `arg` 子命令（画面代理、自检）。返回命令与后端名。
 pub fn session_command(s: &GuiSession, arg: &str) -> Result<(Command, &'static str), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let root = nix::unistd::getuid().is_root();
-    let mut cmd = Command::new(&exe);
-    cmd.arg(arg);
     // 以会话用户身份运行（X11 登录界面以 root 运行：它的 Xauthority 往往只有 root 能读）
     let run_as = if root && !(s.greeter && s.kind == Kind::X11) { SysUser::lookup(&s.user).filter(|u| u.uid == s.uid) } else { None };
+    let program = if run_as.is_some() { exe_via_fd().unwrap_or(exe) } else { exe };
+    let mut cmd = Command::new(&program);
+    cmd.arg(arg);
     let base = run_as.clone().unwrap_or_else(SysUser::current);
     let mut env = galaxy_host::sysuser::child_env(&base);
     env.retain(|(k, _)| k != "TERM" && k != "COLORTERM");
@@ -202,7 +242,8 @@ fn spawn_agent(inner: &Arc<Inner>, s: &GuiSession) -> Result<Agent, String> {
             let Some(inner) = weak.upgrade() else { break };
             if let FromAgent::Lost { reason } = &m {
                 tracing::warn!("画面代理报告会话不可用：{reason}");
-                *inner.failed.lock() = Some((session_id.clone(), Instant::now(), reason.clone()));
+                let why = if reason.contains("inhibited") && session_locked(&session_id) == Some(true) { LOCKED_HINT.to_string() } else { reason.clone() };
+                *inner.failed.lock() = Some((session_id.clone(), Instant::now(), why));
             }
             route(&inner, m);
         }
@@ -339,10 +380,23 @@ fn restart_captures(inner: &Arc<Inner>) {
 impl HostPlatform for LinuxPlatform {
     fn list_displays(&self) -> Vec<DisplayInfo> {
         match request(&self.inner, |id| ToAgent::ListDisplays { id }, Duration::from_secs(8)) {
-            Ok(FromAgent::Displays { list, .. }) => list,
+            Ok(FromAgent::Displays { list, .. }) => {
+                if !list.is_empty() {
+                    *self.inner.last_displays.lock() = list.clone();
+                }
+                list
+            }
             Ok(_) => vec![],
             Err(e) => {
                 tracing::warn!("列屏幕失败：{e}");
+                // 锁屏之类的原因：把上次的屏幕给主控，它开画面时会看到原因
+                if e == LOCKED_HINT {
+                    let last = self.inner.last_displays.lock().clone();
+                    if !last.is_empty() {
+                        return last;
+                    }
+                    return vec![DisplayInfo { id: 0, name: "屏幕（已锁定）".into(), width: 1920, height: 1080, scale: 1.0, primary: true, is_virtual: false }];
+                }
                 vec![]
             }
         }
@@ -370,6 +424,21 @@ impl HostPlatform for LinuxPlatform {
         self.inner.captures.lock().remove(&display);
         if self.inner.agent.lock().is_some() {
             send(&self.inner, ToAgent::StopCapture { display });
+        }
+        if self.inner.captures.lock().is_empty() && self.inner.unlocked_by_us.lock().is_some() {
+            let w = Arc::downgrade(&self.inner);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(10));
+                let Some(inner) = w.upgrade() else { return };
+                if !inner.captures.lock().is_empty() {
+                    return;
+                }
+                let id = inner.unlocked_by_us.lock().take();
+                if let Some(id) = id {
+                    let ok = loginctl("lock-session", &id);
+                    tracing::info!("远程都结束了，重新锁上会话 {id}（{}）", if ok { "成功" } else { "失败" });
+                }
+            });
         }
     }
 
@@ -457,13 +526,42 @@ impl HostPlatform for LinuxPlatform {
         c
     }
 
-    fn prepare_desktop(&self, system_user: &str, mode: Option<(u32, u32, u32)>) {
+    fn prepare_desktop(&self, system_user: &str, mode: Option<(u32, u32, u32)>, can_control: bool) {
         let u = SysUser::lookup(system_user);
         *self.inner.wanted_user.lock() = u.as_ref().map(|u| u.uid);
         let wanted = u.as_ref().map(|u| u.uid);
         let current = pick(wanted);
         let usable = current.as_ref().map(|s| !(s.greeter && s.kind == Kind::Wayland)).unwrap_or(false);
         if usable {
+            // Wayland 桌面锁着屏：系统禁止远程桌面（X11 能直接看到锁屏，不用管）
+            if let Some(s) = current.as_ref().filter(|s| s.kind == Kind::Wayland && !s.virtual_desktop) {
+                if session_locked(&s.id) == Some(true) {
+                    if can_control && unlock_on_connect() {
+                        let ok = loginctl("unlock-session", &s.id);
+                        tracing::info!("远程连入，按设置解锁会话 {}（{}）", s.id, if ok { "成功" } else { "失败" });
+                        if ok {
+                            *self.inner.unlocked_by_us.lock() = Some(s.id.clone());
+                            let t = Instant::now();
+                            while session_locked(&s.id) == Some(true) && t.elapsed() < Duration::from_secs(3) {
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                            // 等桌面撤掉对远程的限制
+                            std::thread::sleep(Duration::from_millis(800));
+                            *self.inner.failed.lock() = None;
+                            if let Some(a) = self.inner.agent.lock().take() {
+                                let _ = a.child.lock().kill();
+                            }
+                        }
+                    } else {
+                        *self.inner.failed.lock() = Some((s.id.clone(), Instant::now(), LOCKED_HINT.into()));
+                        if let Some(a) = self.inner.agent.lock().take() {
+                            let _ = a.child.lock().kill();
+                        }
+                    }
+                } else if self.inner.failed.lock().as_ref().is_some_and(|(_, _, w)| w == LOCKED_HINT) {
+                    *self.inner.failed.lock() = None;
+                }
+            }
             *self.inner.target.lock() = current;
             return;
         }

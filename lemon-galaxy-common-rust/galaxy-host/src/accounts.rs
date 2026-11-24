@@ -77,6 +77,10 @@ pub struct HostState {
     /// 远程看过桌面的会话都结束后自动锁屏
     #[serde(default)]
     pub lock_on_end: bool,
+    /// 远程连入时自动解锁屏幕（Linux：GNOME 等 Wayland 桌面锁屏时系统禁止远程桌面）。
+    /// 有控制权限的账号打开画面时被控端先解锁，所有远程都结束后重新锁上。默认关，机主在被控端打开。
+    #[serde(default)]
+    pub unlock_on_connect: bool,
     /// 无头兜底屏：本机没有亮着的显示器时，主控打开屏幕列表就自动加一块虚拟屏，最后一个会话结束后删掉。
     /// 空 = 默认 1920x1080@60，`off` = 不加，`宽x高[@刷新率]` = 自定义
     #[serde(default, skip_serializing_if = "String::is_empty")]

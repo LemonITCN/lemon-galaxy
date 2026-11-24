@@ -149,6 +149,8 @@ pub enum Request {
     },
     SetAutoUpdate { enabled: bool },
     SetLockOnEnd { enabled: bool },
+    /// 远程连入时自动解锁（锁屏时系统禁止远程桌面的 Wayland 桌面用）
+    SetUnlockOnConnect { enabled: bool },
     /// `off`、空（默认 1920x1080@60）或 `宽x高[@刷新率]`
     SetHeadlessDisplay { value: String },
     /// 开机自动启动服务（systemd）
@@ -393,6 +395,9 @@ pub enum LoginStep {
 pub struct Settings {
     pub auto_update: bool,
     pub lock_on_end: bool,
+    /// 远程连入时自动解锁屏幕（老服务不带这个字段时为 false）
+    #[serde(default)]
+    pub unlock_on_connect: bool,
     /// 虚拟桌面 / 无头兜底屏；None = 关
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headless_display: Option<DisplayMode>,
@@ -521,6 +526,7 @@ mod tests {
             Request::SetAssistCode { code: Some("ABCD2345".into()) },
             Request::SetAutoUpdate { enabled: true },
             Request::SetLockOnEnd { enabled: true },
+            Request::SetUnlockOnConnect { enabled: true },
             Request::SetHeadlessDisplay { value: "2560x1440@60".into() },
             Request::SetAutostart { enabled: false },
             Request::SetLoginScreenX11 { enabled: true },
@@ -559,6 +565,7 @@ mod tests {
                 settings: Settings {
                     auto_update: true,
                     lock_on_end: false,
+                    unlock_on_connect: false,
                     headless_display: Some(DisplayMode { width: 1920, height: 1080, refresh: 60 }),
                     assist_code: None,
                     autostart: Feature { available: true, enabled: true, detail: String::new() },

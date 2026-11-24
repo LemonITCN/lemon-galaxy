@@ -418,8 +418,8 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             }
             // Linux：没有可看的图形会话时给这个账号的系统用户开虚拟桌面
             {
-                let (pl, user, mode) = (platform.clone(), p.system_user.clone(), host.headless_display());
-                let _ = tokio::task::spawn_blocking(move || pl.prepare_desktop(&user, mode)).await;
+                let (pl, user, mode, control) = (platform.clone(), p.system_user.clone(), host.headless_display(), p.control);
+                let _ = tokio::task::spawn_blocking(move || pl.prepare_desktop(&user, mode, control)).await;
             }
             // 本机没有亮着的显示器时先加无头兜底屏
             host.ensure_headless_display().await;
