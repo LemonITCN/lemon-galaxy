@@ -86,6 +86,12 @@ internal class MockPeerSession(
         channels.filter { it.displayId in gone }.forEach { it.closeByRemote("display removed") }
     }
 
+    /** 测试用：之后打开的画面一直不出画面（像不发保活帧的被控端卡住了）。 */
+    @Volatile var silentDisplays = false
+
+    /** 测试用：本会话一共打开过几路画面。 */
+    val openedDisplays: Int get() = channels.size
+
     /** 测试用：开着的画面都被被控端结束（或画面没有响应），会话还在。 */
     fun endDisplayStreams(reason: String) = channels.forEach { it.closeByRemote(reason) }
 
@@ -201,7 +207,7 @@ internal class MockPeerSession(
         delay(300)
         val display = displays().firstOrNull { it.id == options.displayId }
             ?: throw GalaxyException.NotFound(host.tr("找不到屏幕", "Display not found"))
-        return MockDisplayChannel(display, core.desktopFrames(), sink, scope, options.maxFps.toInt().coerceAtMost(30)).also { channels += it }
+        return MockDisplayChannel(display, core.desktopFrames(), sink, scope, options.maxFps.toInt().coerceAtMost(30), silentDisplays).also { channels += it }
     }
 
     override suspend fun screenshot(displayId: UInt, maxWidth: UInt): ImageData {

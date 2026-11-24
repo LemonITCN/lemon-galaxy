@@ -47,6 +47,15 @@ enum class RemoteStatus {
  */
 val RECONNECT_DELAYS_MS: List<Long> = listOf(1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000)
 
+/**
+ * 重连打开画面后最多等这么久出画面（状态变 STREAMING），没有就算这次失败、接着重试。
+ * 被控端不发空闲保活帧（如 Mac，没有 video_keepalive）时内核看门狗管不到，靠这里兜底。
+ */
+const val RECONNECT_PICTURE_TIMEOUT_MS = 20_000L
+
+/** 等出画面时多久看一次状态（StateFlow 相同值不会再发射，只能轮询） */
+private const val PICTURE_POLL_MS = 250L
+
 data class RemoteUi(
     val title: String,
     val platform: Platform,
@@ -157,6 +166,8 @@ class RemoteDesktopController(
     private val onVirtualRemoveFailed: (String) -> Unit = {},
     /** 自动重连的等待间隔（测试用短的） */
     private val reconnectDelaysMs: List<Long> = RECONNECT_DELAYS_MS,
+    /** 重连打开画面后等出画面的上限（测试用短的） */
+    private val pictureTimeoutMs: Long = RECONNECT_PICTURE_TIMEOUT_MS,
 ) {
     private val _ui = MutableStateFlow(RemoteUi(title, platform, quality = quality, mouseMode = mouseMode))
     val ui: StateFlow<RemoteUi> = _ui.asStateFlow()
@@ -366,14 +377,24 @@ class RemoteDesktopController(
             val seq = lossSeq
             try {
                 reconnectOnce()
-                // 尝试期间又断了：这次不算，接着按间隔重试
-                if (seq == lossSeq) return
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 e.userMessage().takeIf { it.isNotEmpty() }?.let { lastError = it }
                 activeSink = null
+                continue
             }
+            // 画面打开了：等真正出画面（状态变 STREAMING）才算连上，最多等 [pictureTimeoutMs]
+            var waited = 0L
+            while (seq == lossSeq && _ui.value.status != RemoteStatus.STREAMING && waited < pictureTimeoutMs) {
+                delay(PICTURE_POLL_MS)
+                waited += PICTURE_POLL_MS
+            }
+            // 尝试期间又断了：这次不算，接着按间隔重试
+            if (seq != lossSeq) continue
+            if (_ui.value.status == RemoteStatus.STREAMING) return
+            // 一直没出画面：这次算失败，停掉这一路，接着用剩下的次数
+            dropChannel()
         }
         // 都不成：显示失败（原因 + 重试）
         _ui.update { it.copy(status = RemoteStatus.FAILED, error = lastError ?: lossReason) }

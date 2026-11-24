@@ -16,6 +16,7 @@ import cn.lemonit.galaxy.core.mock.MockPeerSession
 import cn.lemonit.galaxy.core.platform.MemorySecureStore
 import cn.lemonit.galaxy.data.VideoQuality
 import cn.lemonit.galaxy.ui.remote.RECONNECT_DELAYS_MS
+import cn.lemonit.galaxy.ui.remote.RECONNECT_PICTURE_TIMEOUT_MS
 import cn.lemonit.galaxy.ui.remote.RemoteDesktopController
 import cn.lemonit.galaxy.ui.remote.RemoteStatus
 import kotlinx.coroutines.CoroutineScope
@@ -64,7 +65,7 @@ class RemoteReconnectTest {
     private lateinit var client: FlakyClient
     private lateinit var conn: ConnectionManager
 
-    private fun controller(delays: List<Long> = listOf(150, 150, 150)) = runBlocking {
+    private fun controller(delays: List<Long> = listOf(150, 150, 150), pictureTimeoutMs: Long = 5_000) = runBlocking {
         val core = MockCore { name -> File("src/mock/assets/$name").readBytes() }
         core.coreInit(CoreConfig("/tmp", "/tmp", "debug", Platform.ANDROID, DeviceKind.MOBILE, "0.1.0", "Android 16", "Pixel", "zh-CN"))
         val inner = core.newGalaxyClient(MemorySecureStore(), object : ClientListener {
@@ -80,6 +81,7 @@ class RemoteReconnectTest {
             RemoteDesktopController(
                 MockData.DEV_OFFICE_PC, "OFFICE-PC", Platform.WINDOWS, conn, scope, VideoQuality.AUTO, false,
                 reconnectDelaysMs = delays,
+                pictureTimeoutMs = pictureTimeoutMs,
             )
         }
     }
@@ -112,6 +114,37 @@ class RemoteReconnectTest {
         assertEquals(listOf(1_000L, 2_000L, 4_000L, 8_000L, 15_000L), RECONNECT_DELAYS_MS.take(5))
         assertEquals(10, RECONNECT_DELAYS_MS.size)
         assertEquals(105_000L, RECONNECT_DELAYS_MS.sum())
+        assertEquals(20_000L, RECONNECT_PICTURE_TIMEOUT_MS)
+    }
+
+    @Test
+    fun openedWithoutPictureTimesOutAndRetries() {
+        // 共 3 次，打开后最多等 600 ms 出画面
+        val c = controller(pictureTimeoutMs = 600)
+        streamingOn(c, 2u)
+        val mock = peer()!!.session as MockPeerSession
+        val opened = mock.openedDisplays
+
+        // 被控端卡住：重开的画面打开成功但一直不出画面，一直停在重连中
+        mock.silentDisplays = true
+        mock.endDisplayStreams("画面没有响应")
+        waitFor("第 1 次重开") { mock.openedDisplays == opened + 1 }
+        Thread.sleep(300)
+        assertEquals(RemoteStatus.RECONNECTING, c.ui.value.status)
+        // 被控端恢复：等满了算这次失败，接着第 2 次重试就连上
+        mock.silentDisplays = false
+        waitFor("第 2 次重开后出画面") { c.ui.value.status == RemoteStatus.STREAMING }
+        assertEquals(opened + 2, mock.openedDisplays)
+        assertEquals(2u, c.ui.value.displayId)
+
+        // 又卡住：一帧都没显示过，次数接着用（只剩 1 次），等满了直接失败
+        mock.silentDisplays = true
+        mock.endDisplayStreams("画面没有响应")
+        waitFor("次数用完后失败") { c.ui.value.status == RemoteStatus.FAILED }
+        assertEquals("画面没有响应", c.ui.value.error)
+        assertEquals(opened + 3, mock.openedDisplays)
+        assertEquals(1, client.connects.get())
+        onMain { c.stop() }
     }
 
     @Test

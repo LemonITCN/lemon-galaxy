@@ -66,6 +66,8 @@ internal class MockDisplayChannel(
     private val sink: VideoSink,
     private val scope: CoroutineScope,
     fps: Int,
+    /** 测试用：打开成功但一直不出画面（不发尺寸、不发帧） */
+    silent: Boolean = false,
 ) : DisplayChannelInterface {
     val displayId: UInt get() = display.id
 
@@ -77,6 +79,7 @@ internal class MockDisplayChannel(
     init {
         val interval = (1000 / fps.coerceIn(1, 60)).toLong()
         job = scope.launch {
+            if (silent) return@launch
             sink.onConfig(VideoCodec.H264, STREAM_W.toUInt(), STREAM_H.toUInt())
             sink.onCursor(STREAM_W / 2, STREAM_H / 2, true)
             var pts = 0L
