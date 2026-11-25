@@ -25,6 +25,8 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
     private var _totpEnabled = false
     private var savedConversations: [String: MockAgentConversation] = [:]
     private lazy var hostService = MockHostService(client: self)
+    /// 本机 MCP 服务（docs/mcp.md）
+    let mockMcp: MockMcpService
     var timers: [DispatchSourceTimer] = []
     let queue = DispatchQueue(label: "mock.core.callbacks")
 
@@ -35,6 +37,7 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
         self.options = options
         self._devices = MockData.devices(zh: zh)
         self._vault = MockData.vault(zh: zh)
+        self.mockMcp = MockMcpService(zh: locale.hasPrefix("zh"))
         super.init(noHandle: NoHandle())
     }
 
@@ -119,6 +122,8 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
         store.remove(key: "mock.session")
         lock.locked { _user = nil; _server = nil }
         timers.forEach { $0.cancel() }; timers.removeAll()
+        // 与真内核一致：退出登录时外部客户端的智能体全部作废，MCP 服务继续开着
+        mockMcp.resetClients()
         setState(.loggedOut)
     }
 
@@ -458,6 +463,24 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
     override func deleteConversation(id: String) {
         lock.locked { savedConversations[id] = nil }
     }
+
+    // MARK: 本机 MCP 服务
+
+    override func mcpStart(config: McpConfig, listener: McpListener) async throws -> McpStatus {
+        await delay(150)
+        return try mockMcp.start(config, listener)
+    }
+    override func mcpStop() { mockMcp.stop() }
+    override func mcpStatus() -> McpStatus { mockMcp.status() }
+    override func mcpRegenerateToken() async throws -> McpStatus {
+        await delay(100)
+        return mockMcp.regenerate()
+    }
+    override func mcpSetMode(mode: AiMode, trustMinutes: UInt32?) { mockMcp.setMode(mode, trustMinutes) }
+    override func mcpDecide(clientKey: String, callId: String, decision: ApprovalDecision) { mockMcp.decide(clientKey, callId, decision) }
+    override func mcpProvideSecret(clientKey: String, requestId: String, secret: String) { mockMcp.provideSecret(clientKey, requestId, secret) }
+    override func mcpStopClient(clientKey: String) { mockMcp.stopClient(clientKey) }
+    override func mcpHistory(clientKey: String) -> [AgentMessage] { mockMcp.history(clientKey) }
 
     // MARK: 后台模拟
 

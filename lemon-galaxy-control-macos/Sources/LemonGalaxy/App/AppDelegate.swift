@@ -20,6 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.global(qos: .utility).async { ClipboardFiles.cleanStale(in: clipRoot) }
         buildMainMenu()
         StatusMenu.shared.install(app: app)
+        // MCP 待批准的系统通知：点开回到 MCP 页
+        MCPNotifier.install()
         showMainWindow()
         // 语言变化时重建菜单（菜单文字不是 SwiftUI，不会自动刷新）
         Localization.shared.$strings.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] strings in
@@ -36,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 经设备转发的 RDP 端口、端口映射随应用一起关掉
         app?.closeAllRdp()
         app?.stopAllForwards()
+        // MCP：等批准的步骤按拒绝回给外部客户端，不让它们挂到连接断开
+        if app?.mcp.running == true { app?.client.mcpStop() }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -137,6 +141,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func showAbout() { app.settingsPage = .about; app.selectHome(.settings); showMainWindow() }
     @objc func showSettings() { app.selectHome(.settings); showMainWindow() }
+    /// 点开 MCP 待批准的系统通知
+    func showMCP() {
+        guard app.phase == .main else { showMainWindow(); return }
+        app.selectHome(.mcp)
+        app.mcp.navSelection = app.mcp.pendingCount > 0 ? .pending : .service
+        app.mcp.scrollTarget = app.mcp.navSelection
+        showMainWindow()
+    }
     @objc func openMain() { showMainWindow() }
     @objc func newSftp() { app.openSFTP() }
     @objc func closeTab() {
@@ -219,6 +231,9 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             sub.addItem(SimItem(L("status.sim.assist")) { mock.simulateAssistRequest() })
             sub.addItem(SimItem(L("status.sim.session")) { mock.simulateSession(ai: false) })
             sub.addItem(SimItem(L("status.sim.ai")) { mock.simulateSession(ai: true) })
+            if let mcp = (app.client as? MockGalaxyClient)?.mockMcp {
+                sub.addItem(SimItem(L("status.sim.mcp")) { mcp.simulate(.dangerousCommand) })
+            }
             sim.submenu = sub
             menu.addItem(sim)
         }

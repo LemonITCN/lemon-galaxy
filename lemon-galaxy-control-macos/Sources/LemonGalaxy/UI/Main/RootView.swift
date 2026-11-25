@@ -31,6 +31,7 @@ struct ThemedRoot<Content: View>: View {
             .environmentObject(settings)
             .environmentObject(app.host)
             .environmentObject(app.ai)
+            .environmentObject(app.mcp)
             .environment(\.palette, palette)
             .environment(\.loc, localization.strings)
             .tint(palette.accent)
@@ -74,6 +75,7 @@ struct Sidebar: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var settings: AppSettings
     @EnvironmentObject var host: LocalHostModel
+    @EnvironmentObject var mcp: MCPModel
     @Environment(\.palette) var p
     @Environment(\.loc) var loc
 
@@ -119,6 +121,8 @@ struct Sidebar: View {
                     // 有新版本：设置图标右上角小红点
                     .overlay(alignment: .topTrailing) {
                         if s == .settings, app.update.available != nil { UpdateDot().offset(x: 3, y: -2) }
+                        // 紧凑侧栏没有数字角标：MCP 有待批准时图标右上角加点
+                        if s == .mcp, compact, mcp.pendingCount > 0 { UpdateDot().offset(x: 3, y: -2) }
                     }
                 if !compact {
                     Text(loc(s.titleKey)).font(.system(size: 13, weight: selected ? .semibold : .regular)).lineLimit(1)
@@ -147,6 +151,10 @@ struct Sidebar: View {
         } else if s == .hosts {
             let n = app.devices.filter { $0.online && !$0.isSelf && $0.kind != .mobile }.count
             if n > 0 { Text("\(n)").font(.system(size: 10.5, weight: .medium).monospacedDigit()).foregroundStyle(p.tertiaryText) }
+        } else if s == .mcp {
+            // 待批准数（橙色角标）；没有待批准时服务开着显示绿点
+            if mcp.pendingCount > 0 { CountBadge(count: mcp.pendingCount) }
+            else if mcp.running { StatusDot(state: .online, size: 7) }
         } else if s == .forwards {
             // 运行中的端口映射条数（绿色）
             let n = app.forwards.count
@@ -200,6 +208,7 @@ struct MiddleColumn: View {
             case .sftp: SFTPTargetsList()
             case .forwards: PortForwardList()
             case .ai: AIConversationList()
+            case .mcp: MCPNav()
             case .snippets: SnippetsList()
             case .local: LocalHostNav()
             case .settings: SettingsNav()
@@ -273,6 +282,7 @@ struct HomePage: View {
         case .sftp: SFTPHome()
         case .forwards: PortForwardHome()
         case .ai: AIHomePage()
+        case .mcp: MCPPage()
         case .snippets: SnippetHome()
         case .local: LocalHostPageView()
         case .settings: SettingsPageView()

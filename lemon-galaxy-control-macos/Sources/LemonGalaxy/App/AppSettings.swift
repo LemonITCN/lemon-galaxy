@@ -34,6 +34,15 @@ final class AppSettings: ObservableObject {
     @Published var aiPlanFirst: Bool = false { didSet { save("aiPlanFirst", aiPlanFirst) } }
     @Published var aiLastModel: String = "" { didSet { save("aiLastModel", aiLastModel) } }
 
+    // 本机 MCP 服务（docs/mcp.md）：默认关闭；端口默认 47821；档位默认危险操作确认
+    @Published var mcpEnabled: Bool = false { didSet { save("mcpEnabled", mcpEnabled) } }
+    @Published var mcpPort: Int = Int(mcpDefaultPort()) { didSet { save("mcpPort", mcpPort) } }
+    @Published var mcpMode: String = "confirmDangerous" { didSet { save("mcpMode", mcpMode) } }
+    /// 完全信任选的时限（分钟），0 为不限时
+    @Published var mcpTrustMinutes: Int = 60 { didSet { save("mcpTrustMinutes", mcpTrustMinutes) } }
+    /// 限时完全信任到期的时间（毫秒），0 为没有限时；重启应用后接着算
+    @Published var mcpTrustUntil: Double = 0 { didSet { save("mcpTrustUntil", mcpTrustUntil) } }
+
     // 登录与窗口
     @Published var lastServer: String = "" { didSet { save("lastServer", lastServer) } }
     @Published var lastUsername: String = "" { didSet { save("lastUsername", lastUsername) } }
@@ -74,6 +83,11 @@ final class AppSettings: ObservableObject {
         aiDefaultMode = s("aiDefaultMode") ?? aiDefaultMode
         aiPlanFirst = b("aiPlanFirst") ?? aiPlanFirst
         aiLastModel = s("aiLastModel") ?? aiLastModel
+        mcpEnabled = b("mcpEnabled") ?? mcpEnabled
+        if let p = i("mcpPort"), (1024...65535).contains(p) { mcpPort = p }
+        mcpMode = s("mcpMode") ?? mcpMode
+        mcpTrustMinutes = i("mcpTrustMinutes") ?? mcpTrustMinutes
+        mcpTrustUntil = d("mcpTrustUntil") ?? mcpTrustUntil
         lastServer = s("lastServer") ?? lastServer
         lastUsername = s("lastUsername") ?? lastUsername
         sidebarCompact = b("sidebarCompact") ?? sidebarCompact

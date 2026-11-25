@@ -4,7 +4,7 @@ import AppKit
 import SystemConfiguration
 
 enum NavSection: String, CaseIterable, Identifiable {
-    case hosts, sftp, forwards, ai, snippets, local, settings
+    case hosts, sftp, forwards, ai, mcp, snippets, local, settings
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -12,6 +12,7 @@ enum NavSection: String, CaseIterable, Identifiable {
         case .sftp: return "folder"
         case .forwards: return "arrow.left.arrow.right"
         case .ai: return "wand.and.stars"
+        case .mcp: return "point.3.connected.trianglepath.dotted"
         case .snippets: return "chevron.left.forwardslash.chevron.right"
         case .local: return "desktopcomputer"
         case .settings: return "gearshape"
@@ -136,6 +137,8 @@ final class AppModel: ObservableObject {
 
     let host: LocalHostModel
     let ai: AIHubModel
+    /// 本机 MCP 服务（docs/mcp.md）
+    let mcp: MCPModel
     let transfers = TransferQueue()
     let update = UpdateModel()
     /// 经设备转发中的 RDP（本机端口），底部提示条可以手动停止；退出登录、应用退出时全部关掉
@@ -173,15 +176,18 @@ final class AppModel: ObservableObject {
         core = CoreProvider.make(config: config, store: store, listener: adapter, forceMock: forceMock, mockOptions: mockOptions)
         host = LocalHostModel(selfTest: selfTest)
         ai = AIHubModel()
+        mcp = MCPModel()
         listenerAdapter = adapter
         adapter.model = self
         host.app = self
         ai.app = self
+        mcp.app = self
         update.app = self
         if client.restore() { didLogin() }
     }
 
-    static var dataDir: URL {
+    /// 数据目录（与内核 CoreConfig、--mcp-stdio 桥接读的端点文件同一处）
+    nonisolated static var dataDir: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("LemonGalaxy", isDirectory: true)
     }
@@ -201,6 +207,7 @@ final class AppModel: ObservableObject {
         phase = .main
         attachHostIfReady()
         ai.reloadSummaries()
+        mcp.didLogin()
         Task { try? await client.refreshDevices() }
         if clientState == .online {
             update.autoCheckIfDue()
@@ -225,6 +232,7 @@ final class AppModel: ObservableObject {
         stopAllForwards()
         closeAllTabs()
         try? await client.logout()
+        mcp.didLogout()
         phase = .login
         user = nil
         server = nil
@@ -248,6 +256,7 @@ final class AppModel: ObservableObject {
         closeAllRdp()
         stopAllForwards()
         closeAllTabs()
+        mcp.didLogout()
         phase = .login
         showToast(L("login.revoked"), error: true)
     }

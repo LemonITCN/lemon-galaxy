@@ -13,6 +13,11 @@ public func coreVersion() -> String { "0.0.0-mirror" }
 public func coreInit(config: CoreConfig) {}
 public func coreSetLocale(locale: String) {}
 public func coreLogPath() -> String { "" }
+public func mcpDefaultPort() -> UInt16 { 47821 }
+public func mcpStdioBridge(dataDir: String) -> Int32 {
+    FileHandle.standardError.write("这个版本没有接入 Rust 内核，不能做 MCP 桥接\n".data(using: .utf8)!)
+    return 1
+}
 
 // MARK: - 记录与枚举
 
@@ -824,6 +829,138 @@ public struct ImageData: Equatable, Hashable {
 
 #if compiler(>=6)
 extension ImageData: Sendable {}
+#endif
+
+public struct McpClientInfo: Equatable, Hashable {
+    /**
+     * 归类键（客户端名规整后），mcp_decide 等用它指定客户端
+     */
+    public var key: String
+    public var name: String
+    public var version: String
+    public var lastActiveMs: Int64
+    /**
+     * 正在执行工具
+     */
+    public var running: Bool
+    /**
+     * 等用户批准的步骤数
+     */
+    public var pendingApprovals: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 归类键（客户端名规整后），mcp_decide 等用它指定客户端
+         */key: String, name: String, version: String, lastActiveMs: Int64, 
+        /**
+         * 正在执行工具
+         */running: Bool, 
+        /**
+         * 等用户批准的步骤数
+         */pendingApprovals: UInt32) {
+        self.key = key
+        self.name = name
+        self.version = version
+        self.lastActiveMs = lastActiveMs
+        self.running = running
+        self.pendingApprovals = pendingApprovals
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension McpClientInfo: Sendable {}
+#endif
+
+public struct McpConfig: Equatable, Hashable {
+    /**
+     * 0 表示用默认端口
+     */
+    public var port: UInt16
+    public var mode: AiMode
+    /**
+     * 完全信任档的时限（分钟），到时回到危险操作确认
+     */
+    public var trustMinutes: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 0 表示用默认端口
+         */port: UInt16, mode: AiMode, 
+        /**
+         * 完全信任档的时限（分钟），到时回到危险操作确认
+         */trustMinutes: UInt32?) {
+        self.port = port
+        self.mode = mode
+        self.trustMinutes = trustMinutes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension McpConfig: Sendable {}
+#endif
+
+public struct McpStatus: Equatable, Hashable {
+    /**
+     * 这个平台能不能开 MCP 服务（手机为 false）
+     */
+    public var supported: Bool
+    public var running: Bool
+    /**
+     * 例如 http://127.0.0.1:47821/mcp
+     */
+    public var url: String
+    public var port: UInt16
+    public var token: String
+    /**
+     * stdio 桥接读的端点文件
+     */
+    public var endpointFile: String
+    public var mode: AiMode?
+    public var error: String?
+    public var clients: [McpClientInfo]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 这个平台能不能开 MCP 服务（手机为 false）
+         */supported: Bool, running: Bool, 
+        /**
+         * 例如 http://127.0.0.1:47821/mcp
+         */url: String, port: UInt16, token: String, 
+        /**
+         * stdio 桥接读的端点文件
+         */endpointFile: String, mode: AiMode?, error: String?, clients: [McpClientInfo]) {
+        self.supported = supported
+        self.running = running
+        self.url = url
+        self.port = port
+        self.token = token
+        self.endpointFile = endpointFile
+        self.mode = mode
+        self.error = error
+        self.clients = clients
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension McpStatus: Sendable {}
 #endif
 
 public struct PathInfo: Equatable, Hashable {
@@ -2326,6 +2463,45 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
      */
     func wakeDevice(deviceId: String) async throws  -> [String]
     
+    func mcpDecide(clientKey: String, callId: String, decision: ApprovalDecision) 
+    
+    /**
+     * 某个客户端最近的操作记录（界面打开时补齐）。
+     */
+    func mcpHistory(clientKey: String)  -> [AgentMessage]
+    
+    /**
+     * 回应 request_secret：内容直接送到设备，不经过外部智能体。
+     */
+    func mcpProvideSecret(clientKey: String, requestId: String, secret: String) 
+    
+    /**
+     * 换一个新令牌（已配置的外部客户端要更新配置）；服务开着时随即用新令牌重启。
+     */
+    func mcpRegenerateToken() async throws  -> McpStatus
+    
+    /**
+     * 调整档位：立即作用于所有客户端。
+     */
+    func mcpSetMode(mode: AiMode, trustMinutes: UInt32?) 
+    
+    /**
+     * 开启（或按新设置重启）本机 MCP 服务。
+     */
+    func mcpStart(config: McpConfig, listener: McpListener) async throws  -> McpStatus
+    
+    func mcpStatus()  -> McpStatus
+    
+    /**
+     * 关闭服务；正在等批准的步骤一律拒绝，正在跑的命令停止。
+     */
+    func mcpStop() 
+    
+    /**
+     * 停下某个客户端：拒绝它等批准的步骤、停止正在跑的命令（之后的新调用照常）。
+     */
+    func mcpStopClient(clientKey: String) 
+    
 }
 
 public protocol HostListener: AnyObject, Sendable {
@@ -2494,6 +2670,20 @@ public protocol HostServiceProtocol: AnyObject, Sendable {
      * 修改某账号在本机的权限（只能在本机修改）。
      */
     func updateAccountPolicy(userId: UInt64, policy: HostPolicy) 
+    
+}
+
+public protocol McpListener: AnyObject, Sendable {
+    
+    /**
+     * 服务状态、客户端列表、待批准数变化
+     */
+    func onStatus(status: McpStatus) 
+    
+    /**
+     * 某个客户端的智能体事件：工具卡片、需要批准、输出、结果、请求输入密码等（与 AI 对话的事件相同）
+     */
+    func onEvent(clientKey: String, event: AgentEvent) 
     
 }
 
@@ -2943,6 +3133,15 @@ open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
     open func vaultDelete(id: String) async throws { bridgeUnimplemented() }
     open func vaultSave(entry: VaultEntry) async throws  -> VaultEntry { bridgeUnimplemented() }
     open func wakeDevice(deviceId: String) async throws  -> [String] { bridgeUnimplemented() }
+    open func mcpDecide(clientKey: String, callId: String, decision: ApprovalDecision) { bridgeUnimplemented() }
+    open func mcpHistory(clientKey: String)  -> [AgentMessage] { bridgeUnimplemented() }
+    open func mcpProvideSecret(clientKey: String, requestId: String, secret: String) { bridgeUnimplemented() }
+    open func mcpRegenerateToken() async throws  -> McpStatus { bridgeUnimplemented() }
+    open func mcpSetMode(mode: AiMode, trustMinutes: UInt32?) { bridgeUnimplemented() }
+    open func mcpStart(config: McpConfig, listener: McpListener) async throws  -> McpStatus { bridgeUnimplemented() }
+    open func mcpStatus()  -> McpStatus { bridgeUnimplemented() }
+    open func mcpStop() { bridgeUnimplemented() }
+    open func mcpStopClient(clientKey: String) { bridgeUnimplemented() }
 }
 
 open class HostService: HostServiceProtocol, @unchecked Sendable {

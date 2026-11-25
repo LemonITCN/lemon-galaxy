@@ -189,6 +189,9 @@ struct ToolRow: View {
         case "list_port_forwards": return ContextRefKind.portForward.icon
         case "recent_activity": return ContextRefKind.activity.icon
         case "wait": return "hourglass"
+        case "request_secret": return "key.horizontal"
+        case "list_displays": return "display.2"
+        case "wake_device": return "power"
         default: return "wrench.and.screwdriver"
         }
     }

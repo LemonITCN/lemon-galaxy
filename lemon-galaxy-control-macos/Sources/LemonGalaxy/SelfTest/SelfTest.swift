@@ -952,6 +952,9 @@ enum SelfTest {
         // 6. AI 智能体（聊天式，docs/ai-chat-ui.md）
         checkAI(prefix: prefix, zh: zh, app: app, window: window, host: host)
 
+        // 6b. 本机 MCP 服务（docs/mcp.md）
+        checkMCP(prefix: prefix, zh: zh, dark: dark, app: app, window: window, host: host)
+
         // 7. 片段
         app.selectHome(.snippets)
         app.selectedSnippet = "n-docker"
