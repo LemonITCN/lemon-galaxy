@@ -311,18 +311,22 @@ impl Controller for PortalController {
                 }
             }
             InputEvent::Text { text } => {
-                // 经 IBus 提交（中日韩等都行）；没有 IBus（KDE 多用 fcitx5）时按 keysym（布局里没有的字符会被丢掉）
-                if super::super::ibus::commit(&text) {
-                    return;
-                }
-                for c in text.chars() {
-                    if c == '\n' || c == '\r' {
-                        self.chord(&[hidmap::KEY_ENTER]);
-                        continue;
+                // 键盘上有的字符按按键（虚拟机等只收按键的程序也能收到）；中日韩等经 IBus 提交，
+                // 没有 IBus（KDE 多用 fcitx5）时也按 keysym（布局里没有的字符会被丢掉）。见 ibus::text_runs
+                for (keys, run) in super::super::ibus::text_runs(&text) {
+                    if keys || !super::super::ibus::commit(&run) {
+                        for c in run.chars() {
+                            match c {
+                                '\n' | '\r' => self.chord(&[hidmap::KEY_ENTER]),
+                                '\t' => self.chord(&[hidmap::KEY_TAB]),
+                                _ => {
+                                    let sym = super::super::x11::keysym_for(c) as i32;
+                                    self.call("NotifyKeyboardKeysym", &(&self.ready.session, Self::empty(), sym, 1u32));
+                                    self.call("NotifyKeyboardKeysym", &(&self.ready.session, Self::empty(), sym, 0u32));
+                                }
+                            }
+                        }
                     }
-                    let sym = super::super::x11::keysym_for(c) as i32;
-                    self.call("NotifyKeyboardKeysym", &(&self.ready.session, Self::empty(), sym, 1u32));
-                    self.call("NotifyKeyboardKeysym", &(&self.ready.session, Self::empty(), sym, 0u32));
                 }
             }
             InputEvent::Touch { phase, x, y, .. } => match phase {

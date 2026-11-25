@@ -569,6 +569,24 @@ fn get() -> Option<&'static Ibus> {
     .as_ref()
 }
 
+/// 主控端发来的一段文字按「怎么送」切成几段：`true` 段按按键发，`false` 段经 IBus 提交。
+///
+/// 键盘上本来就有的字符（ASCII 可见字符、空格、换行、Tab）一律按按键：和真键盘一样，
+/// 直接收按键的程序也收得到——VMware / VirtualBox 等虚拟机窗口把按键原样转给客户机、不认 IBus 提交的文字，
+/// 全走 IBus 时在虚拟机里一个字都打不出来（0.1.0.61 的回退）。其余（中日韩、带音标的字母、表情等）
+/// 布局里没有、按键发不出去，才经 IBus。
+pub fn text_runs(text: &str) -> Vec<(bool, String)> {
+    let mut out: Vec<(bool, String)> = vec![];
+    for c in text.chars() {
+        let key = c.is_ascii_graphic() || matches!(c, ' ' | '\n' | '\r' | '\t');
+        match out.last_mut() {
+            Some((k, s)) if *k == key => s.push(c),
+            _ => out.push((key, c.to_string())),
+        }
+    }
+    out
+}
+
 /// 提交一段文字，阻塞到发出去（后面的按键自然排在它后面）。返回 false 表示没用 IBus，调用方改按键。
 pub fn commit(text: &str) -> bool {
     if text.is_empty() {
@@ -697,6 +715,14 @@ pub fn guard_main() -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn text_runs_keep_keyboard_chars_as_keys() {
+        assert_eq!(text_runs("abc 123\n"), vec![(true, "abc 123\n".to_string())]);
+        assert_eq!(text_runs("中文"), vec![(false, "中文".to_string())]);
+        assert_eq!(text_runs("ls 目录\té"), vec![(true, "ls ".to_string()), (false, "目录".to_string()), (true, "\t".to_string()), (false, "é".to_string())]);
+        assert!(text_runs("").is_empty());
+    }
+
     use super::*;
 
     /// 假的 IBus：记下调用；`fail_set` 里的引擎名前几次切换失败；`wrong_after_set` 次切换后读回的不对
