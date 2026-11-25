@@ -98,7 +98,8 @@ enum SelfTest {
         print("selftest: 输出 \(count) 张到 \(dir.path)；缺失语言键 \(missing.count) 个；问题 \(problems.count) 个")
         if !missing.isEmpty { print("缺失语言键：" + missing.joined(separator: ", ")) }
         for p in problems { print("问题：" + p) }
-        return 0
+        // 有问题就以 1 退出，CI 才拦得住（以前一律 0，终端尺寸不同步这类回退只打印在日志里）
+        return problems.isEmpty ? 0 : 1
     }
 
     // MARK: 工具
@@ -795,6 +796,18 @@ enum SelfTest {
         if let t = app.activeTab as? TerminalTabModel {
             wait("终端打开") { t.phase == .running }
             pump(0.2)
+            // 模拟内核打开终端要等 250 毫秒，期间视图从占位尺寸布局成真实尺寸：远端 PTY 必须跟上视图（以前停在 97x31，apt 之后下面的行不滚）
+            let view = t.terminalView.getTerminal()
+            if let ch = t.channelForTest as? MockTerminalChannel {
+                let remote = ch.currentSize
+                if Int(remote.cols) != view.cols || Int(remote.rows) != view.rows {
+                    problems.append("终端打开后远端尺寸 \(remote.cols)x\(remote.rows) 与视图 \(view.cols)x\(view.rows) 不一致")
+                } else {
+                    print("终端尺寸同步：远端 \(remote.cols)x\(remote.rows) 与视图一致")
+                }
+            } else {
+                problems.append("终端标签拿不到模拟通道，没法核对尺寸")
+            }
             t.sendText("ls -la\r")
             pump(0.2)
             t.sendText("df -h\r")

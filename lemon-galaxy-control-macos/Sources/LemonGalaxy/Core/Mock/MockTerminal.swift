@@ -253,6 +253,9 @@ final class MockTerminalChannel: TerminalChannel, @unchecked Sendable {
         queue.async { [weak self] in self?.cols = cols; self?.rows = rows }
     }
 
+    /// 远端 PTY 现在认的尺寸（自测核对主控端有没有把视图尺寸同步过来）
+    var currentSize: (cols: UInt16, rows: UInt16) { queue.sync { (cols, rows) } }
+
     override func detach() {
         closed = true
         if registered { MockTerminalRegistry.shared.setAttached(id, false) }

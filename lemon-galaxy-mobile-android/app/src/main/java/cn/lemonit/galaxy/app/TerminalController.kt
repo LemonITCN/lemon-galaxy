@@ -105,6 +105,9 @@ class TerminalTab internal constructor(
                     )
                 }
                 channel = ch
+                // 打开要等连接，期间视图量好真实尺寸时 resize 拿不到通道、只记下了：连上后按当前尺寸补发一次，
+                // 否则远端 PTY 停在打开时的尺寸（apt 等按它设滚动区域，下面的行再也不滚）；接续已有会话时也以本机视图为准
+                ch.resize(cols.toUShort(), rows.toUShort())
                 remoteSessionId = ch.sessionId()
                 // 被控端给的会话标题（shell 名），程序用 OSC 设置标题后会被覆盖
                 runCatching { ch.title() }.getOrNull()?.takeIf { it.isNotBlank() && session.title.isNullOrBlank() }?.let { _title.value = it }

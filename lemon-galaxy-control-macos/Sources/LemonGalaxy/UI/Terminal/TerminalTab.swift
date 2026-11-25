@@ -17,6 +17,8 @@ final class TerminalTabModel: TabModel, TerminalViewDelegate {
     /// 只给 selftest 用：离屏截图时把终端单独渲染成图片（共享上下文里 SwiftTerm 的文字矩阵、背景混合模式会出错）
     @Published var snapshot: NSImage?
     private var channel: TerminalChannel?
+    /// 只给 selftest 用：核对远端 PTY 尺寸
+    var channelForTest: TerminalChannel? { channel }
     private var sink: TerminalSinkAdapter?
     private var attach: TerminalSessionInfo?
     private var cancellables: Set<AnyCancellable> = []
@@ -75,6 +77,11 @@ final class TerminalTabModel: TabModel, TerminalViewDelegate {
                     let s = try await app.ssh(id)
                     channel = try await s.session.openTerminal(options: TerminalOptions(attachSession: nil, shell: nil, cols: cols, rows: rows, env: env), sink: adapter)
                 }
+                // 打开要等连接：标签刚建时视图还是占位尺寸（800x500 约 97x31），等待期间布局成真实尺寸，
+                // sizeChanged 那时还拿不到通道、被丢掉，远端 PTY 就一直停在占位尺寸（apt 按它设滚动区域后，下面的行再也不滚）。
+                // 连上后按当前尺寸补发一次；接续已有会话时也以本机视图为准
+                let now = terminalView.getTerminal()
+                channel?.resize(cols: UInt16(max(now.cols, 1)), rows: UInt16(max(now.rows, 1)))
                 phase = .running
                 live = true
             } catch {
