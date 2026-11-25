@@ -302,7 +302,7 @@ impl RemoteClipOffer {
     }
 }
 
-/// 剪贴板文件的读取器（粘贴时用）：`read` 会阻塞，在后台线程里调用；丢掉或 close 即取消。
+/// 剪贴板文件的读取器（粘贴时用）：`read` 会阻塞，在后台线程里调用；丢掉或 cancel 即取消。
 #[derive(uniffi::Object)]
 pub struct ClipReader {
     size: u64,
@@ -332,7 +332,8 @@ impl ClipReader {
         Ok(buf)
     }
 
-    pub fn close(&self) {
+    /// 不读了（取消）。不叫 close：Kotlin 绑定给每个对象自动生成 close() 释放资源，同名会编不过
+    pub fn cancel(&self) {
         self.inner.lock().take();
     }
 }

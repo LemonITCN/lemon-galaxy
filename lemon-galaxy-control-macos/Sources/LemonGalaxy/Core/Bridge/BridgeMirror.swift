@@ -2080,7 +2080,10 @@ public protocol ClientListener: AnyObject, Sendable {
 
 public protocol ClipReaderProtocol: AnyObject, Sendable {
     
-    func close() 
+    /**
+     * 不读了（取消）。不叫 close：Kotlin 绑定给每个对象自动生成 close() 释放资源，同名会编不过
+     */
+    func cancel() 
     
     /**
      * 读最多 `max` 字节；返回空表示读完了。出错（断线、对方取消）报错。
@@ -2838,7 +2841,7 @@ open class ClipReader: ClipReaderProtocol, @unchecked Sendable {
     public struct NoHandle { public init() {} }
     public init(noHandle: NoHandle) {}
     required public init(unsafeFromHandle handle: UInt64) {}
-    open func close() { bridgeUnimplemented() }
+    open func cancel() { bridgeUnimplemented() }
     open func read(max: UInt32) throws  -> Data { bridgeUnimplemented() }
     open func size()  -> UInt64 { bridgeUnimplemented() }
 }

@@ -467,7 +467,7 @@ final class PasteJob: ObservableObject, Identifiable, @unchecked Sendable {
         }
         guard go else { return }
         postUI()
-        if let r { DispatchQueue.global().async { r.close() } }
+        if let r { DispatchQueue.global().async { r.cancel() } }
     }
 
     private func isFinished(_ p: Phase) -> Bool {
@@ -628,7 +628,7 @@ final class PasteJob: ObservableObject, Identifiable, @unchecked Sendable {
                 reader = r
                 return cancelled
             }
-            if cancelledNow { r.close(); throw Failure(message: L("paste.cancelled")) }
+            if cancelledNow { r.cancel(); throw Failure(message: L("paste.cancelled")) }
             if !sized {
                 sized = true
                 // 文件复制后又变了：总量按现在的大小算
@@ -645,16 +645,16 @@ final class PasteJob: ObservableObject, Identifiable, @unchecked Sendable {
                     add(UInt64(data.count))
                 }
                 lock.locked { reader = nil }
-                r.close()
+                r.cancel()
                 if isCancelled { throw Failure(message: L("paste.cancelled")) }
                 return
             } catch let w as WriteFailure {
                 lock.locked { reader = nil }
-                r.close()
+                r.cancel()
                 throw Failure(message: w.message)
             } catch {
                 lock.locked { reader = nil }
-                r.close()
+                r.cancel()
                 if isCancelled { throw error }
                 if retries < 2 { retries += 1; Thread.sleep(forTimeInterval: 1); continue }
                 throw Failure(message: L("paste.error.read", name, LazyPaste.describe(error)))

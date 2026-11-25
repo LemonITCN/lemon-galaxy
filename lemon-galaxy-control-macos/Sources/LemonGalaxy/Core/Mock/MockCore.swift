@@ -1014,7 +1014,7 @@ final class MockClipReader: ClipReader, @unchecked Sendable {
         }
     }
 
-    override func close() { lock.locked { closed = true } }
+    override func cancel() { lock.locked { closed = true } }
 }
 
 /// 模拟的远端声音：不出声，只记住音量与静音，供界面与 selftest 核对

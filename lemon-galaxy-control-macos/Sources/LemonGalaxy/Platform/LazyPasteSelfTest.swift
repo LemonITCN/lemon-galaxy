@@ -260,7 +260,7 @@ enum LazyPasteSelfTest {
 
         var isClosed: Bool { lock.locked { closed } }
         override func size() -> UInt64 { UInt64(data.count) }
-        override func close() { lock.locked { closed = true } }
+        override func cancel() { lock.locked { closed = true } }
 
         override func read(max: UInt32) throws -> Data {
             while true {

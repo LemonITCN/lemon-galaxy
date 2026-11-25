@@ -92,7 +92,7 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
             return (agents.removeValue(forKey: id) != nil, gone.values.map(\.reader))
         }
         // 代理断开：它正在读的主控端文件一并停掉
-        for r in readers { DispatchQueue.global().async { r.close() } }
+        for r in readers { DispatchQueue.global().async { r.cancel() } }
         guard removed else { return }
         NSLog("LemonGalaxy: 会话代理 %d 已断开", id)
         reselect()
@@ -134,7 +134,7 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
                 guard clipReaders[p.reader]?.agent == id else { return nil }
                 return clipReaders.removeValue(forKey: p.reader)?.reader
             }
-            r?.close()
+            r?.cancel()
         default:
             break
         }

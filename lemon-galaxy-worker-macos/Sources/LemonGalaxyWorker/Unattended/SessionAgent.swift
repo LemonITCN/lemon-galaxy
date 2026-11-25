@@ -437,7 +437,7 @@ final class ForwardingClipReader: ClipReader, @unchecked Sendable {
         super.init(noHandle: NoHandle())
     }
 
-    deinit { close() }
+    deinit { cancel() }
 
     override func size() -> UInt64 { total }
 
@@ -451,7 +451,7 @@ final class ForwardingClipReader: ClipReader, @unchecked Sendable {
     }
 
     /// 停止或读完：后台服务那边的读取器随之关掉（正阻塞在 read 里的会报错返回）
-    override func close() {
+    override func cancel() {
         guard closed.fire() else { return }
         conn?.notify(IPCMethod.agentClipClose, PClipReader(reader: id))
     }

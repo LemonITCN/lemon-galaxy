@@ -346,7 +346,7 @@ enum IPCSelfTest {
         var got = Data()
         while let d = try? r?.read(max: 65_536), !d.isEmpty { got += d }
         check("代理读到的内容完整", got == content.subdata(in: 1000..<content.count), "\(got.count)")
-        r?.close()
+        r?.cancel()
         check("关闭转到后台服务", wait { src.closedCount == 1 })
         var openErr = ""
         do { _ = try fwd.open(index: 0, offset: 0) } catch { openErr = String(describing: error) }
@@ -360,7 +360,7 @@ enum IPCSelfTest {
         }
         Thread.sleep(forTimeInterval: 0.2)
         check("读到停住的地方", first?.count == 1000 && blocked.value == nil)
-        held?.close()
+        held?.cancel()
         check("停止时阻塞的读报错返回", wait { blocked.value == true })
         fa.offerError = "假平台拒绝清单"
         check("代理拒绝时带回原因", dp.clipboardSetOffer(offer: offer, source: src) == "假平台拒绝清单")
@@ -652,7 +652,7 @@ final class TestClipReader: ClipReader, @unchecked Sendable {
         }
     }
 
-    override func close() {
+    override func cancel() {
         let first = lock.locked { () -> Bool in defer { closed = true }; return !closed }
         if first { owner?.noteClosed() }
     }

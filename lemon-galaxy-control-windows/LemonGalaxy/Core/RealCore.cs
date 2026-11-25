@@ -117,7 +117,7 @@ internal sealed class RealClipReader : ICoreClipReader
     public void Close()
     {
         if (Interlocked.Exchange(ref closed, 1) != 0) return;
-        try { r.Close(); }
+        try { r.Cancel(); }
         finally { r.Dispose(); }
     }
 }
