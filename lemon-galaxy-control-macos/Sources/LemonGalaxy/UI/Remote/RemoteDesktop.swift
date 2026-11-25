@@ -917,13 +917,46 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
 
     private func sendKey(_ event: NSEvent, down: Bool) {
         guard let hid = mapped(event.keyCode) else { return }
-        if down { keysDown.insert(event.keyCode) } else { keysDown.remove(event.keyCode) }
+        // 按着 Command 的组合键：AppKit 不把这个键的 keyUp 交给我们（macOS 一直如此），按下后不立刻抬起，
+        // 远端就一直当这个键按着——Cmd+A 全选后 A 卡住，GNOME Wayland 上每进一个输入框就自动重复输入一串 a。
+        // 所以这类键按下即抬起（按住时系统发的重复按下也各算一次）。
+        let tap = down && event.modifierFlags.contains(.command)
+        if down && !tap { keysDown.insert(event.keyCode) } else { keysDown.remove(event.keyCode) }
         if down && isPasteChord(event) {
             model?.sendPasteKey(.key(hidUsage: hid, down: true))
         } else {
             model?.send(.key(hidUsage: hid, down: down))
         }
+        if tap { model?.send(.key(hidUsage: hid, down: false)) }
     }
+
+    /// 把我们发过「按下」还没抬起的键与修饰键全部抬起：失去焦点、窗口不再是前台时（之后的 keyUp / flagsChanged
+    /// 会交给别的应用，不抬起的话远端一直当它们按着）
+    func releaseAllKeys() {
+        for code in keysDown {
+            if let hid = mapped(code) { model?.send(.key(hidUsage: hid, down: false)) }
+        }
+        keysDown.removeAll()
+        for code in pressedModifiers {
+            if let hid = mapped(code) { model?.send(.key(hidUsage: hid, down: false)) }
+        }
+        pressedModifiers.removeAll()
+    }
+
+    override func resignFirstResponder() -> Bool {
+        releaseAllKeys()
+        return super.resignFirstResponder()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if let w = window { NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: w) }
+        if let w = newWindow {
+            NotificationCenter.default.addObserver(self, selector: #selector(windowLostKey), name: NSWindow.didResignKeyNotification, object: w)
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    @objc private func windowLostKey() { releaseAllKeys() }
 
     /// 远端会当成粘贴的组合键：Cmd+V（控制 Mac，或控制 Windows / Linux 且 Command 当 Ctrl 用）、控制 Windows / Linux 时的 Ctrl+V
     private func isPasteChord(_ event: NSEvent) -> Bool {
@@ -967,6 +1000,11 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
         let down = !pressedModifiers.contains(code)
         if down { pressedModifiers.insert(code) } else { pressedModifiers.remove(code) }
         model?.send(.key(hidUsage: hid, down: down))
+        // 松开 Command 时还记着按下的键（理论上没有，兜底）：一并抬起
+        if !down, code == UInt16(kVK_Command) || code == UInt16(kVK_RightCommand), !event.modifierFlags.contains(.command), !keysDown.isEmpty {
+            for c in keysDown { if let h = mapped(c) { model?.send(.key(hidUsage: h, down: false)) } }
+            keysDown.removeAll()
+        }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

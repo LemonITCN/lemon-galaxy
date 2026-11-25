@@ -476,11 +476,23 @@ final class RemoteCanvasView: UIView, UIKeyInput {
         emit(Hid.combo(m + [Hid.backspace]))
     }
 
+    /// 发过「按下」还没抬起的外接键盘按键（HID 用法码）
+    private var heldKeys = Set<UInt32>()
+
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         var handled = false
         for p in presses {
             guard let key = p.key else { continue }
-            emit([.key(hidUsage: UInt32(key.keyCode.rawValue), down: true)])
+            let usage = UInt32(key.keyCode.rawValue)
+            let isModifier = (0xE0...0xE7).contains(usage)
+            if !isModifier, key.modifierFlags.contains(.command) {
+                // 按着 Command 的组合键：系统可能不再送这个键的「抬起」，按下即抬起，免得远端一直当它按着
+                // （GNOME Wayland 上卡住的键会在每个新输入框里自动重复，比如一串 a）
+                emit([.key(hidUsage: usage, down: true), .key(hidUsage: usage, down: false)])
+            } else {
+                heldKeys.insert(usage)
+                emit([.key(hidUsage: usage, down: true)])
+            }
             handled = true
         }
         if !handled { super.pressesBegan(presses, with: event) }
@@ -490,10 +502,24 @@ final class RemoteCanvasView: UIView, UIKeyInput {
         var handled = false
         for p in presses {
             guard let key = p.key else { continue }
-            emit([.key(hidUsage: UInt32(key.keyCode.rawValue), down: false)])
+            let usage = UInt32(key.keyCode.rawValue)
+            // 按下时已经抬起过的组合键不再发
+            if heldKeys.remove(usage) != nil { emit([.key(hidUsage: usage, down: false)]) }
             handled = true
         }
         if !handled { super.pressesEnded(presses, with: event) }
+    }
+
+    /// 失去焦点时把还按着的键全部抬起（之后的抬起不会再交给我们）
+    func releaseHeldKeys() {
+        guard !heldKeys.isEmpty else { return }
+        emit(heldKeys.map { .key(hidUsage: $0, down: false) })
+        heldKeys.removeAll()
+    }
+
+    override func resignFirstResponder() -> Bool {
+        releaseHeldKeys()
+        return super.resignFirstResponder()
     }
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
