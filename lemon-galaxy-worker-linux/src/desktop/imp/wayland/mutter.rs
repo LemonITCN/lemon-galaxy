@@ -360,7 +360,7 @@ impl Backend for MutterBackend {
     }
 
     fn controller(&self) -> Result<Box<dyn Controller>, String> {
-        Ok(Box::new(MutterController { session: self.session.clone(), wheel: WheelAcc::default(), touch_down: false }))
+        Ok(Box::new(MutterController { session: self.session.clone(), wheel: WheelAcc::default(), touch_down: false, last_pos: None }))
     }
 }
 
@@ -396,6 +396,8 @@ pub struct MutterController {
     session: Arc<Session>,
     wheel: WheelAcc,
     touch_down: bool,
+    /// 上次发出的指针位置（屏幕编号、画面像素坐标）
+    last_pos: Option<(u32, i32, i32)>,
 }
 
 impl MutterController {
@@ -405,9 +407,21 @@ impl MutterController {
         }
     }
 
-    fn motion(&self, m: &Monitor, x: i32, y: i32) {
+    /// 指针移动：先发一次相对移动（和上次位置的差），再发绝对位置定准。
+    /// 平时相对移动已经到位，绝对位置不再挪；但有程序锁定 / 限定指针时（VMware 点进虚拟机后抓住鼠标、
+    /// 浏览器游戏的指针锁定），Mutter 会把虚拟设备的绝对坐标夹在窗口里、且不产生相对移动事件，
+    /// 这些程序就收不到任何移动——VMware 里的指针不动、走不到边缘、放不了手，只能 Ctrl+Alt。
+    /// 发相对移动后它们和用真鼠标一样收到移动。换屏后第一次不发（不同屏的坐标不能相减）。
+    fn motion(&mut self, m: &Monitor, x: i32, y: i32) {
+        let (x, y) = (x.max(0), y.max(0));
         if let Some(s) = self.session.stream_for(m) {
-            self.call("NotifyPointerMotionAbsolute", &(s.path.as_str(), x.max(0) as f64, y.max(0) as f64));
+            if let Some((id, lx, ly)) = self.last_pos {
+                if id == m.id && (x, y) != (lx, ly) {
+                    self.call("NotifyPointerMotionRelative", &((x - lx) as f64, (y - ly) as f64));
+                }
+            }
+            self.call("NotifyPointerMotionAbsolute", &(s.path.as_str(), x as f64, y as f64));
+            self.last_pos = Some((m.id, x, y));
         }
     }
 

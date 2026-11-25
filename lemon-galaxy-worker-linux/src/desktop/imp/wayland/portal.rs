@@ -194,7 +194,7 @@ impl Backend for PortalBackend {
 
     fn controller(&self) -> Result<Box<dyn Controller>, String> {
         let r = self.ready(Duration::from_secs(10))?;
-        Ok(Box::new(PortalController { ready: r, shared: self.shared.clone(), wheel: WheelAcc::default(), touch_down: false }))
+        Ok(Box::new(PortalController { ready: r, shared: self.shared.clone(), wheel: WheelAcc::default(), touch_down: false, last_pos: None }))
     }
 }
 
@@ -235,6 +235,8 @@ pub struct PortalController {
     shared: Arc<Shared>,
     wheel: WheelAcc,
     touch_down: bool,
+    /// 上次发出的指针位置（流节点、逻辑坐标）
+    last_pos: Option<(u32, f64, f64)>,
 }
 
 impl PortalController {
@@ -248,13 +250,24 @@ impl PortalController {
         HashMap::new()
     }
 
-    fn motion(&self, m: &Monitor, x: i32, y: i32) {
+    /// 指针移动：先发一次相对移动（和上次位置的差），再发绝对位置定准。
+    /// 平时相对移动已经到位，绝对位置不再挪；但有程序锁定 / 限定指针时（VMware 点进虚拟机后抓住鼠标、
+    /// 浏览器游戏的指针锁定），Mutter 会把虚拟设备的绝对坐标夹在窗口里、且不产生相对移动事件，
+    /// 这些程序就收不到任何移动——VMware 里的指针不动、走不到边缘、放不了手，只能 Ctrl+Alt。
+    /// 发相对移动后它们和用真鼠标一样收到移动。换屏后第一次不发（不同屏的坐标不能相减）。
+    fn motion(&mut self, m: &Monitor, x: i32, y: i32) {
         let Some((_, node, logical)) = self.ready.streams.iter().find(|(s, _, _)| s.id == m.id).or(self.ready.streams.first()).cloned() else { return };
         // 画面像素 → 流的逻辑坐标（缩放显示时两者不同）
         let (fw, fh) = self.shared.frame_sizes.lock().get(&node).copied().unwrap_or((logical.0.max(1) as u32, logical.1.max(1) as u32));
         let lx = x.max(0) as f64 * logical.0 as f64 / fw.max(1) as f64;
         let ly = y.max(0) as f64 * logical.1 as f64 / fh.max(1) as f64;
+        if let Some((n, px, py)) = self.last_pos {
+            if n == node && (lx, ly) != (px, py) {
+                self.call("NotifyPointerMotion", &(&self.ready.session, Self::empty(), lx - px, ly - py));
+            }
+        }
         self.call("NotifyPointerMotionAbsolute", &(&self.ready.session, Self::empty(), node, lx, ly));
+        self.last_pos = Some((node, lx, ly));
     }
 
     fn button(&self, code: u32, down: bool) {

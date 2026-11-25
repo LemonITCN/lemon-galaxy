@@ -68,6 +68,10 @@ Wayland 的登录界面看不到：GDM 默认用 Wayland。命令 `lemon-galaxy-
 
 键盘：协议里是 USB HID 用法码，统一先换成 Linux evdev 键码（`hidmap.rs`）：Mutter 与门户直接用 evdev 键码；X11 用「evdev 键码 + 8」，键盘布局里没有的字符（输入文字）临时改一个空闲键码的映射再按。
 
+指针：Wayland（Mutter、门户）每次移动先发相对移动（与上次位置的差）再发绝对位置定准。只发绝对坐标时，程序锁定或限定指针
+（VMware 点进虚拟机后抓住鼠标、浏览器游戏的指针锁定）收不到任何移动：Mutter 把虚拟设备的绝对坐标夹在窗口里且不产生相对移动事件，
+VMware 里的指针不动、走不到边缘就放不了手，只能按 Ctrl+Alt。平时相对移动已经到位，绝对位置不再挪；换屏后第一次不发相对移动。
+
 输入法提交的文字（`InputEvent::Text`，主控端用本机中文、日文等输入法打出的字）：
 - X11：同上，布局里没有的字符临时映射空闲键码。
 - Wayland（Mutter、门户）：Mutter 的 `NotifyKeyboardKeysym` 只在当前布局组里找键码，找不到就静默丢弃（日志 `No keycode found for keyval …`，调用照样返回成功），所以中日韩文字、é 等打不出来；GNOME 自己的远程桌面也有同样限制。
