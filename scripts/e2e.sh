@@ -16,17 +16,33 @@ cleanup() {
   sudo -n rm -rf "$WORK" 2>/dev/null || rm -rf "$WORK"
 }
 trap cleanup EXIT
-fail() { echo "失败：$*" >&2; for f in "$WORK"/*.log; do echo "== $f"; tail -40 "$f"; done; exit 1; }
+SPID=""
+fail() {
+  echo "失败：$*" >&2
+  if [ -n "$SPID" ]; then kill -0 "$SPID" 2>/dev/null && echo "服务器进程还在" || echo "服务器进程已经退出"; fi
+  for f in "$WORK"/*.log; do echo "== $f"; tail -40 "$f"; done
+  exit 1
+}
 step() { echo; echo "==== $*"; }
 
 step "启动服务器（端口 ${PORT}）"
 "$BIN/lemon-galaxy-server" --data-dir "$WORK/srv" --port "$PORT" user create alice init-pass-123 --display-name Alice
 "$BIN/lemon-galaxy-server" --data-dir "$WORK/srv" --port "$PORT" >"$WORK/server.log" 2>&1 &
-PIDS+=($!)
+SPID=$!
+PIDS+=($SPID)
 for i in $(seq 1 50); do grep -q "客户端填写的服务器地址" "$WORK/server.log" 2>/dev/null && break; sleep 0.2; done
 ADDR="$(grep -o '客户端填写的服务器地址：.*' "$WORK/server.log" | sed 's/.*：//' | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
 [ -n "$ADDR" ] || fail "服务器没有启动"
 echo "地址 $ADDR"
+
+# 服务器给已断开的客户端写数据时不能被 SIGPIPE 带崩（以前前台运行也恢复了默认处理，一个客户端中途掐断连接整个服务器就没了）
+if [ "$WIN" = 0 ] && command -v python3 >/dev/null; then
+  step "客户端中途掐断连接，服务器照常运行"
+  python3 -I "$(dirname "$0")/abort-clients.py" 127.0.0.1 "$PORT" 30 || fail "中途断开测试没跑完"
+  sleep 0.5
+  kill -0 "$SPID" 2>/dev/null || fail "客户端中途断开后服务器退出了"
+  echo "服务器还在运行"
+fi
 
 step "主控端首次登录（改密码、生成账号密钥）"
 "$BIN/galaxy-dev" --data "$WORK/ctl" login "$ADDR" alice init-pass-123 alice-new-pass-456 | tail -1

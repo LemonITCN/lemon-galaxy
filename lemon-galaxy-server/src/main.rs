@@ -171,11 +171,6 @@ impl ServeCtx {
 }
 
 fn main() {
-    // 输出接到管道、对方先关了（如 `status | head`）时按命令行惯例安静退出，不要 panic
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
     let _ = rustls::crypto::ring::default_provider().install_default();
     // Windows 上从资源管理器双击打开：控制台窗口是专门开的，出错时停住让人看清
     #[cfg(windows)]
@@ -280,6 +275,15 @@ fn serve_ctx(cli: &Cli, default_dir: PathBuf) -> ServeCtx {
 
 fn real_main(double_click: bool) -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // 一次性打印的命令（status、用户列表等）输出接到管道、对方先关了（如 `status | head`）时按命令行惯例安静退出。
+    // 前台运行与交互菜单（菜单里也能前台运行）保持 Rust 默认的忽略 SIGPIPE：恢复默认的话，给已断开的客户端写数据
+    // （writev 不带 MSG_NOSIGNAL）会让整个服务器被系统直接杀掉、不留日志
+    #[cfg(unix)]
+    if !matches!(cli.cmd, None | Some(Cmd::Run)) {
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
     // 上次自动升级留下的旧程序（Windows 上运行中的程序只能改名，不能覆盖）
     #[cfg(windows)]
     if let Ok(exe) = std::env::current_exe() {
