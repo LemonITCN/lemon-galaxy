@@ -1896,6 +1896,10 @@ impl Agent {
                 self.st.lock().secrets.insert(rid.clone(), tx);
                 self.ui.event(AgentEvent::SecretRequested { request_id: rid, prompt: s("prompt"), target_id: t.id.clone() });
                 let Some(secret) = self.wait(rx).await else { anyhow::bail!("用户没有输入") };
+                // 界面「取消」回空内容：什么都不发（否则会把一个空密码加回车交出去，算一次失败尝试）
+                if secret.is_empty() {
+                    anyhow::bail!("用户取消了输入，没有向设备发送任何内容");
+                }
                 let enter = a["press_enter"].as_bool().unwrap_or(true);
                 if let Some(term) = a["terminal_id"].as_str().and_then(|x| self.st.lock().terminals.get(x).cloned()) {
                     let mut d = secret.into_bytes();
