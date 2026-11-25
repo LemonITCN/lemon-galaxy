@@ -159,7 +159,7 @@ HelloAck {
   host: HostInfo { device_id, hostname, platform, os_version, arch, app_version },
   account: Option<u64>,               // 以哪个账号的身份被控（协助模式为 None）
   permissions: Permissions { view, control, files, terminal, clipboard, audio, ai_cap },
-  capabilities: Vec<String>,          // "terminal" "files" "exec" "display" "input" "clipboard" "port_forward" "screenshot" "ui_tree" "privacy" "audio"
+  capabilities: Vec<String>,          // "terminal" "files" "exec" "display" "input" "clipboard" "clipboard_offer" "port_forward" "screenshot" "ui_tree" "privacy" "audio" "video_keepalive"
                                       // "virtual_display" + "virtual_display_max=N"（8.6）
 }
 ```
@@ -213,14 +213,37 @@ InputEvent =
   SpecialCombo { kind: CtrlAltDel|LockScreen|... }
 ```
 
-### 8.4.1 复制粘贴文件
+### 8.4.1 复制粘贴文件（复制时只交换清单，粘贴时才传）
 
-不加新消息，由主控端用现有的文件流与剪贴板管理请求完成：
-- 本机 → 远端：把文件 / 文件夹上传到被控端账号目录下的 `~/.lemon-galaxy/clipboard/<毫秒时间戳>-<随机数>/`，再 `ClipboardSet(Files[远端路径])`；
-  主控端每次推送前顺手删掉暂存区里一天前的内容。
-- 远端 → 本机：`ClipboardGet` 得到 `Files[远端路径]` 后逐个下载（文件夹递归），界面把本机剪贴板设成下载好的文件。
-- 被控端在剪贴板管理请求里把文件路径与协议格式互转（Windows `C:\x` ↔ `/C:/x`），文件类剪贴板要同时有剪贴板与文件权限；
-  Windows 写入用 CF_HDROP 加「Preferred DropEffect = 复制」。单次上限 4 GB、1 万个文件。
+文字照旧即时同步：主控端发现本机复制了文字就 `ClipboardSet(Text)`，鼠标进入画面时 `ClipboardGet`。
+文件像 UU 远程：**复制时只交换清单，有人粘贴时才传内容，进度显示在粘贴的那一边**。
+
+清单 `ClipOffer { id, entries: [ClipOfferEntry { path, is_dir, size, mtime }] }`：`id` 是复制方生成的随机数；`path` 是用 `/` 分隔的相对路径，
+顶层项就是复制的那几项（同名的第二个起加「 2」「 3」），文件夹排在它的内容前面，最多 1 万项（文件与文件夹合计）。
+粘贴方落盘前必须 `ClipOffer::validate`：只接受安全的相对路径（没有空段、`.`、`..`、反斜杠、NUL），父文件夹在前，不能写出粘贴目标目录。
+
+**本机复制 → 远端粘贴**（被控端能力列表有 `clipboard_offer`）：
+1. 主控端把本机复制的文件展开成清单，`MgmtReq::ClipboardOffer(offer)`（需要剪贴板与文件权限）。被控端校验后交给平台层延迟放进系统剪贴板，应答 `Ok`。
+2. 有人粘贴时，被控端向主控端**开反向流**（被控端 `open_bi`，主控端内核一直在 `accept_bi`），第一帧
+   `ReverseOpen::ClipboardRead { offer_id, index, offset }`；主控端回 `ClipReadReply::Ok { size }`（文件现在的大小）或 `Error`，
+   是 Ok 时接着发原始字节（不分帧）到文件末尾并结束流。被控端中途不要了就 stop 这条流。
+   主控端只认本会话最近 4 份清单里的文件项，别的一律拒绝。
+3. 没有 `clipboard_offer` 能力的老被控端：主控端照旧把文件整批上传到 `~/.lemon-galaxy/clipboard/<毫秒时间戳>-<随机数>/` 再 `ClipboardSet(Files)`。
+
+**远端复制 → 本机粘贴**（不需要新消息，老被控端也行）：鼠标进入画面时 `ClipboardGet` 得到 `Files[远端路径]`，
+主控端用 `fs_stat` / `fs_list` 展开成清单（不下载），放进本机剪贴板；粘贴时按项用 `FileOp::Read { offset }` 读。
+
+**各平台的粘贴方做法**（粘贴方是被控端或主控端都一样）：
+- Windows：OLE 数据对象 `CFSTR_FILEDESCRIPTORW` + `CFSTR_FILECONTENTS`（按项给 IStream，读时才取数据），带 `FD_PROGRESSUI`；
+  资源管理器按 Ctrl+V、右键粘贴都显示它自己的「正在复制」进度框。
+- Linux：FUSE 虚拟目录 `$XDG_RUNTIME_DIR/lemon-galaxy/clip/<清单 id>/…`，剪贴板给 `text/uri-list` 与 `x-special/gnome-copied-files`（copy）指向它，
+  文件管理器复制时才读，显示它自己的进度；没有 FUSE（没有 /dev/fuse 或 fusermount3）时，粘贴请求到来时先下载到暂存目录（自己发进度通知）再给路径。
+- macOS（访达不支持从剪贴板延迟粘贴）：照 UU 的做法，剪贴板里放一个隐藏的 0 字节标记文件 `.lemongalaxy-paste-<清单 id 十六进制>`（public.file-url）；
+  用 FSEvents 盯全盘，访达在哪个文件夹粘贴，标记文件就出现在哪里：删掉标记，在那个文件夹弹出仿访达的「正在将 N 个项目拷贝到 “xxx”」进度窗口开始传，可取消；
+  同名按访达的规则加「 2」。粘贴到桌面、文稿、下载等受保护文件夹时系统会问一次是否允许访问。
+- 安卓、iOS 主控端不做文件剪贴板。
+- 平台层自己放上去的清单不当成「远端复制了文件」：`ClipboardGet` 不返回指向自己虚拟目录或标记文件的路径，免得来回传。
+- 被控端在剪贴板管理请求里把文件路径与协议格式互转（Windows `C:\x` ↔ `/C:/x`），文件类剪贴板要同时有剪贴板与文件权限。
 
 ### 8.5 声音
 

@@ -501,8 +501,26 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             platform.clipboard_set(d);
             MgmtResp::Ok
         }
-        // 复制粘贴文件（粘贴时才传，docs/protocol.md 8.4.1）：平台层还没接上，先拒绝（不报 clipboard_offer 能力的被控端主控端不会发）
-        MgmtReq::ClipboardOffer(_) => MgmtResp::Error(PeerError::new("unsupported", "这台设备还不支持粘贴时才传文件")),
+        // 复制粘贴文件（粘贴时才传，docs/protocol.md 8.4.1）：清单交给平台层延迟放进剪贴板，有人粘贴时经反向流读内容
+        MgmtReq::ClipboardOffer(offer) => {
+            if !p.clipboard {
+                return MgmtResp::Error(denied("没有剪贴板权限"));
+            }
+            if !p.files {
+                return MgmtResp::Error(denied("没有文件权限"));
+            }
+            if let Err(e) = offer.validate() {
+                return MgmtResp::Error(PeerError::new("bad_path", e));
+            }
+            let source: Arc<dyn crate::clipoffer::ClipSource> = Arc::new(crate::clipoffer::QuicClipSource::new(sess.conn.clone(), offer.id, tokio::runtime::Handle::current()));
+            let sid = sess.info.read().id.clone();
+            host.log(&sid, &sess.from_user_name, "clipboard", &format!("复制了 {} 项（{} 字节），等对方粘贴", offer.entries.len(), offer.total_bytes()), false);
+            match tokio::task::spawn_blocking(move || platform.clipboard_set_offer(offer, source)).await {
+                Ok(Ok(())) => MgmtResp::Ok,
+                Ok(Err(e)) => MgmtResp::Error(PeerError::new("unsupported", e)),
+                Err(e) => MgmtResp::Error(PeerError::new("internal", e.to_string())),
+            }
+        }
         MgmtReq::WakeOnLan { mac } => {
             if !p.control && !p.terminal {
                 return MgmtResp::Error(denied("没有权限"));

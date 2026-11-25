@@ -1,6 +1,6 @@
 //! 平台能力钩子：截屏编码、输入注入、剪贴板、控件树。由各端原生层实现（macOS Swift、Windows Win32）。
 
-use galaxy_proto::peer::{ClipboardData, DisplayInfo, ImageData, InputEvent, VideoCodec};
+use galaxy_proto::peer::{ClipOffer, ClipboardData, DisplayInfo, ImageData, InputEvent, VideoCodec};
 use std::sync::Arc;
 
 /// 平台层编码好一帧后推给内核。
@@ -47,6 +47,12 @@ pub trait HostPlatform: Send + Sync {
         None
     }
     fn clipboard_set(&self, _d: ClipboardData) {}
+    /// 复制粘贴文件（docs/protocol.md 8.4.1）：把主控端复制的文件清单延迟放进本机剪贴板，有人粘贴时才经 `source` 读内容
+    /// （读要在普通线程里，不能在异步运行时线程里）。清单内核已校验过。支持的平台在能力里报 "clipboard_offer"。
+    /// 在阻塞线程里调用。之后剪贴板换了内容，平台层丢掉这份清单即可。
+    fn clipboard_set_offer(&self, _offer: ClipOffer, _source: Arc<dyn crate::clipoffer::ClipSource>) -> Result<(), String> {
+        Err("此设备不支持粘贴时才传文件".into())
+    }
     /// 隐私屏开关。返回是否支持（不支持时什么也不做）。
     fn set_privacy(&self, _on: bool) -> bool {
         false
@@ -99,18 +105,36 @@ pub trait HostPlatform: Send + Sync {
 pub struct NoPlatform;
 impl HostPlatform for NoPlatform {}
 
-/// 端到端测试用：没有画面，只有一路 440 Hz 测试音（环境变量 LEMON_GALAXY_TEST_TONE=1 时 Linux 被控端使用）。
+/// 端到端测试用（环境变量 LEMON_GALAXY_TEST_TONE=1 时 Linux 被控端使用）：没有画面，只有一路 440 Hz 测试音；
+/// 另设 LEMON_GALAXY_TEST_CLIP_DIR 时，收到剪贴板文件清单立刻「粘贴」进那个目录（见 clipoffer::test_paste）。
 #[derive(Default)]
-pub struct TonePlatform(crate::audio::ToneSource);
-impl HostPlatform for TonePlatform {
+pub struct TestPlatform {
+    tone: crate::audio::ToneSource,
+    clip_dir: Option<std::path::PathBuf>,
+}
+impl TestPlatform {
+    pub fn from_env() -> Self {
+        Self { tone: Default::default(), clip_dir: std::env::var_os("LEMON_GALAXY_TEST_CLIP_DIR").map(Into::into) }
+    }
+}
+impl HostPlatform for TestPlatform {
     fn start_audio(&self, sink: Arc<dyn crate::audio::AudioSink>) -> Result<(), String> {
-        self.0.start(sink);
+        self.tone.start(sink);
         Ok(())
     }
     fn stop_audio(&self) {
-        self.0.stop()
+        self.tone.stop()
+    }
+    fn clipboard_set_offer(&self, offer: ClipOffer, source: Arc<dyn crate::clipoffer::ClipSource>) -> Result<(), String> {
+        let dir = self.clip_dir.clone().ok_or("没有设 LEMON_GALAXY_TEST_CLIP_DIR")?;
+        crate::clipoffer::test_paste(offer, source, dir);
+        Ok(())
     }
     fn capabilities(&self) -> Vec<String> {
-        vec!["audio".into()]
+        let mut c = vec!["audio".to_string()];
+        if self.clip_dir.is_some() {
+            c.extend(["clipboard".to_string(), galaxy_proto::peer::CAP_CLIPBOARD_OFFER.to_string()]);
+        }
+        c
     }
 }

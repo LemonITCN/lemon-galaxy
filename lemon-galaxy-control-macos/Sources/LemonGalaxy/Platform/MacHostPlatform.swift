@@ -247,6 +247,9 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
         return nil
     }
 
+    /// 粘贴时才传文件（docs/protocol.md 8.4.1）：macOS 的标记文件 + 进度窗口做法还没接上，暂不报 "clipboard_offer"，主控端照旧整批推送
+    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? { "这台 Mac 暂不支持粘贴时才传文件" }
+
     func clipboardSet(data: ClipboardData) {
         let pb = NSPasteboard.general
         pb.clearContents()

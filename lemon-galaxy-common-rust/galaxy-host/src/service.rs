@@ -824,6 +824,10 @@ impl HostService {
         if perms.clipboard && pc.iter().any(|x| x == "clipboard") {
             c.push("clipboard".into());
         }
+        // 粘贴时才传文件：剪贴板与文件权限都要有
+        if perms.clipboard && perms.files && pc.iter().any(|x| x == galaxy_proto::peer::CAP_CLIPBOARD_OFFER) {
+            c.push(galaxy_proto::peer::CAP_CLIPBOARD_OFFER.into());
+        }
         c
     }
 

@@ -534,6 +534,34 @@ impl From<ClipboardData> for p::peer::ClipboardData {
     }
 }
 
+/// 剪贴板文件清单的一项（docs/protocol.md 8.4.1）：`path` 是 '/' 分隔的相对路径，顶层项没有 '/'，文件夹排在内容前面。
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct ClipOfferEntry {
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    /// 修改时间（Unix 秒，不知道时为 0）
+    pub mtime: i64,
+}
+
+/// 剪贴板文件清单：复制时只交换这个，粘贴时才按项读内容。
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct ClipOfferInfo {
+    pub id: u64,
+    pub entries: Vec<ClipOfferEntry>,
+    pub total_bytes: u64,
+}
+
+impl From<&p::peer::ClipOffer> for ClipOfferInfo {
+    fn from(o: &p::peer::ClipOffer) -> Self {
+        Self {
+            id: o.id,
+            total_bytes: o.total_bytes(),
+            entries: o.entries.iter().map(|e| ClipOfferEntry { path: e.path.clone(), is_dir: e.is_dir, size: e.size, mtime: e.mtime }).collect(),
+        }
+    }
+}
+
 /// 鼠标按键（避免与 InputEvent 的变体同名）。
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PointerButton {

@@ -652,6 +652,7 @@ final class FakePlatform: HostPlatform, @unchecked Sendable {
     }
     func clipboardGet() -> ClipboardData? { clipboard }
     func clipboardSet(data: ClipboardData) { clipboard = data }
+    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? { "不支持" }
     func setPrivacy(on: Bool) -> Bool { lock.locked { _privacy = on }; return true }
 
     func startAudio(sink: AudioPcmSink) -> Bool {

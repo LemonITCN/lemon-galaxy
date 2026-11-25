@@ -86,6 +86,12 @@ impl hp::HostPlatform for PlatformBridge {
     fn clipboard_set(&self, d: pp::ClipboardData) {
         self.0.clipboard_set(d.into())
     }
+    fn clipboard_set_offer(&self, offer: pp::ClipOffer, source: Arc<dyn galaxy_host::clipoffer::ClipSource>) -> std::result::Result<(), String> {
+        match self.0.clipboard_set_offer((&offer).into(), Arc::new(ClipSource { inner: source })) {
+            None => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
     fn set_privacy(&self, on: bool) -> bool {
         self.0.set_privacy(on)
     }
@@ -336,4 +342,19 @@ fn accounts_of(h: &galaxy_host::HostService) -> Vec<HostAccount> {
             policy: a.policy.into(),
         })
         .collect()
+}
+
+/// 主控端剪贴板文件清单的内容来源（被控端平台层粘贴时用）。
+#[derive(uniffi::Object)]
+pub struct ClipSource {
+    inner: Arc<dyn galaxy_host::clipoffer::ClipSource>,
+}
+
+#[uniffi::export]
+impl ClipSource {
+    /// 打开清单第 `index` 项（文件）从 `offset` 读到末尾。会阻塞到主控端应答：在后台线程里调用。
+    pub fn open(&self, index: u32, offset: u64) -> Result<Arc<crate::session::ClipReader>> {
+        let (size, r) = self.inner.open(index, offset).map_err(|detail| crate::GalaxyError::Other { detail })?;
+        Ok(crate::session::ClipReader::new(size, r))
+    }
 }

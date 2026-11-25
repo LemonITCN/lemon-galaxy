@@ -71,6 +71,9 @@ pub trait HostPlatform: Send + Sync {
     fn computer_use(&self, request_json: String) -> Option<ComputerUseReply>;
     fn clipboard_get(&self) -> Option<ClipboardData>;
     fn clipboard_set(&self, data: ClipboardData);
+    /// 复制粘贴文件（docs/protocol.md 8.4.1）：主控端复制的文件清单，延迟放进本机剪贴板，有人粘贴时才用 `source` 按项读。
+    /// 清单内核已校验过。成功返回 None，不支持或失败返回原因。支持时在 capabilities 里报 "clipboard_offer"。
+    fn clipboard_set_offer(&self, offer: ClipOfferInfo, source: std::sync::Arc<crate::host::ClipSource>) -> Option<String>;
     /// 隐私屏：本机屏幕黑掉、本地键鼠失效，远端照常看到和操作。返回是否做到了（不支持返回 false）。
     fn set_privacy(&self, on: bool) -> bool;
     /// 开始采集系统声音，样本推给 `sink`；不支持或没授权返回 false。同一时间只有一路。

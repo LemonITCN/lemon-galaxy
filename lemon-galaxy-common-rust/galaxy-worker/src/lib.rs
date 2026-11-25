@@ -585,7 +585,7 @@ fn civil(z: i64) -> (i64, u32, u32) {
 /// 平台层：系统自带的；端到端测试时（LEMON_GALAXY_TEST_TONE=1）换成只有一路测试音的平台层。
 fn platform_for(os: &dyn WorkerOs) -> Option<Arc<dyn galaxy_host::platform::HostPlatform>> {
     if std::env::var("LEMON_GALAXY_TEST_TONE").is_ok_and(|v| v == "1") {
-        return Some(Arc::new(galaxy_host::platform::TonePlatform::default()));
+        return Some(Arc::new(galaxy_host::platform::TestPlatform::from_env()));
     }
     os.host_platform()
 }

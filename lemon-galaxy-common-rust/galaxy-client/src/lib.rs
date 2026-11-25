@@ -3,6 +3,7 @@
 pub mod account;
 pub mod audio;
 pub mod clipfiles;
+pub mod clipoffer;
 #[cfg(all(feature = "playback", not(target_os = "linux")))]
 pub mod playback;
 /// Linux 上没有声音输出（不是主控端平台），保留同样的接口，打开时报不支持。

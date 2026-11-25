@@ -290,6 +290,52 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+                // 复制粘贴文件（粘贴时才传，docs/protocol.md 8.4.1）
+                // clip-offer <设备> <等几秒> <本机路径…>：只发清单，会话留着让对方粘贴时来读
+                "clip-offer" => {
+                    let wait: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
+                    let paths: Vec<std::path::PathBuf> = args[3..].iter().map(std::path::PathBuf::from).collect();
+                    let offer = session.clipboard_offer_files(&paths).await?;
+                    println!("已发清单：{} 项，{} 字节", offer.entries.len(), offer.total_bytes());
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                }
+                // clip-pull <设备> <本机目录> <远端路径…>：远端路径展开成清单（不下载），再逐项读进本机目录（模拟本机粘贴），
+                // 并从第一个够大的文件中间续读一次核对
+                "clip-pull" => {
+                    let dir = std::path::PathBuf::from(&args[2]);
+                    let remotes: Vec<String> = args[3..].to_vec();
+                    let ro = Arc::new(galaxy_client::clipoffer::remote_offer(&session, &remotes).await?);
+                    println!("远端清单：{} 项，{} 字节", ro.offer.entries.len(), ro.offer.total_bytes());
+                    let (rt, s2, ro2) = (tokio::runtime::Handle::current(), session.clone(), ro.clone());
+                    let n = tokio::task::spawn_blocking(move || -> Result<u64, String> {
+                        use std::io::Read;
+                        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                        let mut bytes = 0u64;
+                        for (i, e) in ro2.offer.entries.iter().enumerate() {
+                            let p = dir.join(&e.path);
+                            if e.is_dir {
+                                std::fs::create_dir_all(&p).map_err(|x| x.to_string())?;
+                                continue;
+                            }
+                            let (_, mut r) = ro2.open(&rt, s2.clone(), i as u32, 0)?;
+                            let mut f = std::fs::File::create(&p).map_err(|x| x.to_string())?;
+                            bytes += std::io::copy(&mut r, &mut f).map_err(|x| x.to_string())?;
+                        }
+                        if let Some((i, e)) = ro2.offer.entries.iter().enumerate().find(|(_, e)| !e.is_dir && e.size >= 2) {
+                            let (_, mut r) = ro2.open(&rt, s2.clone(), i as u32, e.size / 2)?;
+                            let mut tail = vec![];
+                            r.read_to_end(&mut tail).map_err(|x| x.to_string())?;
+                            let full = std::fs::read(dir.join(&e.path)).map_err(|x| x.to_string())?;
+                            if full[(e.size / 2) as usize..] != tail[..] {
+                                return Err("从中间读到的内容不对".into());
+                            }
+                        }
+                        Ok(bytes)
+                    })
+                    .await?
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                    println!("已粘贴到本机：{n} 字节");
+                }
                 "type" => {
                     use galaxy_proto::peer::{InputEvent, MouseButton};
                     let display: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -334,16 +380,6 @@ async fn main() -> anyhow::Result<()> {
                     for r in remote {
                         println!("远端：{r}");
                     }
-                }
-                "clip-pull" => {
-                    struct P;
-                    impl TransferProgress for P {
-                        fn on_progress(&self, _d: u64, _t: u64) {}
-                        fn on_finished(&self, _e: Option<String>) {}
-                    }
-                    let (_tx, rx) = tokio::sync::watch::channel(false);
-                    let got = galaxy_client::clipfiles::pull(&session, &args[3..], Path::new(&args[2]), Arc::new(P), rx).await?;
-                    println!("已取回 {} 项", got.len());
                 }
                 "audio-test" => {
                     let secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);

@@ -190,6 +190,58 @@ public struct CaptureStarted: Equatable, Hashable {
 extension CaptureStarted: Sendable {}
 #endif
 
+public struct ClipOfferEntry: Equatable, Hashable {
+    public var path: String
+    public var isDir: Bool
+    public var size: UInt64
+    /**
+     * 修改时间（Unix 秒，不知道时为 0）
+     */
+    public var mtime: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, isDir: Bool, size: UInt64, 
+        /**
+         * 修改时间（Unix 秒，不知道时为 0）
+         */mtime: Int64) {
+        self.path = path
+        self.isDir = isDir
+        self.size = size
+        self.mtime = mtime
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ClipOfferEntry: Sendable {}
+#endif
+
+public struct ClipOfferInfo: Equatable, Hashable {
+    public var id: UInt64
+    public var entries: [ClipOfferEntry]
+    public var totalBytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: UInt64, entries: [ClipOfferEntry], totalBytes: UInt64) {
+        self.id = id
+        self.entries = entries
+        self.totalBytes = totalBytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ClipOfferInfo: Sendable {}
+#endif
+
 public struct ComputerUseReply: Equatable, Hashable {
     public var text: String
     public var image: ImageData?
@@ -2026,6 +2078,31 @@ public protocol ClientListener: AnyObject, Sendable {
     
 }
 
+public protocol ClipReaderProtocol: AnyObject, Sendable {
+    
+    func close() 
+    
+    /**
+     * 读最多 `max` 字节；返回空表示读完了。出错（断线、对方取消）报错。
+     */
+    func read(max: UInt32) throws  -> Data
+    
+    /**
+     * 文件现在的大小（可能和清单里的不同：复制后文件又变了）
+     */
+    func size()  -> UInt64
+    
+}
+
+public protocol ClipSourceProtocol: AnyObject, Sendable {
+    
+    /**
+     * 打开清单第 `index` 项（文件）从 `offset` 读到末尾。会阻塞到主控端应答：在后台线程里调用。
+     */
+    func `open`(index: UInt32, offset: UInt64) throws  -> ClipReader
+    
+}
+
 public protocol ClipboardTransferProtocol: AnyObject, Sendable {
     
     func cancel() 
@@ -2305,6 +2382,12 @@ public protocol HostPlatform: AnyObject, Sendable {
     func clipboardSet(data: ClipboardData) 
     
     /**
+     * 复制粘贴文件（docs/protocol.md 8.4.1）：主控端复制的文件清单，延迟放进本机剪贴板，有人粘贴时才用 `source` 按项读。
+     * 清单内核已校验过。成功返回 None，不支持或失败返回原因。支持时在 capabilities 里报 "clipboard_offer"。
+     */
+    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource)  -> String?
+    
+    /**
      * 隐私屏：本机屏幕黑掉、本地键鼠失效，远端照常看到和操作。返回是否做到了（不支持返回 false）。
      */
     func setPrivacy(on: Bool)  -> Bool
@@ -2430,6 +2513,13 @@ public protocol PeerSessionProtocol: AnyObject, Sendable {
     func clipboardGet() async throws  -> ClipboardData?
     
     /**
+     * 复制粘贴文件，本机复制 → 远端粘贴（docs/protocol.md 8.4.1）：把本机复制的文件 / 文件夹展开成清单放到被控端剪贴板，
+     * 只发清单，对方粘贴时才经反向流来读（内核自己应答，界面不用管）。被控端能力列表要有 "clipboard_offer"，
+     * 没有时改用 clipboard_push_files。需要剪贴板与文件权限。
+     */
+    func clipboardOfferFiles(localPaths: [String]) async throws  -> ClipOfferInfo
+    
+    /**
      * 复制粘贴文件（远端 → 本机）：把远端剪贴板里的文件（clipboard_get 得到的路径）下载到 `local_dir`。
      * 完成后 ClipboardTransfer.paths() 是本机上的顶层路径，界面把本机剪贴板设成它们。
      */
@@ -2440,6 +2530,12 @@ public protocol PeerSessionProtocol: AnyObject, Sendable {
      * 进度与结果经 listener；超过 4 GB 或 1 万个文件时报错（请改用文件管理）。需要剪贴板与文件权限。
      */
     func clipboardPushFiles(localPaths: [String], listener: TransferListener)  -> ClipboardTransfer
+    
+    /**
+     * 复制粘贴文件，远端复制 → 本机粘贴：把远端剪贴板里的文件（clipboard_get 的 Files）展开成清单，不下载内容。
+     * 本机有人粘贴时用返回对象的 open 按项读（老被控端也行，用的是文件读取）。需要文件权限。
+     */
+    func clipboardRemoteOffer(remotePaths: [String]) async throws  -> RemoteClipOffer
     
     func clipboardSet(data: ClipboardData) async throws 
     
@@ -2503,6 +2599,17 @@ public protocol PortForwardProtocol: AnyObject, Sendable {
     func localPort()  -> UInt16
     
     func stop() 
+    
+}
+
+public protocol RemoteClipOfferProtocol: AnyObject, Sendable {
+    
+    func info()  -> ClipOfferInfo
+    
+    /**
+     * 打开第 `index` 项（文件）从 `offset` 读到末尾。会阻塞到对方应答：在后台线程里调用，不要在主线程。
+     */
+    func `open`(index: UInt32, offset: UInt64) throws  -> ClipReader
     
 }
 
@@ -2727,6 +2834,22 @@ open class AudioPlayback: AudioPlaybackProtocol, @unchecked Sendable {
     open func stop() { bridgeUnimplemented() }
 }
 
+open class ClipReader: ClipReaderProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func close() { bridgeUnimplemented() }
+    open func read(max: UInt32) throws  -> Data { bridgeUnimplemented() }
+    open func size()  -> UInt64 { bridgeUnimplemented() }
+}
+
+open class ClipSource: ClipSourceProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func `open`(index: UInt32, offset: UInt64) throws  -> ClipReader { bridgeUnimplemented() }
+}
+
 open class ClipboardTransfer: ClipboardTransferProtocol, @unchecked Sendable {
     public struct NoHandle { public init() {} }
     public init(noHandle: NoHandle) {}
@@ -2849,8 +2972,10 @@ open class PeerSession: PeerSessionProtocol, @unchecked Sendable {
     required public init(unsafeFromHandle handle: UInt64) {}
     open func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32) async throws  -> DisplayInfo { bridgeUnimplemented() }
     open func clipboardGet() async throws  -> ClipboardData? { bridgeUnimplemented() }
+    open func clipboardOfferFiles(localPaths: [String]) async throws  -> ClipOfferInfo { bridgeUnimplemented() }
     open func clipboardPullFiles(remotePaths: [String], localDir: String, listener: TransferListener)  -> ClipboardTransfer { bridgeUnimplemented() }
     open func clipboardPushFiles(localPaths: [String], listener: TransferListener)  -> ClipboardTransfer { bridgeUnimplemented() }
+    open func clipboardRemoteOffer(remotePaths: [String]) async throws  -> RemoteClipOffer { bridgeUnimplemented() }
     open func clipboardSet(data: ClipboardData) async throws { bridgeUnimplemented() }
     open func disconnect() { bridgeUnimplemented() }
     open func exec(request: ExecRequest) async throws  -> ExecResult { bridgeUnimplemented() }
@@ -2879,6 +3004,14 @@ open class PortForward: PortForwardProtocol, @unchecked Sendable {
     required public init(unsafeFromHandle handle: UInt64) {}
     open func localPort()  -> UInt16 { bridgeUnimplemented() }
     open func stop() { bridgeUnimplemented() }
+}
+
+open class RemoteClipOffer: RemoteClipOfferProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func info()  -> ClipOfferInfo { bridgeUnimplemented() }
+    open func `open`(index: UInt32, offset: UInt64) throws  -> ClipReader { bridgeUnimplemented() }
 }
 
 open class SshSession: SshSessionProtocol, @unchecked Sendable {

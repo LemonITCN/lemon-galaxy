@@ -255,6 +255,86 @@ impl PeerSession {
         let s = self.inner.clone();
         run(async move { s.mgmt(pp::MgmtReq::WakeOnLan { mac }).await.map(|_| ()).map_err(Into::into) }).await
     }
+
+    /// 复制粘贴文件，本机复制 → 远端粘贴（docs/protocol.md 8.4.1）：把本机复制的文件 / 文件夹展开成清单放到被控端剪贴板，
+    /// 只发清单，对方粘贴时才经反向流来读（内核自己应答，界面不用管）。被控端能力列表要有 "clipboard_offer"，
+    /// 没有时改用 clipboard_push_files。需要剪贴板与文件权限。
+    pub async fn clipboard_offer_files(&self, local_paths: Vec<String>) -> Result<ClipOfferInfo> {
+        let s = self.inner.clone();
+        run(async move {
+            let paths: Vec<std::path::PathBuf> = local_paths.into_iter().map(std::path::PathBuf::from).collect();
+            let o = s.clipboard_offer_files(&paths).await?;
+            Ok((&o).into())
+        })
+        .await
+    }
+
+    /// 复制粘贴文件，远端复制 → 本机粘贴：把远端剪贴板里的文件（clipboard_get 的 Files）展开成清单，不下载内容。
+    /// 本机有人粘贴时用返回对象的 open 按项读（老被控端也行，用的是文件读取）。需要文件权限。
+    pub async fn clipboard_remote_offer(&self, remote_paths: Vec<String>) -> Result<Arc<RemoteClipOffer>> {
+        let s = self.inner.clone();
+        run(async move {
+            let o = galaxy_client::clipoffer::remote_offer(&s, &remote_paths).await?;
+            Ok(Arc::new(RemoteClipOffer { info: (&o.offer).into(), inner: o, session: s }))
+        })
+        .await
+    }
+}
+
+/// 远端剪贴板里文件的清单（clipboard_remote_offer）。
+#[derive(uniffi::Object)]
+pub struct RemoteClipOffer {
+    inner: galaxy_client::clipoffer::RemoteOffer,
+    info: ClipOfferInfo,
+    session: Arc<cs::PeerSession>,
+}
+
+#[uniffi::export]
+impl RemoteClipOffer {
+    pub fn info(&self) -> ClipOfferInfo {
+        self.info.clone()
+    }
+
+    /// 打开第 `index` 项（文件）从 `offset` 读到末尾。会阻塞到对方应答：在后台线程里调用，不要在主线程。
+    pub fn open(&self, index: u32, offset: u64) -> Result<Arc<ClipReader>> {
+        let (size, r) = self.inner.open(rt().handle(), self.session.clone(), index, offset).map_err(|detail| GalaxyError::Other { detail })?;
+        Ok(ClipReader::new(size, Box::new(r)))
+    }
+}
+
+/// 剪贴板文件的读取器（粘贴时用）：`read` 会阻塞，在后台线程里调用；丢掉或 close 即取消。
+#[derive(uniffi::Object)]
+pub struct ClipReader {
+    size: u64,
+    inner: Mutex<Option<Box<dyn std::io::Read + Send>>>,
+}
+
+impl ClipReader {
+    pub(crate) fn new(size: u64, r: Box<dyn std::io::Read + Send>) -> Arc<Self> {
+        Arc::new(Self { size, inner: Mutex::new(Some(r)) })
+    }
+}
+
+#[uniffi::export]
+impl ClipReader {
+    /// 文件现在的大小（可能和清单里的不同：复制后文件又变了）
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// 读最多 `max` 字节；返回空表示读完了。出错（断线、对方取消）报错。
+    pub fn read(&self, max: u32) -> Result<Vec<u8>> {
+        let mut g = self.inner.lock();
+        let Some(r) = g.as_mut() else { return Ok(vec![]) };
+        let mut buf = vec![0u8; max.clamp(1, 4 << 20) as usize];
+        let n = r.read(&mut buf).map_err(|e| GalaxyError::Network { detail: e.to_string() })?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+
+    pub fn close(&self) {
+        self.inner.lock().take();
+    }
 }
 
 // ---------------- 终端 ----------------

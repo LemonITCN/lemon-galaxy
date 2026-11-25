@@ -63,6 +63,8 @@ pub struct PeerSession {
     video: Mutex<HashMap<u8, mpsc::Sender<Bytes>>>,
     /// 正在录像时，收到的声音包也写进录像
     audio_rec: Mutex<Option<std::sync::Weak<crate::record::Recorder>>>,
+    /// 本会话发给被控端的剪贴板文件清单（对方粘贴时经反向流来读，docs/protocol.md 8.4.1）
+    pub(crate) clip_offers: crate::clipoffer::LocalOffers,
     ms: Arc<MagicSock>,
     _peer: Arc<Peer>,
 }
@@ -91,6 +93,7 @@ impl PeerSession {
             signal,
             video: Default::default(),
             audio_rec: Default::default(),
+            clip_offers: Default::default(),
             ms,
             _peer: peer,
         });
@@ -106,6 +109,17 @@ impl PeerSession {
                         let _ = tx.try_send(d);
                     }
                 }
+            }
+        });
+        // 被控端开来的反向流：对方粘贴时读本会话剪贴板清单里的文件（docs/protocol.md 8.4.1）
+        let weak = Arc::downgrade(&me);
+        let conn = me.conn.clone();
+        tokio::spawn(async move {
+            while let Ok((send, recv)) = conn.accept_bi().await {
+                let Some(me) = weak.upgrade() else { break };
+                tokio::spawn(async move {
+                    let _ = crate::clipoffer::serve_reverse(me, send, recv).await;
+                });
             }
         });
         // 路径变化上报服务器（用于后台展示）

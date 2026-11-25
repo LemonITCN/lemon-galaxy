@@ -42,7 +42,8 @@ for i in 1 2 3; do
   [ "$i" = 3 ] && fail "被控端登录失败"
   sleep 1
 done
-LEMON_GALAXY_TEST_TONE=1 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" run >"$WORK/worker.log" 2>&1 &
+# 测试平台：一路测试音；收到剪贴板文件清单时立刻「粘贴」进 $WORK/pasted（见 galaxy-host clipoffer::test_paste）
+LEMON_GALAXY_TEST_TONE=1 LEMON_GALAXY_TEST_CLIP_DIR="$WORK/pasted" "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" run >"$WORK/worker.log" 2>&1 &
 WPID=$!
 PIDS+=($WPID)
 sleep 2
@@ -97,6 +98,15 @@ while IFS= read -r line; do REMOTES+=("$line"); done < <(echo "$PUSH" | sed -n '
 timeout 120 "$BIN/galaxy-dev" --data "$WORK/ctl" clip-pull "" "$WORK/clipback" "${REMOTES[@]}" 2>&1 | grep -v -E 'INFO|DEBUG' | tail -1
 diff -r "$WORK/clip" "$WORK/clipback" || fail "取回的内容与原文件不一致"
 echo "复制粘贴文件往返一致"
+
+step "复制粘贴文件（粘贴时才传：主控端只发清单，被控端粘贴时经反向流来读，含从中间续读）"
+timeout 120 "$BIN/galaxy-dev" --data "$WORK/ctl" clip-offer "" 8 "$WORK/clip/目录 A" "$WORK/clip/顶层.txt" 2>&1 | grep -v -E 'INFO|DEBUG' | tail -1
+for i in $(seq 1 60); do [ -f "$WORK/pasted/.lg-clip-result" ] && break; sleep 0.5; done
+RES="$(cat "$WORK/pasted/.lg-clip-result" 2>/dev/null || echo 没有结果)"
+echo "被控端粘贴结果：$RES"
+echo "$RES" | grep -q '^ok 2$' || fail "被控端粘贴失败：$RES"
+diff -r -x .lg-clip-result "$WORK/clip" "$WORK/pasted" || fail "被控端粘贴出的内容与原文件不一致"
+echo "粘贴时才传：内容一致"
 # 被控端就是本机当前用户：清掉写进家目录的暂存
 STAGE="${REMOTES[0]%/*}"
 [ "$WIN" = 1 ] && STAGE="$(cygpath -u "${STAGE#/}")"

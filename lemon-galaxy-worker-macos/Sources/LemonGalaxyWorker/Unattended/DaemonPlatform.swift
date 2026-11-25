@@ -294,6 +294,8 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
     }
 
     func clipboardSet(data: ClipboardData) { notifyActive(IPCMethod.clipboardSet, PClipboard(data: data)) }
+    /// 粘贴时才传文件：无人值守还没接上（要把读请求经会话代理转给用户会话），暂不报 "clipboard_offer"
+    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? { "这台 Mac 暂不支持粘贴时才传文件" }
 
     func setPrivacy(on: Bool) -> Bool {
         let ok = setPrivacyOnActive(on)

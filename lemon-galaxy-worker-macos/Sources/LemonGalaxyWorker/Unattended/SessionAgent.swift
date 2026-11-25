@@ -545,6 +545,7 @@ final class AgentPlatform: HostPlatform, @unchecked Sendable {
     }
     func clipboardGet() -> ClipboardData? { mac.clipboardGet() }
     func clipboardSet(data: ClipboardData) { mac.clipboardSet(data: data) }
+    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? { mac.clipboardSetOffer(offer: offer, source: source) }
     func setPrivacy(on: Bool) -> Bool {
         if loginWindow { return !on }
         if on { AgentAppKit.ensure(mac) }
