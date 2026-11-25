@@ -77,6 +77,7 @@ final class MockDisplayChannel: DisplayChannel, @unchecked Sendable {
             case .text(let t):
                 self.renderer.typed += t
             case .key(let usage, let down):
+                MockTimeline.add("key:\(usage):\(down ? "down" : "up")")
                 if down, usage == 0x2A, !self.renderer.typed.isEmpty { self.renderer.typed.removeLast() }
                 if down, usage == 0x28 { self.renderer.typed += "\n" }
             case .wheel, .specialCombo, .touch:

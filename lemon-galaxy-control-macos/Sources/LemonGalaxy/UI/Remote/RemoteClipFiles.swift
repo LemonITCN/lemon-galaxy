@@ -1,24 +1,22 @@
 import SwiftUI
 import AppKit
 
-// 远程桌面里的复制粘贴文件（protocol.md 8.4.1）：本机剪贴板里的文件经内核传到对方暂存区并设成对方剪贴板；
-// 对方剪贴板里的文件下载到本机缓存目录再放进本机剪贴板。这里是剪贴板读写、缓存目录、进度回调与进度条视图。
+// 远程桌面里的复制粘贴文件（protocol.md 8.4.1）：复制时只交换清单，粘贴时才传。
+// 本机复制 → 对方：被控端支持（clipboard_offer）时只发清单，进度在对方粘贴的那边；老被控端整批传到对方暂存区，画面上方显示进度条。
+// 对方复制 → 本机：展开成清单放进本机剪贴板（标记文件），在访达里粘贴时才读，进度窗口见 Platform/LazyFilePaste.swift。
+// 这里是剪贴板读写、旧缓存目录清理、进度回调与进度条视图（整批推送与出错提示）。
 
 /// 剪贴板与缓存目录（selftest 换成私有剪贴板与临时目录，不碰用户的）
 enum ClipboardFiles {
     static var pasteboardOverride: NSPasteboard?
-    static var pasteboard: NSPasteboard { pasteboardOverride ?? .general }
+    /// 与粘贴时才传共用同一个剪贴板（LazyPaste.shared.pasteboard，selftest 两边一起换）
+    static var pasteboard: NSPasteboard { pasteboardOverride ?? LazyPaste.shared.pasteboard }
 
     static var cacheRootOverride: URL?
-    /// ~/Library/Caches/cn.lemonit.galaxy.control/clipboard
+    /// ~/Library/Caches/cn.lemonit.galaxy.control/clipboard（以前整批下载对方文件时用，启动时清理留下的旧目录）
     static var cacheRoot: URL {
         cacheRootOverride ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("cn.lemonit.galaxy.control/clipboard", isDirectory: true)
-    }
-
-    /// 每次拉取一个新目录（<毫秒时间戳>-<随机数>），同名文件不会互相覆盖
-    static func newPullDir() -> URL {
-        cacheRoot.appendingPathComponent("\(Clock.nowMs)-\(UInt32.random(in: 0...UInt32.max) % 1_000_000)", isDirectory: true)
     }
 
     /// 删掉一天前的拉取目录（应用启动时在后台调用）
@@ -36,10 +34,10 @@ enum ClipboardFiles {
         return removed
     }
 
-    /// 剪贴板里的本机文件（访达复制的文件、文件夹）
+    /// 剪贴板里的本机文件（访达复制的文件、文件夹）；本应用自己放的标记文件不算
     static func fileURLs(on pb: NSPasteboard) -> [URL] {
         let objs = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]
-        return (objs ?? []).filter(\.isFileURL)
+        return (objs ?? []).filter { $0.isFileURL && !LazyPaste.isMarker($0) }
     }
 
     /// 把文件放进剪贴板，访达里粘贴即复制

@@ -16,9 +16,13 @@ enum SessionAgentMain {
         NSLog("LemonGalaxy 会话代理：启动（%@，用户 %@，会话 %u）", session.type.rawValue, session.userName, session.sessionId)
         // 平时不建 NSApplication：它会让本进程以应用的 Bundle ID 登记到 LaunchServices，双击应用、登录项打开的就成了代理。
         // 只有开隐私屏（要窗口）时才建，用完后空闲时退出、由 launchd 重启一个干净的（AgentAppKit）
+        // 进度窗口等界面文字跟系统语言（代理以会话的用户身份运行）
+        Localization.shared.apply(setting: "system")
         let platform = AgentPlatform(loginWindow: session.type == .loginWindow)
         let client = AgentClient(socketPath: socket, platform: platform, session: { AgentSession.current() },
                                  capabilities: { platform.capabilities() })
+        // 粘贴时才传：清单不再监视、拷贝也都结束后，用过 AppKit 的代理照常在空闲时退出重启
+        LazyPaste.shared.onIdle = { client.recycleIfIdle() }
         client.keyframe = { platform.requestKeyframe(displayId: $0) }
         client.recycleWhenIdle = { AgentAppKit.started }
         client.shouldExit = {
@@ -219,11 +223,11 @@ final class AgentClient: @unchecked Sendable {
         recycleIfIdle()
     }
 
-    /// 用过 AppKit（隐私屏）的代理在空闲时退出，launchd 随即重启一个没有登记到 LaunchServices 的。
-    /// 还有虚拟屏时不退出（屏随本进程存亡）
-    private func recycleIfIdle() {
+    /// 用过 AppKit（隐私屏、粘贴进度窗口）的代理在空闲时退出，launchd 随即重启一个没有登记到 LaunchServices 的。
+    /// 还有虚拟屏、剪贴板里还有等着粘贴的文件清单或正在拷贝时不退出（都随本进程存亡）
+    func recycleIfIdle() {
         guard recycleWhenIdle?() == true else { return }
-        let idle = lock.locked { capturing.isEmpty && !audioOn && !privacyOn } && platform.virtualDisplayIds().isEmpty
+        let idle = lock.locked { capturing.isEmpty && !audioOn && !privacyOn } && platform.virtualDisplayIds().isEmpty && !LazyPaste.shared.busy
         guard idle else { return }
         NSLog("LemonGalaxy 会话代理：隐私屏用完且空闲，退出后由 launchd 重启")
         exitHandler(true)
@@ -270,6 +274,11 @@ final class AgentClient: @unchecked Sendable {
                 }
             case IPCMethod.clipboardGet:
                 reply.ok(PClipboard(data: platform.clipboardGet()))
+            case IPCMethod.clipOffer:
+                // 主控端复制的文件清单：放进本会话的剪贴板，有人粘贴时经后台服务读内容
+                let p = try m.decode(POffer.self)
+                guard let c = lock.locked({ conn }) else { reply.fail(.other("已断开")); return }
+                reply.ok(PText(text: platform.clipboardSetOffer(offer: p.offer, source: ForwardingClipSource(offerId: p.offer.id, conn: c))))
             case IPCMethod.privacy:
                 let on = try m.decode(POn.self).on
                 let ok = platform.setPrivacy(on: on)
@@ -389,6 +398,65 @@ final class ForwardingFrameSink: EncodedFrameSink, @unchecked Sendable {
     }
 }
 
+/// 粘贴时才传：代理这边的内容来源，打开、读、关闭都转给后台服务（它手里是内核给的主控端 ClipSource）
+final class ForwardingClipSource: ClipSource, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { fatalError("转发对象不能由内核指针构造") }
+    let offerId: UInt64
+    private weak var conn: IPCConnection?
+
+    init(offerId: UInt64, conn: IPCConnection) {
+        self.offerId = offerId
+        self.conn = conn
+        super.init(noHandle: NoHandle())
+    }
+
+    /// 阻塞到主控端应答（内核那边等对方，这里多给些时间）
+    override func open(index: UInt32, offset: UInt64) throws -> ClipReader {
+        guard let c = conn, !c.isClosed else { throw GalaxyError.Network(detail: L("paste.daemonGone")) }
+        do {
+            let m = try c.call(IPCMethod.agentClipOpen, PClipOpen(offer: String(offerId, radix: 16), index: index, offset: offset), timeout: 90)
+            let r = try m.decode(PClipOpened.self)
+            return ForwardingClipReader(id: r.reader, size: r.size, conn: c)
+        } catch {
+            throw IPCFault(error).galaxyError
+        }
+    }
+}
+
+final class ForwardingClipReader: ClipReader, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { fatalError("转发对象不能由内核指针构造") }
+    private let id: UInt64
+    private let total: UInt64
+    private weak var conn: IPCConnection?
+    private let closed = OnceFlag()
+
+    init(id: UInt64, size: UInt64, conn: IPCConnection) {
+        self.id = id
+        self.total = size
+        self.conn = conn
+        super.init(noHandle: NoHandle())
+    }
+
+    deinit { close() }
+
+    override func size() -> UInt64 { total }
+
+    override func read(max: UInt32) throws -> Data {
+        guard let c = conn, !c.isClosed else { throw GalaxyError.Network(detail: L("paste.daemonGone")) }
+        do {
+            return try c.call(IPCMethod.agentClipRead, PClipRead(reader: id, max: max), timeout: 120).blob
+        } catch {
+            throw IPCFault(error).galaxyError
+        }
+    }
+
+    /// 停止或读完：后台服务那边的读取器随之关掉（正阻塞在 read 里的会报错返回）
+    override func close() {
+        guard closed.fire() else { return }
+        conn?.notify(IPCMethod.agentClipClose, PClipReader(reader: id))
+    }
+}
+
 /// 声音样本 → 后台服务（积压时丢掉，声音晚到不如不到）
 final class ForwardingAudioSink: AudioPcmSink, @unchecked Sendable {
     required init(unsafeFromHandle handle: UInt64) { fatalError("转发对象不能由内核指针构造") }
@@ -419,6 +487,11 @@ final class AgentPlatform: HostPlatform, @unchecked Sendable {
 
     init(loginWindow: Bool) {
         self.loginWindow = loginWindow
+        // 粘贴时弹进度窗口：代理平时不建 NSApplication，弹之前接上
+        if !loginWindow {
+            let mac = self.mac
+            LazyPaste.shared.prepareUI = { AgentAppKit.ensure(mac) }
+        }
     }
 
     private var screenAllowed: Bool { loginWindow || SystemPermissions.screenRecordingGranted }
@@ -545,7 +618,10 @@ final class AgentPlatform: HostPlatform, @unchecked Sendable {
     }
     func clipboardGet() -> ClipboardData? { mac.clipboardGet() }
     func clipboardSet(data: ClipboardData) { mac.clipboardSet(data: data) }
-    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? { mac.clipboardSetOffer(offer: offer, source: source) }
+    /// 登录界面不支持（能力列表里也没有 clipboard_offer）
+    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? {
+        loginWindow ? L("paste.loginWindow") : mac.clipboardSetOffer(offer: offer, source: source)
+    }
     func setPrivacy(on: Bool) -> Bool {
         if loginWindow { return !on }
         if on { AgentAppKit.ensure(mac) }

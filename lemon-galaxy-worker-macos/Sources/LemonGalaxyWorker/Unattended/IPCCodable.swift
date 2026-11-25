@@ -161,6 +161,32 @@ extension ClipboardData: Codable {
     }
 }
 
+/// 剪贴板文件清单（粘贴时才传）：id 按十六进制字符串传（JSON 数字超过 2^53 会丢精度）
+extension ClipOfferEntry: Codable {
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: IPCKey.self)
+        self.init(path: try c.get("path"), isDir: try c.get("isDir"), size: try c.get("size"), mtime: try c.get("mtime"))
+    }
+    public func encode(to e: Encoder) throws {
+        var c = e.container(keyedBy: IPCKey.self)
+        try c.put(path, "path"); try c.put(isDir, "isDir"); try c.put(size, "size"); try c.put(mtime, "mtime")
+    }
+}
+
+extension ClipOfferInfo: Codable {
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: IPCKey.self)
+        guard let id = UInt64(try c.get("id") as String, radix: 16) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: d.codingPath, debugDescription: "清单 id 不对"))
+        }
+        self.init(id: id, entries: try c.get("entries"), totalBytes: try c.get("totalBytes"))
+    }
+    public func encode(to e: Encoder) throws {
+        var c = e.container(keyedBy: IPCKey.self)
+        try c.put(String(id, radix: 16), "id"); try c.put(entries, "entries"); try c.put(totalBytes, "totalBytes")
+    }
+}
+
 extension InputEvent: Codable {
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: IPCKey.self)
@@ -346,6 +372,13 @@ struct PText: Codable { var text: String? }
 struct PComputerUse: Codable { var request: String }
 struct PComputerUseReply: Codable { var text: String?; var mime: String; var width: UInt32; var height: UInt32 }
 struct PClipboard: Codable { var data: ClipboardData? }
+/// 粘贴时才传：后台服务把主控端的清单交给代理（应答 PText，text 为空表示成功，否则是原因）；
+/// 代理有人粘贴时经后台服务读内容：打开（应答读取器编号与文件现在的大小）、读（应答附件，空表示读完）、关闭（通知）
+struct POffer: Codable { var offer: ClipOfferInfo }
+struct PClipOpen: Codable { var offer: String; var index: UInt32; var offset: UInt64 }
+struct PClipOpened: Codable { var reader: UInt64; var size: UInt64 }
+struct PClipRead: Codable { var reader: UInt64; var max: UInt32 }
+struct PClipReader: Codable { var reader: UInt64 }
 struct POn: Codable { var on: Bool }
 struct PBool: Codable { var value: Bool }
 struct PStrings: Codable { var values: [String] }
@@ -447,6 +480,9 @@ enum IPCMethod {
     static let agentCursor = "a.cursor"
     static let agentAudio = "a.audio"
     static let agentLog = "a.log"
+    static let agentClipOpen = "a.clipOpen"
+    static let agentClipRead = "a.clipRead"
+    static let agentClipClose = "a.clipClose"
     // 后台服务 → 代理
     static let displays = "p.displays"
     static let startCapture = "p.startCapture"
@@ -460,6 +496,7 @@ enum IPCMethod {
     static let computerUse = "p.computerUse"
     static let clipboardGet = "p.clipboardGet"
     static let clipboardSet = "p.clipboardSet"
+    static let clipOffer = "p.clipOffer"
     static let privacy = "p.privacy"
     static let startAudio = "p.startAudio"
     static let stopAudio = "p.stopAudio"

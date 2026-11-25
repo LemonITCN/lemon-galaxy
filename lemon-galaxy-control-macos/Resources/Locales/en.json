@@ -757,6 +757,27 @@
   "headless.custom": "Custom",
   "headless.apply": "Apply",
   "headless.range": "Width 640–7680, height 480–4320, refresh rate 24–240 Hz",
-  "headless.unsupported": "This version of macOS doesn't support virtual displays, so none will be added"
+  "headless.unsupported": "This version of macOS doesn't support virtual displays, so none will be added",
+  "paste.window.title": "Copy",
+  "paste.copyingOne": "Copying “{0}” to “{1}”",
+  "paste.copyingMany": "Copying {0} items to “{1}”",
+  "paste.preparing": "Preparing to copy…",
+  "paste.waiting": "Waiting…",
+  "paste.progress": "{0} of {1}",
+  "paste.remaining": "About {0}",
+  "paste.fewSeconds": "a few seconds",
+  "paste.seconds": "{0} seconds",
+  "paste.minute": "1 minute",
+  "paste.minutes": "{0} minutes",
+  "paste.hours": "{0} hr {1} min",
+  "paste.failed": "Copy failed: {0}",
+  "paste.cancelled": "Stopped",
+  "paste.stop": "Stop",
+  "paste.close": "Close",
+  "paste.error.badList": "The file list is invalid",
+  "paste.error.marker": "Could not prepare the clipboard: {0}",
+  "paste.error.watch": "Could not watch for folder changes",
+  "paste.error.write": "Could not write “{0}”: {1}",
+  "paste.error.read": "Could not read “{0}”: {1}"
  }
 }

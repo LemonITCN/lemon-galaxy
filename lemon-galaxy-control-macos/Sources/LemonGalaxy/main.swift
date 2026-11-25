@@ -9,6 +9,13 @@ if args.contains("--cu-selftest") {
 if args.contains("--cu-exec") {
     exit(MainActor.assumeIsolated { ComputerUseExec.run(args) })
 }
+// 粘贴时才传（标记文件 + FSEvents + 落盘）的自检：私有剪贴板、临时目录，不开访达
+if args.contains("--paste-selftest") {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    let problems = LazyPasteSelfTest.run()
+    print(problems.isEmpty ? "paste-selftest：全部通过" : "paste-selftest：\(problems.count) 项失败")
+    exit(problems.isEmpty ? 0 : 1)
+}
 if args.contains("--core-smoke") {
     exit(CoreSmoke.run(args))
 }

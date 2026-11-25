@@ -35,6 +35,11 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
     private var captures: [UInt32: Capture] = [:]
     private var audioSink: AudioPcmSink?
     private var privacyOn = false
+    /// 粘贴时才传：最近 4 份主控端清单的内容来源（与内核只认最近 4 份一致），代理粘贴时经这里读
+    private var clipSources: [(id: UInt64, source: ClipSource)] = []
+    /// 代理打开的读取器（编号 → 哪个代理、读取器）；代理断开时全部关掉
+    private var clipReaders: [UInt64: (agent: Int, reader: ClipReader)] = [:]
+    private var nextClipReader: UInt64 = 1
     /// 切换会话时重新开始采集，串行进行
     private let switchQueue = DispatchQueue(label: "galaxy.daemon.switch")
     /// 代理增减、换会话时通知界面
@@ -56,7 +61,10 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
         let id = lock.locked { () -> Int in defer { nextAgentId += 1 }; return nextAgentId }
         let agent = Agent(id: id, conn: conn, hello: hello)
         conn.label = "agent-\(id)-\(hello.sessionType.rawValue)-\(hello.userName)"
-        conn.setHandlers(onRequest: { _, reply in reply.fail(.other("后台服务不处理会话代理的请求")) },
+        conn.setHandlers(onRequest: { [weak self] m, reply in
+                             guard let self else { reply.fail(.other("后台服务已停止")); return }
+                             self.agentRequest(id, m, reply)
+                         },
                          onNotify: { [weak self] m in self?.agentMessage(id, m) },
                          onClose: { [weak self] in self?.removeAgent(id) })
         let replaced = lock.locked { () -> [Agent] in
@@ -78,7 +86,13 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
     }
 
     private func removeAgent(_ id: Int) {
-        let removed = lock.locked { agents.removeValue(forKey: id) != nil }
+        let (removed, readers) = lock.locked { () -> (Bool, [ClipReader]) in
+            let gone = clipReaders.filter { $0.value.agent == id }
+            for k in gone.keys { clipReaders[k] = nil }
+            return (agents.removeValue(forKey: id) != nil, gone.values.map(\.reader))
+        }
+        // 代理断开：它正在读的主控端文件一并停掉
+        for r in readers { DispatchQueue.global().async { r.close() } }
         guard removed else { return }
         NSLog("LemonGalaxy: 会话代理 %d 已断开", id)
         reselect()
@@ -114,8 +128,48 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
             reselect()
         case IPCMethod.agentLog:
             if let l = try? m.decode(ALog.self) { NSLog("LemonGalaxy 会话代理 %d：%@", id, l.text) }
+        case IPCMethod.agentClipClose:
+            guard let p = try? m.decode(PClipReader.self) else { return }
+            let r = lock.locked { () -> ClipReader? in
+                guard clipReaders[p.reader]?.agent == id else { return nil }
+                return clipReaders.removeValue(forKey: p.reader)?.reader
+            }
+            r?.close()
         default:
             break
+        }
+    }
+
+    /// 代理发来的请求：粘贴时才传的读内容（阻塞到主控端应答，请求在并发队列上处理，不挡别的消息）
+    private func agentRequest(_ id: Int, _ m: IPCConnection.Message, _ reply: IPCConnection.Reply) {
+        do {
+            switch m.method {
+            case IPCMethod.agentClipOpen:
+                let p = try m.decode(PClipOpen.self)
+                guard let offerId = UInt64(p.offer, radix: 16),
+                      let src = lock.locked({ clipSources.last { $0.id == offerId }?.source }) else {
+                    reply.fail(.other("剪贴板文件清单已过期"))
+                    return
+                }
+                let r = try src.open(index: p.index, offset: p.offset)
+                let rid = lock.locked { () -> UInt64 in
+                    defer { nextClipReader += 1 }
+                    clipReaders[nextClipReader] = (id, r)
+                    return nextClipReader
+                }
+                reply.ok(PClipOpened(reader: rid, size: r.size()))
+            case IPCMethod.agentClipRead:
+                let p = try m.decode(PClipRead.self)
+                guard let r = lock.locked({ clipReaders[p.reader].flatMap { $0.agent == id ? $0.reader : nil } }) else {
+                    reply.fail(IPCFault(GalaxyError.Cancelled))
+                    return
+                }
+                reply.ok(IPCEmpty(), blob: try r.read(max: min(p.max, 4 << 20)))
+            default:
+                reply.fail(.other("后台服务不处理会话代理的请求 \(m.method)"))
+            }
+        } catch {
+            reply.fail(error)
         }
     }
 
@@ -294,8 +348,17 @@ final class DaemonPlatform: HostPlatform, @unchecked Sendable {
     }
 
     func clipboardSet(data: ClipboardData) { notifyActive(IPCMethod.clipboardSet, PClipboard(data: data)) }
-    /// 粘贴时才传文件：无人值守还没接上（要把读请求经会话代理转给用户会话），暂不报 "clipboard_offer"
-    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? { "这台 Mac 暂不支持粘贴时才传文件" }
+    /// 粘贴时才传文件：清单交给负责画面的代理（它在用户的图形会话里放标记、盯访达的粘贴、弹进度窗口），
+    /// 有人粘贴时代理经这里的 agentRequest 读主控端的内容。登录界面的代理不报 clipboard_offer，内核不会送来
+    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? {
+        lock.locked {
+            clipSources.removeAll { $0.id == offer.id }
+            clipSources.append((offer.id, source))
+            if clipSources.count > 4 { clipSources.removeFirst(clipSources.count - 4) }
+        }
+        guard let m = request(IPCMethod.clipOffer, POffer(offer: offer), wait: 3, timeout: 10) else { return "没有负责画面的会话代理" }
+        return (try? m.decode(PText.self))?.text
+    }
 
     func setPrivacy(on: Bool) -> Bool {
         let ok = setPrivacyOnActive(on)

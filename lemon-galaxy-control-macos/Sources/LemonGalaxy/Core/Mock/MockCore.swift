@@ -660,6 +660,7 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
     override func clipboardSet(data: ClipboardData) async throws {
         await client.delay(80)
         remoteClipboard = data
+        if case .text(let t) = data { MockTimeline.add("clip:" + t) }
     }
 
     override func clipboardPushFiles(localPaths: [String], listener: TransferListener) -> ClipboardTransfer {
@@ -668,6 +669,25 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
 
     override func clipboardPullFiles(remotePaths: [String], localDir: String, listener: TransferListener) -> ClipboardTransfer {
         MockClipboardTransfer.pull(session: self, remotePaths: remotePaths, localDir: localDir, listener: listener)
+    }
+
+    /// 最近一次「本机复制 → 对方」发过去的清单（selftest 核对）
+    private var _lastOffer: ClipOfferInfo?
+    var lastOffer: ClipOfferInfo? { clipLock.locked { _lastOffer } }
+
+    /// 与被控端一样：清单放进对方剪贴板后，对方读剪贴板不返回它（标记文件被过滤）
+    override func clipboardOfferFiles(localPaths: [String]) async throws -> ClipOfferInfo {
+        await client.delay(80)
+        let info = try MockRemoteClipOffer.localOffer(localPaths, zh: client.zh)
+        clipLock.locked { _lastOffer = info }
+        remoteClipboard = nil
+        return info
+    }
+
+    override func clipboardRemoteOffer(remotePaths: [String]) async throws -> RemoteClipOffer {
+        await client.delay(120)
+        guard !remotePaths.isEmpty else { throw GalaxyError.NotFound(detail: client.zh ? "远端剪贴板里没有文件" : "No files in the remote clipboard") }
+        return MockRemoteClipOffer(remotePaths: remotePaths, zh: client.zh)
     }
 
     override func forwardPort(localPort: UInt16, remoteHost: String, remotePort: UInt16) async throws -> PortForward {
@@ -692,6 +712,15 @@ final class MockPeerSession: PeerSession, @unchecked Sendable {
         }
         return MockAudioPlayback(volume: volume)
     }
+}
+
+/// 模拟对端按顺序收到的东西（剪贴板文字、按键），selftest 核对粘贴键是不是在剪贴板同步之后才到
+enum MockTimeline {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var items: [String] = []
+    static func add(_ s: String) { lock.locked { items.append(s) } }
+    static func reset() { lock.locked { items = [] } }
+    static var all: [String] { lock.locked { items } }
 }
 
 /// 模拟复制粘贴文件：按大小推进进度，传完再改对方剪贴板（推送）或在本机目录写真实的小文件（拉取，界面放进剪贴板的路径是真的）。
@@ -867,6 +896,125 @@ final class MockClipboardTransfer: ClipboardTransfer, @unchecked Sendable {
         return zh ? ["\(home)/Documents/会议纪要 2026-11-20.txt", "\(home)/Desktop/部署脚本"]
             : ["\(home)/Documents/Meeting notes 2026-11-20.txt", "\(home)/Desktop/Deploy scripts"]
     }
+}
+
+/// 模拟的远端剪贴板文件清单：文件是一段小文本，名字没有扩展名的当文件夹（里面两份）。
+/// 名字带 fail 的打开即失败；带 hold 的读到 45% 停住，直到被关掉（selftest 截进度窗口、试停止用）
+final class MockRemoteClipOffer: RemoteClipOffer, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
+    private let offer: ClipOfferInfo
+    private let contents: [Data?]
+    private let names: [String]
+    private let zh: Bool
+
+    init(remotePaths: [String], zh: Bool) {
+        var entries: [ClipOfferEntry] = []
+        var contents: [Data?] = []
+        var names: [String] = []
+        for remote in remotePaths {
+            let name = remote.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? remote
+            let note = Data("LemonGalaxy mock\n\(remote)\n".utf8)
+            if (name as NSString).pathExtension.isEmpty {
+                entries.append(ClipOfferEntry(path: name, isDir: true, size: 0, mtime: 1_795_225_000))
+                contents.append(nil)
+                names.append(name)
+                let readme = Data(("# " + name + "\n\n").utf8) + note
+                let script = Data("Write-Host \"deploy\"\n# ".utf8) + note
+                for (file, data) in [("README.md", readme), ("deploy.ps1", script)] {
+                    entries.append(ClipOfferEntry(path: name + "/" + file, isDir: false, size: UInt64(data.count), mtime: 1_795_225_000))
+                    contents.append(data)
+                    names.append(file)
+                }
+            } else {
+                // hold 的给大一点，进度条停在中间好看
+                let data = name.lowercased().contains("hold") ? Data((0..<2_000_000).map { UInt8($0 % 251) }) : note
+                entries.append(ClipOfferEntry(path: name, isDir: false, size: UInt64(data.count), mtime: 1_795_225_000))
+                contents.append(data)
+                names.append(name)
+            }
+        }
+        offer = ClipOfferInfo(id: UInt64.random(in: 1...UInt64.max), entries: entries,
+                              totalBytes: entries.reduce(0) { $0 + $1.size })
+        self.contents = contents
+        self.names = names
+        self.zh = zh
+        super.init(noHandle: NoHandle())
+    }
+
+    override func info() -> ClipOfferInfo { offer }
+
+    override func open(index: UInt32, offset: UInt64) throws -> ClipReader {
+        let i = Int(index)
+        guard i < contents.count, let data = contents[i] else {
+            throw GalaxyError.NotFound(detail: zh ? "不是文件" : "Not a file")
+        }
+        if names[i].lowercased().contains("fail") {
+            throw GalaxyError.Network(detail: zh ? "连接中断（模拟失败）" : "Connection lost (simulated failure)")
+        }
+        return MockClipReader(data: data, offset: offset, holdAt: names[i].lowercased().contains("hold") ? data.count * 45 / 100 : nil)
+    }
+
+    /// 本机文件 → 清单（与内核一样展开文件夹、文件夹排在内容前面）
+    static func localOffer(_ paths: [String], zh: Bool) throws -> ClipOfferInfo {
+        let fm = FileManager.default
+        var entries: [ClipOfferEntry] = []
+        for p in paths {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: p, isDirectory: &isDir) else {
+                throw GalaxyError.NotFound(detail: zh ? "读不了 \(p)：文件不存在" : "Cannot read \(p): no such file")
+            }
+            let name = (p as NSString).lastPathComponent
+            func entry(_ rel: String, _ full: String, _ dir: Bool) -> ClipOfferEntry {
+                let a = try? fm.attributesOfItem(atPath: full)
+                return ClipOfferEntry(path: rel, isDir: dir, size: dir ? 0 : ((a?[.size] as? NSNumber)?.uint64Value ?? 0),
+                                      mtime: Int64((a?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0))
+            }
+            entries.append(entry(name, p, isDir.boolValue))
+            guard isDir.boolValue else { continue }
+            for sub in (fm.enumerator(atPath: p)?.allObjects as? [String] ?? []).sorted() {
+                var d: ObjCBool = false
+                fm.fileExists(atPath: p + "/" + sub, isDirectory: &d)
+                entries.append(entry(name + "/" + sub, p + "/" + sub, d.boolValue))
+            }
+        }
+        return ClipOfferInfo(id: UInt64.random(in: 1...UInt64.max), entries: entries, totalBytes: entries.reduce(0) { $0 + $1.size })
+    }
+}
+
+/// 模拟的读取器：从 offset 读到末尾；holdAt 处停住直到被关掉
+final class MockClipReader: ClipReader, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { fatalError("模拟对象不能由内核指针构造") }
+    private let data: Data
+    private var pos: Int
+    private let holdAt: Int?
+    private let lock = NSLock()
+    private var closed = false
+
+    init(data: Data, offset: UInt64, holdAt: Int?) {
+        self.data = data
+        self.pos = min(Int(offset), data.count)
+        self.holdAt = holdAt
+        super.init(noHandle: NoHandle())
+    }
+
+    override func size() -> UInt64 { UInt64(data.count) }
+
+    override func read(max: UInt32) throws -> Data {
+        while true {
+            let (isClosed, p) = lock.locked { (closed, pos) }
+            if isClosed { throw GalaxyError.Cancelled }
+            if let h = holdAt, p >= h {
+                Thread.sleep(forTimeInterval: 0.02)
+                continue
+            }
+            let end = min(data.count, p + Int(min(max, 64 << 10)), holdAt.map { Swift.max($0, p + 1) } ?? Int.max)
+            if p >= data.count { return Data() }
+            lock.locked { pos = end }
+            return data.subdata(in: p..<end)
+        }
+    }
+
+    override func close() { lock.locked { closed = true } }
 }
 
 /// 模拟的远端声音：不出声，只记住音量与静音，供界面与 selftest 核对

@@ -49,7 +49,8 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
     // MARK: 能力（内核据此告诉主控端能用什么）
 
     func capabilities() -> [String] {
-        var caps = ["clipboard"]
+        // clipboard_offer：复制粘贴文件粘贴时才传（标记文件 + 访达粘贴时弹进度窗口，见 LazyFilePaste.swift）
+        var caps = ["clipboard", "clipboard_offer"]
         let screen = SystemPermissions.screenRecordingGranted
         let ax = SystemPermissions.accessibilityGranted
         // 系统声音也走 ScreenCaptureKit，只要「屏幕录制」授权
@@ -234,9 +235,10 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
 
     // MARK: 剪贴板
 
-    /// 一次只取一种内容：文件 > 文字 > 图片
+    /// 一次只取一种内容：文件 > 文字 > 图片。剪贴板里是自己放的标记（主控端复制的文件等着在这台 Mac 粘贴）时什么都不返回，免得来回传
     func clipboardGet() -> ClipboardData? {
-        let pb = NSPasteboard.general
+        let pb = LazyPaste.shared.pasteboard
+        if LazyPaste.holdsMarker(pb) { return nil }
         let files = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL])?.map(\.path) ?? []
         if !files.isEmpty { return .files(paths: files) }
         if let text = pb.string(forType: .string) { return .text(text: text) }
@@ -247,11 +249,13 @@ final class MacHostPlatform: HostPlatform, @unchecked Sendable {
         return nil
     }
 
-    /// 粘贴时才传文件（docs/protocol.md 8.4.1）：macOS 的标记文件 + 进度窗口做法还没接上，暂不报 "clipboard_offer"，主控端照旧整批推送
-    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? { "这台 Mac 暂不支持粘贴时才传文件" }
+    /// 粘贴时才传文件（docs/protocol.md 8.4.1）：剪贴板里放标记文件，有人在访达里粘贴时才按项向主控端读，进度窗口在这台 Mac 上
+    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? {
+        LazyPaste.shared.offer(offer) { index, offset in try source.open(index: index, offset: offset) }
+    }
 
     func clipboardSet(data: ClipboardData) {
-        let pb = NSPasteboard.general
+        let pb = LazyPaste.shared.pasteboard
         pb.clearContents()
         switch data {
         case .text(let t): pb.setString(t, forType: .string)

@@ -101,6 +101,10 @@ enum IPCSelfTest {
         check("输入事件编码往返", (try? IPCJSON.decoder.decode([InputEvent].self, from: IPCJSON.encode(evs))) == evs)
         let clips: [ClipboardData] = [.text(text: "a"), .files(paths: ["/tmp/x"]), .image(image: ImageData(mime: "image/png", data: Data([1, 2, 3]), width: 1, height: 1))]
         check("剪贴板编码往返", (try? IPCJSON.decoder.decode([ClipboardData].self, from: IPCJSON.encode(clips))) == clips)
+        let offer = ClipOfferInfo(id: UInt64.max - 12_345, entries: [ClipOfferEntry(path: "目录", isDir: true, size: 0, mtime: -1),
+                                                                    ClipOfferEntry(path: "目录/a b.txt", isDir: false, size: 1 << 40, mtime: 1_795_000_000)],
+                                  totalBytes: 1 << 40)
+        check("文件清单编码往返（大 id 不丢精度）", (try? IPCJSON.decoder.decode(ClipOfferInfo.self, from: IPCJSON.encode(offer))) == offer)
         let lr: [WorkerLoginResult] = [.success(userId: 3, username: "x"), .needTotp, .mustChangePassword]
         check("登录结果编码往返", (try? IPCJSON.decoder.decode([WorkerLoginResult].self, from: IPCJSON.encode(lr))) == lr)
         let f = IPCFault(GalaxyError.Auth(code: "bad_credentials", detail: "密码错误"))
@@ -295,6 +299,7 @@ enum IPCSelfTest {
 
         dp.clipboardSet(data: .text(text: "剪贴板"))
         check("写剪贴板", wait { fa.clipboard == .text(text: "剪贴板") })
+        clipOffer(dp, fa)
         let img = ImageData(mime: "image/png", data: Data((0..<200_000).map { UInt8($0 % 251) }), width: 10, height: 20)
         fa.clipboard = .image(image: img)
         check("读剪贴板（图片）", dp.clipboardGet() == .image(image: img))
@@ -323,6 +328,43 @@ enum IPCSelfTest {
         // 留一块给换会话的检查（旧代理离开屏幕时要删掉它）
         _ = dp.addVirtualDisplay(width: 1920, height: 1080, refresh: 60)
         return (fa, ca)
+    }
+
+    /// 粘贴时才传：清单转给代理；代理粘贴时经后台服务打开、读（从中间续读）、关闭主控端的内容；停止时阻塞的读随之返回
+    private static func clipOffer(_ dp: DaemonPlatform, _ fa: FakePlatform) {
+        let content = Data((0..<300_000).map { UInt8($0 % 241) })
+        let offer = ClipOfferInfo(id: 0xFEED_FACE_CAFE_BEEF,
+                                  entries: [ClipOfferEntry(path: "dir", isDir: true, size: 0, mtime: 0),
+                                            ClipOfferEntry(path: "dir/a.bin", isDir: false, size: UInt64(content.count), mtime: 5),
+                                            ClipOfferEntry(path: "held.bin", isDir: false, size: UInt64(content.count), mtime: 5)],
+                                  totalBytes: UInt64(content.count * 2))
+        let src = TestClipSource([nil, content, content], holdIndex: 2)
+        check("清单转给代理", dp.clipboardSetOffer(offer: offer, source: src) == nil && fa.offer?.0 == offer)
+        guard let fwd = fa.offer?.1 else { return }
+        let r = try? fwd.open(index: 1, offset: 1000)
+        check("代理经后台服务打开（从中间续读）", r?.size() == UInt64(content.count) && src.opened.last == [1, 1000])
+        var got = Data()
+        while let d = try? r?.read(max: 65_536), !d.isEmpty { got += d }
+        check("代理读到的内容完整", got == content.subdata(in: 1000..<content.count), "\(got.count)")
+        r?.close()
+        check("关闭转到后台服务", wait { src.closedCount == 1 })
+        var openErr = ""
+        do { _ = try fwd.open(index: 0, offset: 0) } catch { openErr = String(describing: error) }
+        check("打开文件夹项带回原因", openErr.contains("不是文件"), openErr)
+        // 停止：读阻塞着时关掉，读随之报错返回
+        let held = try? fwd.open(index: 2, offset: 0)
+        let first = try? held?.read(max: 65_536)
+        let blocked = Box<Bool?>(nil)
+        DispatchQueue.global().async {
+            do { _ = try held?.read(max: 65_536); blocked.value = false } catch { blocked.value = true }
+        }
+        Thread.sleep(forTimeInterval: 0.2)
+        check("读到停住的地方", first?.count == 1000 && blocked.value == nil)
+        held?.close()
+        check("停止时阻塞的读报错返回", wait { blocked.value == true })
+        fa.offerError = "假平台拒绝清单"
+        check("代理拒绝时带回原因", dp.clipboardSetOffer(offer: offer, source: src) == "假平台拒绝清单")
+        fa.offerError = nil
     }
 
     private static func makeClient(_ sock: String, _ fp: FakePlatform, _ sess: Box<AgentSession>) -> AgentClient {
@@ -554,6 +596,68 @@ final class Counter: @unchecked Sendable {
     var value: Int { lock.locked { n } }
 }
 
+/// 后台服务这边的假内容来源（代替内核给的主控端 ClipSource）：nil 项是文件夹；holdIndex 那项读完前 1000 字节后停住直到关掉
+final class TestClipSource: ClipSource, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { fatalError("假对象不能由内核指针构造") }
+    let contents: [Data?]
+    let holdIndex: Int?
+    private let lock = NSLock()
+    private var _opened: [[UInt64]] = []
+    private var _closed = 0
+    var opened: [[UInt64]] { lock.locked { _opened } }
+    var closedCount: Int { lock.locked { _closed } }
+
+    init(_ contents: [Data?], holdIndex: Int?) {
+        self.contents = contents
+        self.holdIndex = holdIndex
+        super.init(noHandle: NoHandle())
+    }
+
+    func noteClosed() { lock.locked { _closed += 1 } }
+
+    override func open(index: UInt32, offset: UInt64) throws -> ClipReader {
+        lock.locked { _opened.append([UInt64(index), offset]) }
+        guard Int(index) < contents.count, let d = contents[Int(index)] else { throw GalaxyError.NotFound(detail: "不是文件") }
+        return TestClipReader(data: d, offset: Int(offset), hold: Int(index) == holdIndex ? 1000 : nil, owner: self)
+    }
+}
+
+final class TestClipReader: ClipReader, @unchecked Sendable {
+    required init(unsafeFromHandle handle: UInt64) { fatalError("假对象不能由内核指针构造") }
+    private let data: Data
+    private var pos: Int
+    private let hold: Int?
+    private weak var owner: TestClipSource?
+    private let lock = NSLock()
+    private var closed = false
+
+    init(data: Data, offset: Int, hold: Int?, owner: TestClipSource) {
+        self.data = data
+        self.pos = min(offset, data.count)
+        self.hold = hold
+        self.owner = owner
+        super.init(noHandle: NoHandle())
+    }
+
+    override func size() -> UInt64 { UInt64(data.count) }
+
+    override func read(max: UInt32) throws -> Data {
+        while true {
+            let (c, p) = lock.locked { (closed, pos) }
+            if c { throw GalaxyError.Cancelled }
+            if let h = hold, p >= h { Thread.sleep(forTimeInterval: 0.01); continue }
+            let end = Swift.min(data.count, p + Int(max), hold ?? Int.max)
+            lock.locked { pos = end }
+            return data.subdata(in: p..<end)
+        }
+    }
+
+    override func close() {
+        let first = lock.locked { () -> Bool in defer { closed = true }; return !closed }
+        if first { owner?.noteClosed() }
+    }
+}
+
 /// 假的平台层：按标记字节生成画面帧与声音，记录收到的操作
 final class FakePlatform: HostPlatform, @unchecked Sendable {
     let tag: UInt8
@@ -652,7 +756,20 @@ final class FakePlatform: HostPlatform, @unchecked Sendable {
     }
     func clipboardGet() -> ClipboardData? { clipboard }
     func clipboardSet(data: ClipboardData) { clipboard = data }
-    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? { "不支持" }
+    /// 收到的清单与内容来源（代理这边是转发给后台服务的）
+    private var _offer: (ClipOfferInfo, ClipSource)?
+    private var _offerError: String?
+    var offer: (ClipOfferInfo, ClipSource)? { lock.locked { _offer } }
+    var offerError: String? {
+        get { lock.locked { _offerError } }
+        set { lock.locked { _offerError = newValue } }
+    }
+    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource) -> String? {
+        lock.locked {
+            if _offerError == nil { _offer = (offer, source) }
+            return _offerError
+        }
+    }
     func setPrivacy(on: Bool) -> Bool { lock.locked { _privacy = on }; return true }
 
     func startAudio(sink: AudioPcmSink) -> Bool {

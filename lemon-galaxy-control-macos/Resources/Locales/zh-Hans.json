@@ -757,6 +757,27 @@
   "headless.custom": "自定义",
   "headless.apply": "应用",
   "headless.range": "宽 640–7680，高 480–4320，刷新率 24–240 Hz",
-  "headless.unsupported": "这台 Mac 的系统不支持虚拟屏，不会自动加屏"
+  "headless.unsupported": "这台 Mac 的系统不支持虚拟屏，不会自动加屏",
+  "paste.window.title": "拷贝",
+  "paste.copyingOne": "正在将“{0}”拷贝到“{1}”",
+  "paste.copyingMany": "正在将 {0} 个项目拷贝到“{1}”",
+  "paste.preparing": "正在准备拷贝…",
+  "paste.waiting": "正在等待…",
+  "paste.progress": "已拷贝 {0}，共 {1}",
+  "paste.remaining": "大约还需 {0}",
+  "paste.fewSeconds": "几秒",
+  "paste.seconds": "{0} 秒",
+  "paste.minute": "1 分钟",
+  "paste.minutes": "{0} 分钟",
+  "paste.hours": "{0} 小时 {1} 分钟",
+  "paste.failed": "拷贝失败：{0}",
+  "paste.cancelled": "已停止",
+  "paste.stop": "停止",
+  "paste.close": "关闭",
+  "paste.error.badList": "文件清单不合法",
+  "paste.error.marker": "无法准备剪贴板：{0}",
+  "paste.error.watch": "无法监视文件夹变化",
+  "paste.error.write": "无法写入“{0}”：{1}",
+  "paste.error.read": "读取“{0}”失败：{1}"
  }
 }
