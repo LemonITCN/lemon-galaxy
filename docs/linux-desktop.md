@@ -68,6 +68,14 @@ Wayland 的登录界面看不到：GDM 默认用 Wayland。命令 `lemon-galaxy-
 
 键盘：协议里是 USB HID 用法码，统一先换成 Linux evdev 键码（`hidmap.rs`）：Mutter 与门户直接用 evdev 键码；X11 用「evdev 键码 + 8」，键盘布局里没有的字符（输入文字）临时改一个空闲键码的映射再按。
 
+输入法提交的文字（`InputEvent::Text`，主控端用本机中文、日文等输入法打出的字）：
+- X11：同上，布局里没有的字符临时映射空闲键码。
+- Wayland（Mutter、门户）：Mutter 的 `NotifyKeyboardKeysym` 只在当前布局组里找键码，找不到就静默丢弃（日志 `No keycode found for keyval …`，调用照样返回成功），所以中日韩文字、é 等打不出来；GNOME 自己的远程桌面也有同样限制。
+  做法（GNOME 论坛上做 Chrome 远程桌面 Linux 主机的开发者给的方向，2026-11-25 在 Ubuntu 26.04 / GNOME 50.1 / IBus 1.5.34 上实测输入框与 Ptyxis 终端都通过）：
+  会话代理运行时加载 libibus，把自己注册成 IBus 引擎 `lemongalaxy-remote`，提交文字时临时切成全局引擎、`commit_text`、空闲 300 毫秒后切回原引擎（切回后核对，不对就重试；原引擎不可用时依次用 GNOME 输入源设置里当前的、`xkb:us::eng`）。不碰剪贴板，终端也能用。
+  IBus 守护进程在注册过组件的进程退出时会清空全局引擎，所以另有看门进程（`__lg-ibus-guard`）在代理退出后盯 3 秒，空了就设回原引擎。
+  拿不到 IBus（没有库或守护进程，比如 KDE 用 fcitx5）时退回 keysym，并记日志。
+
 ## 5. 虚拟桌面
 
 主控打开屏幕列表时（内核在阻塞线程里调 `HostPlatform::prepare_desktop(系统用户)`），如果没有可看的图形会话（没接显示器、没人登录且登录界面是 Wayland、远程登录的服务器），就给**这个账号绑定的系统用户**开一个虚拟桌面：

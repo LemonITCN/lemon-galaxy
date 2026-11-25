@@ -298,6 +298,10 @@ impl Controller for PortalController {
                 }
             }
             InputEvent::Text { text } => {
+                // 经 IBus 提交（中日韩等都行）；没有 IBus（KDE 多用 fcitx5）时按 keysym（布局里没有的字符会被丢掉）
+                if super::super::ibus::commit(&text) {
+                    return;
+                }
                 for c in text.chars() {
                     if c == '\n' || c == '\r' {
                         self.chord(&[hidmap::KEY_ENTER]);
@@ -345,4 +349,8 @@ impl Controller for PortalController {
     }
 
     fn clipboard_set(&mut self, _d: ClipboardData) {}
+
+    fn clipboard_available(&self) -> bool {
+        false
+    }
 }

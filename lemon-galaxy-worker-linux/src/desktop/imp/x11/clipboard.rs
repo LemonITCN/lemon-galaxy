@@ -1,13 +1,15 @@
 //! X11 剪贴板（CLIPBOARD 选择区）。单独一个线程、一个连接、一个隐藏窗口：
 //! 取内容时向当前所有者要（支持 INCR 分段），放内容时自己当所有者、按请求给数据（大数据用 INCR 分段发），
-//! 直到别的程序接管剪贴板。
+//! 直到别的程序接管剪贴板。粘贴时才准备的文件列表（没有 FUSE 时的兜底）：请求来了在另一个线程里等它准备好，
+//! 好了再回给请求方，选择区线程不被卡住。
 
-use super::super::clipfmt;
+use super::super::clipfmt::{self, LazyFiles};
 use super::connect;
 use galaxy_proto::peer::ClipboardData;
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::xproto::*;
@@ -19,6 +21,16 @@ use x11rb::CURRENT_TIME;
 enum Cmd {
     Get(mpsc::Sender<Option<ClipboardData>>),
     Set(ClipboardData),
+    SetLazy(Arc<dyn LazyFiles>),
+    /// 粘贴时才准备的内容好了：回给当时的请求方（类型, 数据；None 表示失败）
+    Deliver(SelectionRequestEvent, Option<(Atom, Vec<u8>)>),
+}
+
+/// 我们放进剪贴板的内容
+#[derive(Clone)]
+enum Owned {
+    Data(Vec<(Atom, Vec<u8>)>),
+    Lazy(Vec<Atom>, Arc<dyn LazyFiles>),
 }
 
 pub struct Clipboard {
@@ -29,7 +41,7 @@ impl Clipboard {
     pub fn start() -> Result<Self, String> {
         let (conn, screen) = connect()?;
         let (tx, rx) = mpsc::channel();
-        let mut st = State::new(conn, screen)?;
+        let mut st = State::new(conn, screen, tx.clone())?;
         std::thread::Builder::new().name("x11-clipboard".into()).spawn(move || st.run(rx)).map_err(|e| e.to_string())?;
         Ok(Self { tx })
     }
@@ -42,6 +54,10 @@ impl Clipboard {
 
     pub fn set(&self, d: ClipboardData) {
         let _ = self.tx.send(Cmd::Set(d));
+    }
+
+    pub fn set_lazy(&self, f: Arc<dyn LazyFiles>) {
+        let _ = self.tx.send(Cmd::SetLazy(f));
     }
 }
 
@@ -58,8 +74,10 @@ struct State {
     conn: RustConnection,
     win: Window,
     atoms: HashMap<String, Atom>,
-    /// 我们放的内容：(目标类型, 数据)
-    owned: Option<Vec<(Atom, Vec<u8>)>>,
+    /// 我们放的内容
+    owned: Option<Owned>,
+    /// 粘贴时才准备的内容好了以后经它回到本线程
+    tx: mpsc::Sender<Cmd>,
     owned_time: u32,
     incr: Vec<IncrSend>,
     chunk: usize,
@@ -68,7 +86,7 @@ struct State {
 const NAMES: &[&str] = &["CLIPBOARD", "TARGETS", "TIMESTAMP", "MULTIPLE", "INCR", "ATOM", "INTEGER", "LG_CLIP", "UTF8_STRING", "STRING", "TEXT", "text/plain;charset=utf-8", "text/plain", "image/png", "text/uri-list", "x-special/gnome-copied-files"];
 
 impl State {
-    fn new(conn: RustConnection, screen: usize) -> Result<Self, String> {
+    fn new(conn: RustConnection, screen: usize, tx: mpsc::Sender<Cmd>) -> Result<Self, String> {
         let root = conn.setup().roots[screen].root;
         let win = conn.generate_id().map_err(|e| e.to_string())?;
         conn.create_window(0, win, root, -10, -10, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE)).map_err(|e| e.to_string())?;
@@ -81,7 +99,7 @@ impl State {
         // 一次 ChangeProperty 最多能带多少；留余量
         let chunk = (conn.maximum_request_bytes().saturating_sub(1024)).clamp(4096, 256 * 1024);
         let _ = conn.flush();
-        Ok(Self { conn, win, atoms, owned: None, owned_time: CURRENT_TIME, incr: vec![], chunk })
+        Ok(Self { conn, win, atoms, owned: None, tx, owned_time: CURRENT_TIME, incr: vec![], chunk })
     }
 
     fn atom(&mut self, name: &str) -> Atom {
@@ -109,7 +127,22 @@ impl State {
                     continue;
                 }
                 Ok(Cmd::Set(d)) => {
-                    self.own(d);
+                    let offers = clipfmt::offers(&d).into_iter().map(|(m, data)| (self.atom(&m), data)).collect();
+                    self.own(Owned::Data(offers));
+                    continue;
+                }
+                Ok(Cmd::SetLazy(f)) => {
+                    let types = clipfmt::LAZY_TYPES.iter().map(|m| self.atom(m)).collect();
+                    self.own(Owned::Lazy(types, f));
+                    continue;
+                }
+                Ok(Cmd::Deliver(r, data)) => {
+                    let property = if r.property == x11rb::NONE { r.target } else { r.property };
+                    let ok = match data {
+                        Some((kind, d)) => self.put(&r, property, kind, &d),
+                        None => false,
+                    };
+                    self.notify(&r, property, ok);
                     continue;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => return,
@@ -175,10 +208,9 @@ impl State {
         CURRENT_TIME
     }
 
-    fn own(&mut self, d: ClipboardData) {
-        let offers: Vec<(Atom, Vec<u8>)> = clipfmt::offers(&d).into_iter().map(|(m, data)| (self.atom(&m), data)).collect();
+    fn own(&mut self, o: Owned) {
         self.owned_time = self.timestamp();
-        self.owned = Some(offers);
+        self.owned = Some(o);
         let sel = self.atom("CLIPBOARD");
         let _ = self.conn.set_selection_owner(self.win, sel, self.owned_time);
         let _ = self.conn.flush();
@@ -188,29 +220,56 @@ impl State {
         let property = if r.property == x11rb::NONE { r.target } else { r.property };
         let targets = self.atom("TARGETS");
         let timestamp = self.atom("TIMESTAMP");
-        let incr = self.atom("INCR");
         let mut ok = false;
         if r.selection == self.atom("CLIPBOARD") {
-            if let Some(owned) = self.owned.clone() {
-                if r.target == targets {
+            match self.owned.clone() {
+                Some(owned) if r.target == targets => {
                     let mut list = vec![targets, timestamp];
-                    list.extend(owned.iter().map(|(a, _)| *a));
+                    match &owned {
+                        Owned::Data(v) => list.extend(v.iter().map(|(a, _)| *a)),
+                        Owned::Lazy(t, _) => list.extend(t.iter().copied()),
+                    }
                     ok = self.conn.change_property32(PropMode::REPLACE, r.requestor, property, AtomEnum::ATOM, &list).is_ok();
-                } else if r.target == timestamp {
+                }
+                Some(_) if r.target == timestamp => {
                     ok = self.conn.change_property32(PropMode::REPLACE, r.requestor, property, AtomEnum::INTEGER, &[self.owned_time]).is_ok();
-                } else if let Some((kind, data)) = owned.iter().find(|(a, _)| *a == r.target) {
-                    if data.len() > self.chunk {
-                        // INCR：先告诉对方总大小，对方每删一次属性我们就写下一段
-                        let _ = self.conn.change_window_attributes(r.requestor, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE));
-                        ok = self.conn.change_property32(PropMode::REPLACE, r.requestor, property, incr, &[data.len() as u32]).is_ok();
-                        self.incr.retain(|x| x.started.elapsed() < Duration::from_secs(30));
-                        self.incr.push(IncrSend { requestor: r.requestor, property, kind: *kind, data: data.clone(), offset: 0, started: Instant::now() });
-                    } else {
-                        ok = self.conn.change_property8(PropMode::REPLACE, r.requestor, property, *kind, data).is_ok();
+                }
+                Some(Owned::Data(v)) => {
+                    if let Some((kind, data)) = v.iter().find(|(a, _)| *a == r.target) {
+                        ok = self.put(r, property, *kind, data);
                     }
                 }
+                Some(Owned::Lazy(types, files)) if types.contains(&r.target) => {
+                    // 先准备文件（可能要下载一阵），好了经 Deliver 回到本线程再答复
+                    let (req, kind, mime, tx) = (*r, r.target, self.atom_name(r.target), self.tx.clone());
+                    std::thread::spawn(move || {
+                        let data = files.paths().and_then(|p| clipfmt::files_data(&mime, p)).map(|d| (kind, d));
+                        let _ = tx.send(Cmd::Deliver(req, data));
+                    });
+                    return;
+                }
+                _ => {}
             }
         }
+        self.notify(r, property, ok);
+    }
+
+    /// 把数据放到请求方的属性上（大数据用 INCR 分段）
+    fn put(&mut self, r: &SelectionRequestEvent, property: Atom, kind: Atom, data: &[u8]) -> bool {
+        if data.len() > self.chunk {
+            // INCR：先告诉对方总大小，对方每删一次属性我们就写下一段
+            let incr = self.atom("INCR");
+            let _ = self.conn.change_window_attributes(r.requestor, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE));
+            let ok = self.conn.change_property32(PropMode::REPLACE, r.requestor, property, incr, &[data.len() as u32]).is_ok();
+            self.incr.retain(|x| x.started.elapsed() < Duration::from_secs(30));
+            self.incr.push(IncrSend { requestor: r.requestor, property, kind, data: data.to_vec(), offset: 0, started: Instant::now() });
+            ok
+        } else {
+            self.conn.change_property8(PropMode::REPLACE, r.requestor, property, kind, data).is_ok()
+        }
+    }
+
+    fn notify(&mut self, r: &SelectionRequestEvent, property: Atom, ok: bool) {
         let ev = SelectionNotifyEvent { response_type: SELECTION_NOTIFY_EVENT, sequence: 0, time: r.time, requestor: r.requestor, selection: r.selection, target: r.target, property: if ok { property } else { x11rb::NONE } };
         let _ = self.conn.send_event(false, r.requestor, EventMask::NO_EVENT, ev);
         let _ = self.conn.flush();
@@ -294,8 +353,9 @@ impl State {
             return None;
         }
         if owner == self.win {
-            // 自己放的：直接按第一种类型解析
-            let (a, d) = self.owned.as_ref()?.first()?.clone();
+            // 自己放的：直接按第一种类型解析；粘贴时才准备的文件列表不算（是主控端复制的，不能传回去）
+            let Some(Owned::Data(v)) = self.owned.as_ref() else { return None };
+            let (a, d) = v.first()?.clone();
             let name = self.atom_name(a);
             return clipfmt::parse(&name, d);
         }
@@ -307,5 +367,49 @@ impl State {
         let target = self.atom(&want);
         let (_, data) = self.convert(target)?;
         clipfmt::parse(&want, data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Slow(Vec<String>);
+    impl LazyFiles for Slow {
+        fn paths(&self) -> Option<Vec<String>> {
+            std::thread::sleep(Duration::from_millis(1500));
+            Some(self.0.clone())
+        }
+    }
+
+    fn xclip(target: &str) -> String {
+        let o = std::process::Command::new("xclip").args(["-o", "-selection", "clipboard", "-t", target]).output().expect("xclip");
+        String::from_utf8_lossy(&o.stdout).to_string()
+    }
+
+    /// 要 X 服务器与 xclip（容器里 Xvfb）：LG_TEST_X11=1 时跑
+    #[test]
+    fn serves_static_and_lazy_files() {
+        if std::env::var("LG_TEST_X11").ok().as_deref() != Some("1") {
+            return;
+        }
+        let c = Clipboard::start().unwrap();
+        c.set(ClipboardData::Files(vec!["/run/user/1000/lemon-galaxy/clip/7/a b.txt".into()]));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(xclip("TARGETS").contains("x-special/gnome-copied-files"));
+        assert_eq!(xclip("text/uri-list"), "file:///run/user/1000/lemon-galaxy/clip/7/a%20b.txt\r\n");
+        assert_eq!(xclip("x-special/gnome-copied-files"), "copy\nfile:///run/user/1000/lemon-galaxy/clip/7/a%20b.txt");
+        // 粘贴时才准备：等它准备好（1.5 秒）再回；期间选择区线程照常（TARGETS 立刻有）
+        c.set_lazy(Arc::new(Slow(vec!["/home/u/.lemon-galaxy/clipboard/1-7/资料".into()])));
+        std::thread::sleep(Duration::from_millis(300));
+        let t0 = Instant::now();
+        let targets = xclip("TARGETS");
+        assert!(targets.contains("text/uri-list") && !targets.contains("UTF8_STRING"), "{targets}");
+        assert!(t0.elapsed() < Duration::from_millis(1000));
+        let got = xclip("text/uri-list");
+        assert!(t0.elapsed() >= Duration::from_millis(1400));
+        assert_eq!(got, "file:///home/u/.lemon-galaxy/clipboard/1-7/%E8%B5%84%E6%96%99\r\n");
+        // 自己放的粘贴时才准备的列表不当成剪贴板内容（不能传回主控端）
+        assert!(c.get().is_none());
     }
 }

@@ -128,6 +128,14 @@ pub trait Controller: Send {
     fn inject(&mut self, display: &Monitor, ev: InputEvent);
     fn clipboard_get(&mut self) -> Option<ClipboardData>;
     fn clipboard_set(&mut self, d: ClipboardData);
+    /// 有没有可用的剪贴板（门户后端没有）
+    fn clipboard_available(&self) -> bool {
+        true
+    }
+    /// 放一份有人粘贴时才准备的文件列表（没有 FUSE 时的兜底）
+    fn clipboard_set_lazy(&mut self, _files: std::sync::Arc<dyn super::clipfmt::LazyFiles>) -> Result<(), String> {
+        Err("这个桌面不支持远程剪贴板".into())
+    }
 }
 
 /// 一个后端：列屏幕、开采集器、给出键鼠控制器。

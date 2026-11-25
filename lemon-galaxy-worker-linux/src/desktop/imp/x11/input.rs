@@ -253,4 +253,9 @@ impl Controller for X11Controller {
     fn clipboard_set(&mut self, d: ClipboardData) {
         self.clip.set(d)
     }
+
+    fn clipboard_set_lazy(&mut self, files: std::sync::Arc<dyn super::super::clipfmt::LazyFiles>) -> Result<(), String> {
+        self.clip.set_lazy(files);
+        Ok(())
+    }
 }

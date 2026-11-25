@@ -4,14 +4,19 @@
 //! - agent.rs：画面代理（会话里运行：截屏、编码、键鼠、剪贴板、声音）
 //! - session.rs：找图形会话；vdesktop.rs：虚拟桌面
 //! - x11/、wayland/：画面后端；encode/：编码（NVENC、VA-API、openh264）；audio.rs：声音
+//! - clipoffer.rs + fuse.rs：复制粘贴文件，粘贴时才传（FUSE 虚拟目录，没有 FUSE 时粘贴时先下载）
+//! - ibus.rs：Wayland 下输入文字（中日韩等）经 IBus 输入法引擎提交
 
 mod actions;
 mod agent;
 mod audio;
 mod backend;
 mod clipfmt;
+mod clipoffer;
 pub mod encode;
+mod fuse;
 mod hidmap;
+mod ibus;
 mod inhibit;
 mod ipc;
 mod proxy;
@@ -43,6 +48,7 @@ fn zh() -> bool {
 pub fn extra_command(cmd: &str, rest: &[String], _dir: &Path) -> Option<i32> {
     match cmd {
         "__lg-session-agent" => Some(agent::main()),
+        "__lg-ibus-guard" => Some(ibus::guard_main()),
         "__lg-selftest" => Some(agent::selftest(rest.first().and_then(|s| s.parse().ok()).unwrap_or(3))),
         "selftest-capture" => Some(selftest_cmd(rest)),
         "desktop" => Some(desktop_cmd(rest)),

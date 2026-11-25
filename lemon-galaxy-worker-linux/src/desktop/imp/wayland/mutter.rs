@@ -5,11 +5,12 @@
 //! - 会话 Start 后每路流发 PipeWireStreamAdded(节点号)，画面经 PipeWire 收（pipewire.rs）；
 //! - 光标用元数据模式（cursor-mode=2）：位置每帧都有，画不画进画面由我们决定。
 //! - 键鼠坐标是流里的像素（Mutter 自己按缩放换算）。
+//! - 输入文字：经 IBus 输入法引擎提交（ibus.rs），没有 IBus 时按 keysym（布局里没有的字符会被 Mutter 丢掉）。
 //!
 //! 一个画面代理一个会话，开始时把所有屏都录上（RecordMonitor 只能在 Start 前调）；屏幕增删后整个会话重建（代理报 Lost，服务重启代理）。
 
 use super::super::backend::{Backend, Capturer, Controller, CursorImage, CursorPos, Frame, Monitor};
-use super::super::clipfmt;
+use super::super::clipfmt::{self, LazyFiles};
 use super::super::hidmap::{self, WheelAcc};
 use super::pipewire::PwStream;
 use galaxy_proto::peer::{ClipboardData, InputEvent, SpecialCombo, TouchPhase};
@@ -85,13 +86,30 @@ pub struct Session {
     clip: Mutex<ClipState>,
 }
 
+/// 我们放进剪贴板的内容
+#[derive(Clone)]
+enum Owned {
+    Data(Vec<(String, Vec<u8>)>),
+    /// 有人粘贴时才准备的文件列表（没有 FUSE 时的兜底）
+    Lazy(Arc<dyn LazyFiles>),
+}
+
+impl Owned {
+    fn types(&self) -> Vec<String> {
+        match self {
+            Owned::Data(v) => v.iter().map(|(m, _)| m.clone()).collect(),
+            Owned::Lazy(_) => clipfmt::LAZY_TYPES.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ClipState {
     enabled: bool,
     /// 当前剪贴板里有的类型（别的程序放的）
     available: Vec<String>,
     /// 我们放的内容
-    owned: Option<Vec<(String, Vec<u8>)>>,
+    owned: Option<Owned>,
 }
 
 impl Session {
@@ -155,7 +173,7 @@ impl Session {
                 std::thread::spawn(move || {
                     if it.into_iter().next().is_some() {
                         eprintln!("Mutter 远程桌面会话被关闭");
-                        std::process::exit(3);
+                        super::super::agent::exit(3);
                     }
                 });
             }
@@ -202,23 +220,42 @@ impl Session {
                 for msg in it {
                     let Some(me) = me.upgrade() else { break };
                     let Ok((mime, serial)) = msg.body().deserialize::<(String, u32)>() else { continue };
-                    let data = me.clip.lock().owned.as_ref().and_then(|o| o.iter().find(|(m, _)| *m == mime).map(|(_, d)| d.clone()));
-                    let Ok(p) = me.rd_proxy() else { continue };
-                    let ok = match data {
-                        Some(d) => match p.call::<_, _, zbus::zvariant::OwnedFd>("SelectionWrite", &(serial,)) {
-                            Ok(fd) => {
-                                let mut f = std::fs::File::from(std::os::fd::OwnedFd::from(fd));
-                                f.write_all(&d).is_ok()
-                            }
-                            Err(_) => false,
-                        },
-                        None => false,
-                    };
-                    let _ = p.call::<_, _, ()>("SelectionWriteDone", &(serial, ok));
+                    let owned = me.clip.lock().owned.clone();
+                    match owned {
+                        Some(Owned::Data(v)) => {
+                            let ok = match v.into_iter().find(|(m, _)| *m == mime) {
+                                Some((_, d)) => me.selection_write(serial).map(|mut f| f.write_all(&d).is_ok()).unwrap_or(false),
+                                None => false,
+                            };
+                            me.write_done(serial, ok);
+                        }
+                        Some(Owned::Lazy(files)) if clipfmt::LAZY_TYPES.contains(&mime.as_str()) => {
+                            // 先要到写入端（Mutter 过一阵没人写就作废），再等文件准备好（可能要下载一阵），不卡后面的请求
+                            std::thread::spawn(move || {
+                                let ok = match me.selection_write(serial) {
+                                    Some(mut f) => files.paths().and_then(|p| clipfmt::files_data(&mime, p)).map(|d| f.write_all(&d).is_ok()).unwrap_or(false),
+                                    None => false,
+                                };
+                                me.write_done(serial, ok);
+                            });
+                        }
+                        _ => me.write_done(serial, false),
+                    }
                 }
             });
         }
         Ok(())
+    }
+
+    fn selection_write(&self, serial: u32) -> Option<std::fs::File> {
+        let fd: zbus::zvariant::OwnedFd = self.rd_proxy().ok()?.call("SelectionWrite", &(serial,)).ok()?;
+        Some(std::fs::File::from(std::os::fd::OwnedFd::from(fd)))
+    }
+
+    fn write_done(&self, serial: u32, ok: bool) {
+        if let Ok(p) = self.rd_proxy() {
+            let _ = p.call::<_, _, ()>("SelectionWriteDone", &(serial, ok));
+        }
     }
 
     fn clipboard_get(self: &Arc<Self>) -> Option<ClipboardData> {
@@ -227,9 +264,14 @@ impl Session {
             let g = self.clip.lock();
             (g.owned.clone(), g.available.clone())
         };
-        if let Some(o) = owned {
-            let (m, d) = o.first()?.clone();
-            return clipfmt::parse(&m, d);
+        match owned {
+            // 粘贴时才准备的文件列表是主控端复制的，不能传回去
+            Some(Owned::Lazy(_)) => return None,
+            Some(Owned::Data(o)) => {
+                let (m, d) = o.first()?.clone();
+                return clipfmt::parse(&m, d);
+            }
+            None => {}
         }
         let want = clipfmt::pick(&available).unwrap_or_else(|| "text/plain;charset=utf-8".into());
         let p = self.rd_proxy().ok()?;
@@ -239,21 +281,29 @@ impl Session {
         clipfmt::parse(&want, data)
     }
 
+    /// 我们当剪贴板的主人，放上 `owned`
+    fn set_owned(&self, owned: Owned) -> Result<(), String> {
+        let types = owned.types();
+        let types: Vec<&str> = types.iter().map(|m| m.as_str()).collect();
+        let mut o: HashMap<&str, Value> = HashMap::new();
+        o.insert("mime-types", Value::from(types));
+        self.rd_proxy()?.call::<_, _, ()>("SetSelection", &(o,)).map_err(|x| format!("设置剪贴板失败：{x}"))?;
+        self.clip.lock().owned = Some(owned);
+        Ok(())
+    }
+
     fn clipboard_set(self: &Arc<Self>, d: ClipboardData) {
         if self.enable_clipboard().is_err() {
             return;
         }
-        let offers = clipfmt::offers(&d);
         // Mutter 只认 MIME 类型名（不认 X11 的 UTF8_STRING 之类）
-        let offers: Vec<(String, Vec<u8>)> = offers.into_iter().filter(|(m, _)| m.contains('/')).collect();
-        let types: Vec<&str> = offers.iter().map(|(m, _)| m.as_str()).collect();
-        let mut o: HashMap<&str, Value> = HashMap::new();
-        o.insert("mime-types", Value::from(types));
-        if let Ok(p) = self.rd_proxy() {
-            if p.call::<_, _, ()>("SetSelection", &(o,)).is_ok() {
-                self.clip.lock().owned = Some(offers);
-            }
-        }
+        let offers: Vec<(String, Vec<u8>)> = clipfmt::offers(&d).into_iter().filter(|(m, _)| m.contains('/')).collect();
+        let _ = self.set_owned(Owned::Data(offers));
+    }
+
+    fn clipboard_set_lazy(self: &Arc<Self>, files: Arc<dyn LazyFiles>) -> Result<(), String> {
+        self.enable_clipboard()?;
+        self.set_owned(Owned::Lazy(files))
     }
 }
 
@@ -399,14 +449,17 @@ impl Controller for MutterController {
                 }
             }
             InputEvent::Text { text } => {
-                for c in text.chars() {
-                    if c == '\n' || c == '\r' {
-                        self.chord(&[hidmap::KEY_ENTER]);
-                        continue;
+                // 经 IBus 提交（中日韩等都行）；没有 IBus 时按 keysym（布局里没有的字符会被丢掉）
+                if !super::super::ibus::commit(&text) {
+                    for c in text.chars() {
+                        if c == '\n' || c == '\r' {
+                            self.chord(&[hidmap::KEY_ENTER]);
+                            continue;
+                        }
+                        let sym = super::super::x11::keysym_for(c);
+                        self.call("NotifyKeyboardKeysym", &(sym, true));
+                        self.call("NotifyKeyboardKeysym", &(sym, false));
                     }
-                    let sym = super::super::x11::keysym_for(c);
-                    self.call("NotifyKeyboardKeysym", &(sym, true));
-                    self.call("NotifyKeyboardKeysym", &(sym, false));
                 }
             }
             InputEvent::Touch { phase, x, y, .. } => match phase {
@@ -447,5 +500,9 @@ impl Controller for MutterController {
 
     fn clipboard_set(&mut self, d: ClipboardData) {
         self.session.clipboard_set(d)
+    }
+
+    fn clipboard_set_lazy(&mut self, files: Arc<dyn LazyFiles>) -> Result<(), String> {
+        self.session.clipboard_set_lazy(files)
     }
 }

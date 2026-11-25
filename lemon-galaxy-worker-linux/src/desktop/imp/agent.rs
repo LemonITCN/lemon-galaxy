@@ -5,9 +5,9 @@
 use super::backend::{draw_cursor, Backend, Controller, CursorImage, CursorPos, Frame, Monitor};
 use super::encode::{jpeg, Request, VideoEncoder};
 use super::ipc::{read_msg, write_msg, FromAgent, ToAgent};
-use galaxy_proto::peer::{ClipboardData, ImageData, InputEvent};
+use galaxy_proto::peer::{ClipOffer, ClipboardData, ImageData, InputEvent};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,6 +33,54 @@ enum UiJob {
     Inject(u32, InputEvent),
     ClipboardGet(u64),
     ClipboardSet(ClipboardData),
+    ClipOffer(u64, ClipOffer),
+}
+
+/// 退出前要做的收尾：把输入法切回原来的（ibus.rs）、卸掉复制粘贴文件的虚拟目录。只做一次，多处同时调时后来的等着。
+static CLIP: std::sync::OnceLock<Arc<super::clipoffer::Agent>> = std::sync::OnceLock::new();
+
+pub fn cleanup() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        super::ibus::shutdown();
+        if let Some(c) = CLIP.get() {
+            c.shutdown();
+        }
+    });
+}
+
+/// 收尾后退出进程（Mutter 会话关闭等地方用它代替 std::process::exit）
+pub fn exit(code: i32) -> ! {
+    cleanup();
+    std::process::exit(code)
+}
+
+/// SIGTERM / SIGINT / SIGHUP（服务停止时 systemd 会发给整个进程组）：收尾后退出。
+/// 信号处理函数只往管道写一个字节，收尾在单独的线程里做。
+fn exit_on_signals() {
+    static FD: AtomicI32 = AtomicI32::new(-1);
+    extern "C" fn on_signal(_: libc::c_int) {
+        let fd = FD.load(Ordering::Relaxed);
+        if fd >= 0 {
+            unsafe { libc::write(fd, b"x".as_ptr() as *const libc::c_void, 1) };
+        }
+    }
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return;
+    }
+    FD.store(fds[1], Ordering::Relaxed);
+    let r = fds[0];
+    let _ = std::thread::Builder::new().name("signals".into()).spawn(move || {
+        let mut b = [0u8; 1];
+        if unsafe { libc::read(r, b.as_mut_ptr() as *mut libc::c_void, 1) } == 1 {
+            eprintln!("收到退出信号，收尾后退出");
+            exit(0);
+        }
+    });
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        unsafe { libc::signal(sig, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t) };
+    }
 }
 
 fn log(out: &SyncSender<FromAgent>, error: bool, text: String) {
@@ -82,11 +130,17 @@ pub fn main() -> i32 {
     };
     let _ = out_tx.send(FromAgent::Hello { backend: backend.name().into(), detail: format!("DISPLAY={} WAYLAND_DISPLAY={} 桌面={}", std::env::var("DISPLAY").unwrap_or_default(), std::env::var("WAYLAND_DISPLAY").unwrap_or_default(), std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default()) });
 
+    // 复制粘贴文件（粘贴时才传）：虚拟目录 / 兜底下载、经管道向服务读内容
+    let clip = super::clipoffer::Agent::new(out_tx.clone());
+    let _ = CLIP.set(clip.clone());
+    exit_on_signals();
+
     // 键鼠与剪贴板一个线程（控制器在线程里建：X11 连接、D-Bus 会话都归它）
     let (ui_tx, ui_rx) = mpsc::channel::<UiJob>();
     {
         let out = out_tx.clone();
         let backend = backend.clone();
+        let clip = clip.clone();
         std::thread::spawn(move || {
             let mut ctl: Option<Box<dyn Controller>> = None;
             let mut monitors: Vec<Monitor> = vec![];
@@ -116,8 +170,27 @@ pub fn main() -> i32 {
                         }
                     }
                     UiJob::ClipboardGet(id) => {
-                        let data = ctl.as_mut().and_then(|c| c.clipboard_get());
+                        // 指向我们自己虚拟目录 / 暂存目录的不算（是主控端复制过来的）
+                        let data = clip.filter(ctl.as_mut().and_then(|c| c.clipboard_get()));
                         let _ = out.send(FromAgent::Clipboard { id, data });
+                    }
+                    UiJob::ClipOffer(id, offer) => {
+                        let result = match ctl.as_mut() {
+                            None => Err("剪贴板不可用（连不上桌面）".to_string()),
+                            Some(c) if !c.clipboard_available() => Err("这个桌面暂不支持远程剪贴板".to_string()),
+                            Some(c) => {
+                                let n = offer.entries.len();
+                                match clip.prepare(offer) {
+                                    super::clipoffer::FileClip::Paths(p) => {
+                                        log(&out, false, format!("复制了 {n} 项，放进剪贴板（{}…），粘贴时才传", p.first().cloned().unwrap_or_default()));
+                                        c.clipboard_set(ClipboardData::Files(p));
+                                        Ok(())
+                                    }
+                                    super::clipoffer::FileClip::Lazy(f) => c.clipboard_set_lazy(f),
+                                }
+                            }
+                        };
+                        let _ = out.send(FromAgent::ClipOfferSet { id, result });
                     }
                     UiJob::ClipboardSet(d) => {
                         if let Some(c) = ctl.as_mut() {
@@ -197,6 +270,11 @@ pub fn main() -> i32 {
             ToAgent::ClipboardSet { data } => {
                 let _ = ui_tx.send(UiJob::ClipboardSet(data));
             }
+            ToAgent::ClipOffer { id, offer } => {
+                let _ = ui_tx.send(UiJob::ClipOffer(id, offer));
+            }
+            m @ (ToAgent::ClipOpened { .. } | ToAgent::ClipData { .. }) => clip.deliver(m),
+            ToAgent::Quit => break,
             ToAgent::Screenshot { id, display, max_w, max_h } => {
                 let (out, backend) = (out_tx.clone(), backend.clone());
                 let active = captures.get(&display).cloned();
@@ -243,6 +321,8 @@ pub fn main() -> i32 {
     if let Some(s) = audio_stop.take() {
         s.store(true, Ordering::Relaxed);
     }
+    // 输入法切回原来的、卸掉虚拟目录（服务关管道、发 Quit 都走到这里）
+    cleanup();
     drop(out_tx);
     drop(writer);
     std::thread::sleep(Duration::from_millis(200));

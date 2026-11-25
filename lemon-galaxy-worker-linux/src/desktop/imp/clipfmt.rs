@@ -7,6 +7,20 @@ pub const URI_LIST: &str = "text/uri-list";
 pub const GNOME_FILES: &str = "x-special/gnome-copied-files";
 pub const PNG: &str = "image/png";
 
+/// 有人粘贴时才准备好的文件列表（没有 FUSE 时的兜底：有人要时先下载到暂存目录再给路径，docs/protocol.md 8.4.1）。
+pub trait LazyFiles: Send + Sync {
+    /// 阻塞到文件准备好，返回本机路径；失败返回 None。
+    fn paths(&self) -> Option<Vec<String>>;
+}
+
+/// 延迟提供的文件列表只给这两种类型（不给文字类型：剪贴板管理器、编辑器读文字时不该触发下载）
+pub const LAZY_TYPES: &[&str] = &[URI_LIST, GNOME_FILES];
+
+/// 文件列表按 `mime` 类型给出的数据
+pub fn files_data(mime: &str, paths: Vec<String>) -> Option<Vec<u8>> {
+    offers(&ClipboardData::Files(paths)).into_iter().find(|(m, _)| m == mime).map(|(_, d)| d)
+}
+
 /// 我们放进剪贴板时提供哪些类型（按优先顺序）与各自的数据。
 pub fn offers(d: &ClipboardData) -> Vec<(String, Vec<u8>)> {
     match d {
@@ -153,5 +167,13 @@ mod tests {
         let avail = vec!["TARGETS".to_string(), "UTF8_STRING".to_string(), "image/png".to_string()];
         assert_eq!(pick(&avail).as_deref(), Some(PNG));
         assert_eq!(pick(&["STRING".to_string()]).as_deref(), Some("STRING"));
+    }
+
+    #[test]
+    fn lazy_files_data() {
+        let p = vec!["/run/user/1000/lemon-galaxy/clip/abc/a b.txt".to_string()];
+        assert_eq!(files_data(URI_LIST, p.clone()).unwrap(), b"file:///run/user/1000/lemon-galaxy/clip/abc/a%20b.txt\r\n");
+        assert_eq!(files_data(GNOME_FILES, p.clone()).unwrap(), b"copy\nfile:///run/user/1000/lemon-galaxy/clip/abc/a%20b.txt");
+        assert!(files_data("image/png", p).is_none());
     }
 }

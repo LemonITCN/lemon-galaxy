@@ -1,6 +1,6 @@
 //! 服务与画面代理之间的消息（标准输入输出上的长度前缀帧，postcard 编码）。与 Windows 被控端同一套写法。
 
-use galaxy_proto::peer::{ClipboardData, DisplayInfo, ImageData, InputEvent};
+use galaxy_proto::peer::{ClipOffer, ClipboardData, DisplayInfo, ImageData, InputEvent};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
@@ -20,6 +20,14 @@ pub enum ToAgent {
     StartAudio { id: u64 },
     StopAudio,
     Ping { id: u64 },
+    /// 复制粘贴文件（docs/protocol.md 8.4.1）：把主控端复制的文件清单放进剪贴板，有人粘贴时才读。回 `ClipOfferSet`
+    ClipOffer { id: u64, offer: ClipOffer },
+    /// `FromAgent::ClipOpen` 的结果：文件现在的大小
+    ClipOpened { handle: u64, result: Result<u64, String> },
+    /// `FromAgent::ClipRead` 的结果：空数据表示读到末尾
+    ClipData { handle: u64, result: Result<Vec<u8>, String> },
+    /// 收尾后退出（把输入法切回原来的、卸掉虚拟目录）。服务换会话、停代理时先发这个，等一会再 kill
+    Quit,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,12 +53,19 @@ pub enum FromAgent {
     Log { error: bool, text: String },
     /// 后端坏了（会话结束、显示服务器断开）：服务应当重新找会话、重启代理
     Lost { reason: String },
+    ClipOfferSet { id: u64, result: Result<(), String> },
+    /// 有人粘贴：打开清单 `offer` 第 `index` 项，从 `offset` 往后读（`handle` 由代理分配）
+    ClipOpen { handle: u64, offer: u64, index: u32, offset: u64 },
+    /// 要下一段（最多 `len` 字节）。一次只有一个在途，服务那边按需从主控端读，管道里不会堆积大块数据
+    ClipRead { handle: u64, len: u32 },
+    /// 不读了（服务丢掉读取器，主控端那条流随之停下）
+    ClipClose { handle: u64 },
 }
 
 impl FromAgent {
     pub fn reply_id(&self) -> Option<u64> {
         match self {
-            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::AudioStarted { id, .. } => Some(*id),
+            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::AudioStarted { id, .. } | Self::ClipOfferSet { id, .. } => Some(*id),
             _ => None,
         }
     }

@@ -9,7 +9,8 @@ use super::vdesktop;
 use galaxy_host::audio::AudioSink;
 use galaxy_host::platform::{CaptureStarted, FrameSink, HostPlatform};
 use galaxy_host::sysuser::SysUser;
-use galaxy_proto::peer::{ClipboardData, DisplayInfo, ImageData, InputEvent, VideoCodec};
+use galaxy_host::clipoffer::ClipSource;
+use galaxy_proto::peer::{ClipOffer, ClipboardData, DisplayInfo, ImageData, InputEvent, VideoCodec};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
@@ -50,6 +51,8 @@ struct Inner {
     unlocked_by_us: Mutex<Option<String>>,
     /// 最近一次列到的屏幕（锁屏等原因列不出来时还给主控，让它开画面时看到原因）
     last_displays: Mutex<Vec<DisplayInfo>>,
+    /// 主控端复制的文件清单的来源（粘贴时代理经管道来读，docs/protocol.md 8.4.1）
+    clip_offers: super::clipoffer::Offers,
 }
 
 /// logind 会话是否锁屏；不是 logind 会话或查不到时 None
@@ -128,6 +131,7 @@ impl LinuxPlatform {
                 target: Mutex::new(None),
                 unlocked_by_us: Mutex::new(None),
                 last_displays: Mutex::new(vec![]),
+                clip_offers: Default::default(),
             }),
         });
         let w = Arc::downgrade(&me.inner);
@@ -142,8 +146,9 @@ impl LinuxPlatform {
                 if let Some(cur) = current {
                     if Some(&cur) != t.as_ref() {
                         tracing::info!("屏幕上的会话变了：{} → {}，重启画面代理", cur.describe(), t.as_ref().map(|s| s.describe()).unwrap_or_else(|| "没有".into()));
-                        if let Some(a) = inner.agent.lock().take() {
-                            let _ = a.child.lock().kill();
+                        let old = inner.agent.lock().take();
+                        if let Some(a) = old {
+                            stop_agent(a);
                         }
                         let busy = !inner.captures.lock().is_empty() || inner.audio.lock().is_some();
                         if busy && t.is_some() {
@@ -182,11 +187,7 @@ pub fn session_command(s: &GuiSession, arg: &str) -> Result<(Command, &'static s
     let mut env = galaxy_host::sysuser::child_env(&base);
     env.retain(|(k, _)| k != "TERM" && k != "COLORTERM");
     env.extend(s.env.iter().cloned());
-    let backend = match (s.kind, s.is_gnome() || s.greeter) {
-        (Kind::X11, _) => "x11",
-        (Kind::Wayland, true) => "mutter",
-        (Kind::Wayland, false) => "portal",
-    };
+    let backend = backend_of(s);
     env.push(("LG_BACKEND".into(), backend.into()));
     env.push(("LG_SESSION_ID".into(), s.id.clone()));
     if s.virtual_desktop {
@@ -203,6 +204,31 @@ pub fn session_command(s: &GuiSession, arg: &str) -> Result<(Command, &'static s
         galaxy_host::sysuser::prepare_command(&mut cmd, u, false);
     }
     Ok((cmd, backend))
+}
+
+/// 停掉画面代理：先让它收尾（把输入法切回原来的、卸掉复制粘贴文件的虚拟目录）自己退，最多等 1.5 秒，不退再 kill。
+/// 直接 kill 的话，它正好在用 IBus 提交文字时对方的输入法会变成「没有引擎」（看门进程兜底，但最好别走到那一步）。
+fn stop_agent(a: Agent) {
+    let _ = a.writer.send(ToAgent::Quit);
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_millis(1500) {
+        if matches!(a.child.lock().try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut c = a.child.lock();
+    let _ = c.kill();
+    let _ = c.wait();
+}
+
+/// 会话用哪种画面后端
+fn backend_of(s: &GuiSession) -> &'static str {
+    match (s.kind, s.is_gnome() || s.greeter) {
+        (Kind::X11, _) => "x11",
+        (Kind::Wayland, true) => "mutter",
+        (Kind::Wayland, false) => "portal",
+    }
 }
 
 fn spawn_agent(inner: &Arc<Inner>, s: &GuiSession) -> Result<Agent, String> {
@@ -232,6 +258,8 @@ fn spawn_agent(inner: &Arc<Inner>, s: &GuiSession) -> Result<Agent, String> {
     });
     let weak = Arc::downgrade(inner);
     let session_id = s.id.clone();
+    // 粘贴时读文件：读线程只登记、转发，打开和读在各自的线程里做（不能卡住这个线程）；代理退出时随之全部结束
+    let mut streams = super::clipoffer::Streams::new(tx.clone());
     std::thread::spawn(move || {
         let mut r = std::io::BufReader::with_capacity(256 * 1024, stdout);
         loop {
@@ -240,6 +268,7 @@ fn spawn_agent(inner: &Arc<Inner>, s: &GuiSession) -> Result<Agent, String> {
                 _ => break,
             };
             let Some(inner) = weak.upgrade() else { break };
+            let Some(m) = streams.handle(&inner.clip_offers, m) else { continue };
             if let FromAgent::Lost { reason } = &m {
                 tracing::warn!("画面代理报告会话不可用：{reason}");
                 let why = if reason.contains("inhibited") && session_locked(&session_id) == Some(true) { LOCKED_HINT.to_string() } else { reason.clone() };
@@ -482,6 +511,15 @@ impl HostPlatform for LinuxPlatform {
         send(&self.inner, ToAgent::ClipboardSet { data: d });
     }
 
+    fn clipboard_set_offer(&self, offer: ClipOffer, source: Arc<dyn ClipSource>) -> Result<(), String> {
+        self.inner.clip_offers.add(offer.id, source);
+        match request(&self.inner, |id| ToAgent::ClipOffer { id, offer }, Duration::from_secs(15)) {
+            Ok(FromAgent::ClipOfferSet { result, .. }) => result,
+            Ok(_) => Err("画面代理应答不对".into()),
+            Err(e) => Err(e),
+        }
+    }
+
     fn start_audio(&self, sink: Arc<dyn AudioSink>) -> Result<(), String> {
         *self.inner.audio.lock() = Some(sink);
         let r = request(&self.inner, |id| ToAgent::StartAudio { id }, Duration::from_secs(8));
@@ -524,6 +562,10 @@ impl HostPlatform for LinuxPlatform {
         if super::audio::library_present() {
             c.push("audio".into());
         }
+        // 粘贴时才传文件：X11、GNOME（Mutter）有剪贴板；门户后端（KDE 等）暂不支持剪贴板。没有会话时开的虚拟桌面是前两种
+        if target.as_ref().map(|s| backend_of(s) != "portal").unwrap_or(true) {
+            c.push(galaxy_proto::peer::CAP_CLIPBOARD_OFFER.into());
+        }
         c
     }
 
@@ -549,14 +591,16 @@ impl HostPlatform for LinuxPlatform {
                             // 等桌面撤掉对远程的限制
                             std::thread::sleep(Duration::from_millis(800));
                             *self.inner.failed.lock() = None;
-                            if let Some(a) = self.inner.agent.lock().take() {
-                                let _ = a.child.lock().kill();
+                            let old = self.inner.agent.lock().take();
+                            if let Some(a) = old {
+                                stop_agent(a);
                             }
                         }
                     } else {
                         *self.inner.failed.lock() = Some((s.id.clone(), Instant::now(), LOCKED_HINT.into()));
-                        if let Some(a) = self.inner.agent.lock().take() {
-                            let _ = a.child.lock().kill();
+                        let old = self.inner.agent.lock().take();
+                        if let Some(a) = old {
+                            stop_agent(a);
                         }
                     }
                 } else if self.inner.failed.lock().as_ref().is_some_and(|(_, _, w)| w == LOCKED_HINT) {
@@ -579,8 +623,9 @@ impl HostPlatform for LinuxPlatform {
                 // 代理还在旧会话（比如 Wayland 登录界面）上：换过来
                 let stale = self.inner.agent.lock().as_ref().map(|a| a.session != s).unwrap_or(false);
                 if stale {
-                    if let Some(a) = self.inner.agent.lock().take() {
-                        let _ = a.child.lock().kill();
+                    let old = self.inner.agent.lock().take();
+                    if let Some(a) = old {
+                        stop_agent(a);
                     }
                 }
                 // 桌面刚起来：给窗口管理器一点时间画出来
