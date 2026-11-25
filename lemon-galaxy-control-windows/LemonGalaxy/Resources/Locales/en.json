@@ -251,6 +251,7 @@
   "remote.bitrate": "Bitrate",
   "remote.lock": "Lock remote screen",
   "remote.keys": "Shortcuts",
+  "remote.remoteIme.help": "Remote input method: when on, keystrokes go to the remote computer as they are and its own input method (or the one inside a virtual machine) composes the text, which virtual machines and games need. When off, you type with this PC's input method and the finished text is sent. Remembered per device",
   "remote.commandAsCtrl": "Use Command as Ctrl",
   "remote.clipboard": "Clipboard sync",
   "remote.fullscreen": "Full screen",

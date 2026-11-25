@@ -251,6 +251,7 @@
   "remote.bitrate": "码率",
   "remote.lock": "锁定对方屏幕",
   "remote.keys": "快捷键",
+  "remote.remoteIme.help": "远端输入法：打开后按键原样发给对方，用对方电脑（或虚拟机里的系统）自己的输入法打字，虚拟机、游戏里要这样；关闭时用本机输入法打好字再发过去。按设备记住",
   "remote.commandAsCtrl": "Command 当 Ctrl 用",
   "remote.clipboard": "剪贴板同步",
   "remote.fullscreen": "全屏",

@@ -31,6 +31,15 @@ final class RemoteDesktopModel: TabModel {
         }
     }
     @Published var commandAsCtrl = true
+    /// 远端输入法：按键原样发给对方，由对方自己的输入法拼字（虚拟机里的系统、游戏只认按键，本机输入法打好的文字进不去）。
+    /// 关着时用本机输入法打好字再以文字发过去。按设备记住
+    @Published var remoteIME = false {
+        didSet {
+            guard remoteIME != oldValue, let deviceId else { return }
+            UserDefaults.standard.set(remoteIME, forKey: "remote.remoteIME.\(deviceId)")
+            videoView.unmarkText()
+        }
+    }
     @Published var measuredFps = 0
     @Published var measuredKbps = 0
     @Published var remoteCursor: CGPoint?
@@ -96,6 +105,7 @@ final class RemoteDesktopModel: TabModel {
         audioVolume = s.remoteAudioVolume
         super.init(app: app, kind: .remote, title: title)
         self.deviceId = deviceId
+        remoteIME = UserDefaults.standard.bool(forKey: "remote.remoteIME.\(deviceId)")
         videoView.model = self
         decoder.onFrame = { [weak self] pb, _ in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.show(pb) } }
@@ -1041,7 +1051,8 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
 
     override func keyDown(with event: NSEvent) {
         syncModifiers(event.modifierFlags)
-        if usingInputMethod, event.modifierFlags.intersection([.command, .control]).isEmpty {
+        // 远端输入法：不经本机输入法，按键原样发过去
+        if usingInputMethod, model?.remoteIME != true, event.modifierFlags.intersection([.command, .control]).isEmpty {
             // 输入法在组字时自己处理；没在组字时退格、回车、方向键、Tab、Esc 等会经 doCommand(by:) 交回来，
             // 那时按物理键发给远端（以前 doCommand 是空的，开着中文输入法这些键全被丢掉）
             imeEvent = event
@@ -1284,6 +1295,9 @@ struct RemoteToolbar: View {
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .help(loc("remote.keys"))
+            IconButton(icon: "globe", help: loc("remote.remoteIME.help"), active: tab.remoteIME) {
+                tab.remoteIME.toggle()
+            }
             IconButton(icon: tab.clipboardSync ? "doc.on.clipboard.fill" : "doc.on.clipboard", help: loc("remote.clipboard"), active: tab.clipboardSync) {
                 tab.clipboardSync.toggle()
             }

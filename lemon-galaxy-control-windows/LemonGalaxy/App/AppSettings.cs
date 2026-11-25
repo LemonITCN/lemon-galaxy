@@ -54,6 +54,9 @@ internal sealed class AppSettings : Observable
     public int DisplayFps { get => I("displayFps", 60); set => Set("displayFps", value); }
     public int DisplayBitrateKbps { get => I("displayBitrateKbps", 12000); set => Set("displayBitrateKbps", value); }
     public bool ClipboardSync { get => B("clipboardSync", true); set => Set("clipboardSync", value); }
+    /// <summary>远端输入法（远程桌面工具栏开关）：按设备记住</summary>
+    public bool RemoteIme(string deviceId) => B("remoteIme." + deviceId, false);
+    public void SetRemoteIme(string deviceId, bool on) => Set("remoteIme." + deviceId, on);
     /// <summary>远程桌面播放被控端声音（工具栏开关，记住上次的选择）</summary>
     public bool RemoteAudio { get => B("remoteAudio", true); set => Set("remoteAudio", value); }
     public bool ReattachTerminals { get => B("reattachTerminals", true); set => Set("reattachTerminals", value); }

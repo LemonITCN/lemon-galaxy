@@ -31,6 +31,9 @@ internal sealed partial class RemoteTab : TabModel
     public string Quality;
     public int Fps, BitrateKbps;
     public bool ClipboardSync { get; private set; }
+    /// <summary>远端输入法：按键原样发给对方，由对方自己的输入法拼字（虚拟机里的系统、游戏只认按键，本机输入法打好的文字进不去）。
+    /// 关着时用本机输入法打好字再以文字发过去。按设备记住</summary>
+    public bool RemoteIme { get; private set; }
     public int MeasuredFps, MeasuredKbps;
     public int FramesDecoded;
     /// <summary>隐私屏已开启</summary>
@@ -160,11 +163,13 @@ internal sealed partial class RemoteTab : TabModel
         Fps = s.DisplayFps;
         BitrateKbps = s.DisplayBitrateKbps;
         ClipboardSync = s.ClipboardSync;
+        RemoteIme = s.RemoteIme(deviceId);
         decoder = app.Client.CreateDecoder();
         image = new Image { Stretch = Stretch.Uniform, SnapsToDevicePixels = true, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
         RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.Linear);
         VideoHost = new Grid { Background = Brushes.Black, Focusable = true, FocusVisualStyle = null, ClipToBounds = true, Cursor = Cursors.Arrow };
-        InputMethod.SetIsInputMethodEnabled(VideoHost, true);
+        // 远端输入法时关掉本机输入法：按键不再被输入法拦下组字，原样发给对方
+        InputMethod.SetIsInputMethodEnabled(VideoHost, !RemoteIme);
         VideoHost.Children.Add(image);
         HookInput();
         decodeThread = new Thread(DecodeLoop) { IsBackground = true, Name = "LemonGalaxy 画面解码" };
@@ -873,6 +878,19 @@ internal sealed partial class RemoteTab : TabModel
     // ---------- 剪贴板同步（protocol.md 8.4.1）：本机变化推给远端，鼠标进入画面时拉取远端。文字即时同步；
     // 文件复制时只交换清单，在哪边粘贴才传、进度显示在那边（老被控端没有 clipboard_offer 时本机复制的文件仍整批上传） ----------
 
+    /// <summary>工具栏开关：远端输入法（见 RemoteIme）</summary>
+    public void SetRemoteIme(bool on)
+    {
+        if (RemoteIme == on) return;
+        RemoteIme = on;
+        if (DeviceId != null) App.Settings.SetRemoteIme(DeviceId, on);
+        imeComposing = false;
+        InputMethod.SetIsInputMethodEnabled(VideoHost, !on);
+        // 输入法状态在获得焦点时才生效：画面正有焦点就重新聚焦一次
+        if (VideoHost.IsKeyboardFocusWithin) { Keyboard.ClearFocus(); VideoHost.Focus(); }
+        Notify();
+    }
+
     /// <summary>工具栏开关。关掉时正在传的文件作废；重新打开时对方剪贴板里的文件可以再放一次</summary>
     public void SetClipboardSync(bool on)
     {
@@ -1508,6 +1526,7 @@ internal static class RemoteView
             new(L.T("remote.combo.showDesktop"), () => tab.Special(ComboKey.ShowDesktop)),
             new(L.T("remote.lock"), () => tab.Special(ComboKey.LockScreen)),
         }, L.T("remote.keys")));
+        items.Add(K.IconButton("globe", L.T("remote.remoteIme.help"), () => tab.SetRemoteIme(!tab.RemoteIme), tab.RemoteIme));
         items.Add(K.IconButton("clipboard", L.T("remote.clipboard"), () => tab.SetClipboardSync(!tab.ClipboardSync), tab.ClipboardSync));
         items.Add(K.Info(L.T("remote.clipboard.info")));
         if (tab.AudioSupported) items.Add(K.IconButton(tab.AudioOn ? "volume" : "volumeOff", L.T("remote.sound"), tab.ToggleAudio, tab.AudioOn));
