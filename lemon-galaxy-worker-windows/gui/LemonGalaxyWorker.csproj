@@ -1,0 +1,71 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    LemonGalaxy Windows 被控端界面（WPF，.NET Framework 4.8，Win7 SP1 起，纯代码界面）：被控服务 lemon-galaxy-worker.exe 的「遥控器」，
+    经本机控制接口（命名管道，docs/spec.md 3.0.2）通信；窗口 + 托盘图标，自带安装与卸载（复制到 Program Files、装服务、开始菜单、卸载入口）。
+    配色、图标、通用控件、语言包底座与 Windows 主控端（lemon-galaxy-control-windows）共用同一份源码（下面的链接），不另起分叉。
+    AnyCPU：x64 与 ARM64 的 Windows 都按本机架构运行；被控服务是各架构自己的单文件。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <LangVersion>12</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>LemonGalaxy</RootNamespace>
+    <AssemblyName>LemonGalaxyWorker</AssemblyName>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationIcon>Resources\LemonGalaxyWorker.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version Condition="'$(Version)' == ''">0.1.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Product>LemonGalaxy Worker</Product>
+    <Company>LemonIT.CN</Company>
+    <Copyright>Copyright © 2026 LemonIT.CN · MIT License</Copyright>
+    <Description>LemonGalaxy 被控端（Windows 界面）</Description>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <DebugType>portable</DebugType>
+    <!-- CS0649：共用控件里有被控端界面用不到的字段 -->
+    <NoWarn>$(NoWarn);CS1591;CS0649</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Xaml" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+
+  <!-- 与 Windows 主控端共用的源码 -->
+  <PropertyGroup>
+    <ControlSrc>..\..\lemon-galaxy-control-windows\LemonGalaxy\</ControlSrc>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(ControlSrc)Theme\Palette.cs" Link="Shared\Theme\Palette.cs" />
+    <Compile Include="$(ControlSrc)Theme\Styles.cs" Link="Shared\Theme\Styles.cs" />
+    <Compile Include="$(ControlSrc)Theme\Icons.cs" Link="Shared\Theme\Icons.cs" />
+    <Compile Include="$(ControlSrc)UI\Kit\Controls.cs" Link="Shared\Kit\Controls.cs" />
+    <Compile Include="$(ControlSrc)UI\Kit\Flex.cs" Link="Shared\Kit\Flex.cs" />
+    <Compile Include="$(ControlSrc)UI\Kit\Reactive.cs" Link="Shared\Kit\Reactive.cs" />
+    <Compile Include="$(ControlSrc)UI\Kit\Clip.cs" Link="Shared\Kit\Clip.cs" />
+    <Compile Include="$(ControlSrc)App\Log.cs" Link="Shared\App\Log.cs" />
+    <Compile Include="$(ControlSrc)App\Localization.cs" Link="Shared\App\Localization.cs" />
+  </ItemGroup>
+
+  <!-- 资源：语言包、图标、许可，原样复制到 exe 同目录的 Resources\ -->
+  <ItemGroup>
+    <None Include="Resources\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

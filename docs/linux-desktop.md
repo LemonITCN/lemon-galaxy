@@ -109,6 +109,8 @@ H.264（Annex-B，关键帧带 SPS/PPS，不带 AUD，与其他被控端相同�
 
 ## 7. 本机控制接口（图形界面用）
 
+Windows 被控端用同一套消息，走命名管道，鉴权按管道那头的令牌，普通用户改配置经 UAC 授权，见 [spec.md](spec.md) 3.0.2。
+
 服务监听 Unix 套接字：root 服务 `/run/lemon-galaxy-worker/control.sock`（目录 0755、套接字 0666，靠对端凭据鉴权），用户级服务 `$XDG_RUNTIME_DIR/lemon-galaxy-worker/control.sock`（0600，没有 `XDG_RUNTIME_DIR` 时放数据目录）。环境变量 `LEMON_GALAXY_CONTROL_SOCKET` 可改位置（服务和界面都认）。旧套接字还连得上说明另一个实例在用，新实例不开控制接口。
 
 服务没登录任何账号时照常运行、只开控制接口，界面或命令行登录后再连服务器；账号全部退出后回到这个状态，进程不退。

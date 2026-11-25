@@ -6,8 +6,9 @@
 #                  macOS 13 起 Apple 芯片 + Intel 通用单文件（内嵌 Web 管理后台，可装成系统服务；终端里不带参数运行进交互菜单）
 #   Linux 被控端   lemon-galaxy-worker  Linux x86_64 / ARM64：glibc 2.17 起单文件（含远程桌面、显卡编码）、musl 静态精简版（只有终端与文件）、
 #                  .deb / .rpm（内核 + GTK 界面 + 系统服务，界面在 Debian 10 容器里编，Ubuntu 20.04 / Debian 10 / RHEL 8 起可用）
-#   Windows 被控端 lemon-galaxy-worker.exe  Windows 10 / Server 2016 起，x64 / ARM64 单文件（系统服务 + 画面代理）；
-#                  老系统兼容版（scripts/build-windows-legacy.sh）：Windows 7 SP1 / 8 x64、Vista SP2 / 7 / 8 32 位、XP SP3 32 位（实验）
+#   Windows 被控端 lemon-galaxy-worker.exe  Windows 10 / Server 2016 起，x64 / ARM64 单文件（系统服务 + 画面代理，纯命令行）；
+#                  带界面版 LemonGalaxyWorker-<版本>-windows-<x64|arm64>.zip：同一个被控服务 + WPF 界面（窗口、托盘、自带安装与卸载）；
+#                  老系统兼容版（scripts/build-windows-legacy.sh）：Windows 7 SP1 / 8 x64、Vista SP2 / 7 / 8 32 位、XP SP3 32 位（实验，没有界面）
 #   Mac 客户端     LemonGalaxy.dmg      macOS 13 起，Apple 芯片 + Intel 通用（主控 + 被控）
 #   安卓客户端     LemonGalaxy.apk      Android 8.0 起
 #
@@ -318,6 +319,50 @@ jobs:
         with:
           name: windows-control
           path: out/LemonGalaxy-Windows-x64.zip
+          if-no-files-found: error
+
+  windows-worker-gui:
+    name: Windows 被控端界面与发布包
+    needs: windows
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-x86_64
+          path: art/x64
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-aarch64
+          path: art/arm64
+        continue-on-error: true
+      - uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-worker-gui-${{ hashFiles('lemon-galaxy-worker-windows/gui/LemonGalaxyWorker.csproj') }}
+      - name: 构建、界面自测、连真的被控服务走一遍、打包
+        run: |
+          BASE="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -n "$LEMONGALAXY_BUILD_VERSION" ]; then V="${LEMONGALAXY_BUILD_VERSION#v}"; else V="$BASE.$GITHUB_RUN_NUMBER"; fi
+          export LEMONGALAXY_VERSION="$V" LEMONGALAXY_BUILD="$GITHUB_RUN_NUMBER"
+          lemon-galaxy-worker-windows/gui/scripts/build.sh --arch x64 --worker art/x64/lemon-galaxy-worker.exe --selftest --live
+          if [ -f art/arm64/lemon-galaxy-worker.exe ]; then
+            lemon-galaxy-worker-windows/gui/scripts/build.sh --arch arm64 --worker art/arm64/lemon-galaxy-worker.exe --skip-build
+          fi
+          mkdir -p out && cp lemon-galaxy-worker-windows/gui/dist/*.zip out/
+          ls -l out
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-worker-gui-selftest
+          path: lemon-galaxy-worker-windows/gui/selftest
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-worker-gui
+          path: out/*.zip
           if-no-files-found: error
 
   windows7:
@@ -641,7 +686,7 @@ jobs:
     name: 发布
     # Windows 被控端还在打磨：它失败时照常发布，只是不带 Windows 文件
     if: always() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && needs.rust-tests.result == 'success' && needs.linux.result == 'success' && needs.linux-gui.result == 'success' && needs.macos.result == 'success' && needs.android.result == 'success'
-    needs: [rust-tests, linux, linux-gui, windows, windows7, windows-control, macos, android]
+    needs: [rust-tests, linux, linux-gui, windows, windows-worker-gui, windows7, windows-control, macos, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -707,6 +752,8 @@ jobs:
           print("已生成兼容版主控端压缩包")
           PY
           fi
+          # Windows 被控端带界面版（WPF 界面 + 同一个被控服务，自带安装）：包名里已带版本
+          for z in art/windows-worker-gui/*.zip; do [ -f "$z" ] && cp "$z" out/; done
           WINS=()
           for a in x86_64 aarch64; do
             if [ -f "art/windows-$a/lemon-galaxy-worker.exe" ]; then
@@ -745,9 +792,13 @@ jobs:
             echo "| Linux 被控端（单文件） | glibc 2.17 起，ARM64 | [lemon-galaxy-worker-$V-linux-aarch64]($DL/lemon-galaxy-worker-$V-linux-aarch64) |"
             echo "| Linux 被控端（精简版，只有终端与文件） | 任意发行版（含 Alpine），x86_64 | [lemon-galaxy-worker-$V-linux-musl-x86_64]($DL/lemon-galaxy-worker-$V-linux-musl-x86_64) |"
             echo "| Linux 被控端（精简版） | 任意发行版，ARM64 | [lemon-galaxy-worker-$V-linux-musl-aarch64]($DL/lemon-galaxy-worker-$V-linux-musl-aarch64) |"
+            for a in x64 arm64; do
+              case $a in x64) W="x64" ;; *) W="ARM64" ;; esac
+              [ -f "out/LemonGalaxyWorker-$V-windows-$a.zip" ] && echo "| Windows 被控端（带界面：窗口 + 托盘 + 安装程序） | Windows 10 / 11 / Server 2016 及以上，$W（需要 .NET Framework 4.8，Windows 10 1903 起自带） | [LemonGalaxyWorker-$V-windows-$a.zip]($DL/LemonGalaxyWorker-$V-windows-$a.zip) |"
+            done
             for a in "${WINS[@]}"; do
               case $a in x86_64) W="x64" ;; *) W="ARM64" ;; esac
-              echo "| Windows 被控端 | Windows 10 / Server 2016 及以上，$W | [lemon-galaxy-worker-$V-windows-$a.exe]($DL/lemon-galaxy-worker-$V-windows-$a.exe) |"
+              echo "| Windows 被控端（命令行单文件，服务器、批量部署用） | Windows 10 / Server 2016 及以上，$W | [lemon-galaxy-worker-$V-windows-$a.exe]($DL/lemon-galaxy-worker-$V-windows-$a.exe) |"
             done
             [ -f "out/lemon-galaxy-worker-$V-windows7-x86_64.exe" ] && echo "| Windows 被控端（兼容版） | Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2，x64 | [lemon-galaxy-worker-$V-windows7-x86_64.exe]($DL/lemon-galaxy-worker-$V-windows7-x86_64.exe) |"
             [ -f "out/lemon-galaxy-worker-$V-windows7-x86.exe" ] && echo "| Windows 被控端（32 位兼容版） | Windows Vista SP2 / 7 / 8 / 8.1 / 10 32 位，Server 2008 | [lemon-galaxy-worker-$V-windows7-x86.exe]($DL/lemon-galaxy-worker-$V-windows7-x86.exe) |"
@@ -774,7 +825,8 @@ jobs:
             echo '   三个系统都可以在终端里不带参数运行 `lemon-galaxy-server`（Windows 上双击）进入交互菜单：装服务、启停、改参数、创建管理员、升级都能在菜单里选。'
             echo '2. 打开初始化网址创建管理员、绑定两步验证，在后台「用户」里创建账号。'
             echo '3. Linux 被控端：`chmod +x lemon-galaxy-worker && ./lemon-galaxy-worker login`，再 `sudo ./lemon-galaxy-worker install-service` 安装开机自启。'
-            echo '   Windows 被控端：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service` 安装为系统服务。'
+            echo '   Windows 被控端（带界面）：解压 LemonGalaxyWorker-…-windows-x64.zip，双击 LemonGalaxyWorker.exe，点「安装」（会弹管理员授权），装好后在窗口里登录账号；关掉窗口留在托盘，登录 Windows 后托盘图标自动出现。'
+            echo '   Windows 被控端（命令行）：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service` 安装为系统服务。两种版本是同一个被控服务，可以互相换着管理。'
             echo '4. 在 Mac 或安卓客户端用同一服务器地址和账号登录。'
             echo
             if [ "$MAC_NOTARIZED" != true ]; then

@@ -106,6 +106,14 @@ impl WorkerOs for WindowsOs {
         service::restart()
     }
 
+    fn service_autostart(&self) -> Option<Option<bool>> {
+        Some(service::autostart())
+    }
+
+    fn set_service_autostart(&self, on: bool) -> Result<(), String> {
+        service::set_autostart(on)
+    }
+
     fn host_platform(&self) -> Option<Arc<dyn HostPlatform>> {
         Some(platform::WinPlatform::new())
     }

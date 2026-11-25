@@ -1,7 +1,9 @@
-//! 本机控制接口的消息（docs/linux-desktop.md 第 7 节）。服务端实现在 `control_server.rs`。
+//! 本机控制接口的消息（docs/linux-desktop.md 第 7 节，Windows 见 docs/spec.md 3.0.2）。服务端实现在 `control_server.rs`。
 //!
 //! 图形界面 `lemon-galaxy-worker-gui` 用 `#[path]` 直接引入本文件，所以这里只能依赖 serde、serde_json、
-//! galaxy-proto 与标准库，不能引用本 crate 的其他模块。
+//! galaxy-proto 与标准库，不能引用本 crate 的其他模块。Windows 界面（C#）按同一份 JSON 格式自己写类型。
+//!
+//! 传输：Linux / macOS 是 Unix 套接字；Windows 是命名管道（[`SYSTEM_PIPE`]），一样是一行一个 JSON。
 //!
 //! 一行一个 JSON：
 //!
@@ -23,6 +25,17 @@ pub const MANAGE_ACTION: &str = "cn.lemonit.galaxy.worker.manage";
 
 /// 一行最长（字节）。超过的连接直接断开。
 pub const MAX_LINE: usize = 1 << 20;
+
+/// Windows：系统服务（SYSTEM）的命名管道。
+pub const SYSTEM_PIPE: &str = r"\\.\pipe\LemonGalaxyWorker.control";
+
+/// Windows：普通用户前台运行（`lemon-galaxy-worker run`）时的命名管道，名字里带用户的 SID。
+pub fn user_pipe_name(sid: &str) -> String {
+    format!(r"{SYSTEM_PIPE}.{sid}")
+}
+
+/// Windows：界面授权提升后，这个连接能直接改配置的时长（秒）。与 polkit 的 auth_admin_keep 相当。
+pub const ELEVATION_SECS: u64 = 300;
 
 /// 系统服务（root）的套接字。
 pub fn system_socket_path() -> PathBuf {
@@ -161,6 +174,11 @@ pub enum Request {
     Events { limit: u32 },
     CheckUpdate,
     ApplyUpdate,
+    /// Windows：要一把一次性的授权钥匙（2 分钟内有效）。界面以管理员身份（UAC）运行授权程序，
+    /// 授权程序连上来发 `Elevate`，这个连接在 [`ELEVATION_SECS`] 秒内就能直接改配置
+    ElevationKey,
+    /// Windows：已提升的管理员（或 SYSTEM）把钥匙对应的连接提升
+    Elevate { key: String },
 }
 
 // ---------------- 回复 ----------------
@@ -199,6 +217,11 @@ pub enum Response {
         version: Option<String>,
         /// 服务马上自己重启
         restarting: bool,
+    },
+    ElevationKey {
+        key: String,
+        /// 钥匙多少秒内有效
+        ttl_secs: u32,
     },
 }
 
@@ -239,6 +262,8 @@ pub enum ErrorCode {
     Failed,
     /// 看不懂的请求
     BadRequest,
+    /// Windows：要管理员授权。界面先要 `ElevationKey`，以管理员身份运行授权程序发 `Elevate`，再重试
+    ElevationRequired,
 }
 
 // ---------------- 数据 ----------------
@@ -312,6 +337,8 @@ pub enum ManageRight {
     Direct,
     /// 每次经 polkit 授权（会弹管理员密码框，几分钟内不再问）
     Polkit,
+    /// Windows：经 UAC 提升授权（界面以管理员身份运行一次授权程序，几分钟内不再问）
+    Elevate,
     Denied,
 }
 
@@ -533,6 +560,8 @@ mod tests {
             Request::Events { limit: 100 },
             Request::CheckUpdate,
             Request::ApplyUpdate,
+            Request::ElevationKey,
+            Request::Elevate { key: "ab12".into() },
         ];
         for (i, r) in all.into_iter().enumerate() {
             round(&RequestLine { id: i as u64, req: r });
@@ -576,6 +605,8 @@ mod tests {
             Response::Assist { assist: AssistInfo { mine: true, device_code: "1".into(), code: "2".into() } },
             Response::UpdateCheck { current: "0.1.0".into(), latest: Some(UpdateAvailable { version: "0.2.0".into(), size: 10, notes: String::new() }) },
             Response::Updated { version: None, restarting: false },
+            Response::ElevationKey { key: "ab12".into(), ttl_secs: 120 },
+            Response::err(ErrorCode::ElevationRequired, "uac"),
         ];
         for (i, r) in resps.into_iter().enumerate() {
             let line = round(&ResponseLine { id: i as u64, resp: r.clone() });
@@ -597,10 +628,17 @@ mod tests {
             assert_eq!(serde_json::from_str::<ServerLine>(line.trim()).unwrap(), ServerLine::Event(EventLine { event: e }));
         }
         assert_eq!(encode(&ResponseLine { id: 5, resp: Response::err(ErrorCode::Denied, "no") }), "{\"id\":5,\"resp\":{\"type\":\"error\",\"code\":\"denied\",\"message\":\"no\"}}\n");
+        // Windows 界面（C#）按这些字面量解析
+        assert_eq!(encode(&RequestLine { id: 6, req: Request::Elevate { key: "k".into() } }), "{\"id\":6,\"req\":{\"op\":\"elevate\",\"key\":\"k\"}}\n");
+        assert_eq!(encode(&RequestLine { id: 7, req: Request::ElevationKey }), "{\"id\":7,\"req\":{\"op\":\"elevation_key\"}}\n");
+        assert_eq!(serde_json::to_string(&ManageRight::Elevate).unwrap(), "\"elevate\"");
+        assert_eq!(serde_json::to_string(&ErrorCode::ElevationRequired).unwrap(), "\"elevation_required\"");
     }
 
     #[test]
     fn socket_paths() {
+        assert_eq!(SYSTEM_PIPE, "\\\\.\\pipe\\LemonGalaxyWorker.control");
+        assert_eq!(user_pipe_name("S-1-5-21-1"), "\\\\.\\pipe\\LemonGalaxyWorker.control.S-1-5-21-1");
         assert!(system_socket_path().ends_with("lemon-galaxy-worker/control.sock"));
         assert!(user_socket_path(std::path::Path::new("/d")).ends_with("control.sock"));
         assert!(!socket_candidates().is_empty());

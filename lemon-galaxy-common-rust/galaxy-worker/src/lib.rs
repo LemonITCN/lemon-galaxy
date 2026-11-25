@@ -15,11 +15,14 @@
 //! 各系统的差异（数据目录、服务安装、画面与输入等）由 [`WorkerOs`] 提供。
 
 pub mod control;
-#[cfg(unix)]
+// Windows XP 兼容版没有本机控制接口（也没有界面）：命名管道认人要用的接口 XP 没有
+#[cfg(any(unix, all(windows, not(lemon_galaxy_xp))))]
 mod control_server;
 pub mod gdm;
 #[cfg(unix)]
 mod localsys;
+#[cfg(all(windows, not(lemon_galaxy_xp)))]
+mod localsys_win;
 
 use galaxy_client::account::{self, DeviceMeta, LoginOutcome};
 use galaxy_client::api::Api;
@@ -73,6 +76,15 @@ pub trait WorkerOs: Send + Sync + 'static {
     /// 帮助里补充的系统专有命令说明 (命令, 中文, 英文)
     fn extra_help(&self) -> Vec<(&'static str, &'static str, &'static str)> {
         vec![]
+    }
+    /// 系统服务开机自启（Windows：服务启动类型自动 / 手动）：None = 这个系统用 systemd（控制接口自己查）；
+    /// Some(None) = 还没装服务；Some(Some(开没开))
+    fn service_autostart(&self) -> Option<Option<bool>> {
+        None
+    }
+    /// 改服务开机自启（只在 service_autostart 返回 Some(Some(_)) 时调用）
+    fn set_service_autostart(&self, _on: bool) -> Result<(), String> {
+        Err("not supported".into())
     }
 }
 
@@ -596,9 +608,9 @@ fn platform_for(os: &dyn WorkerOs) -> Option<Arc<dyn galaxy_host::platform::Host
 pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl std::future::Future<Output = ()>) -> i32 {
     let _ = std::fs::create_dir_all(dir);
     os.secure_data_dir(dir);
-    #[cfg(unix)]
+    #[cfg(any(unix, all(windows, not(lemon_galaxy_xp))))]
     let ctl = control_server::start(os.clone(), dir).await;
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, all(windows, not(lemon_galaxy_xp)))))]
     let ctl: Option<Arc<NoControl>> = None;
     // 服务模式下定期自动更新：换好程序后退出，由服务管理器拉起新版本
     if std::env::var("LEMON_GALAXY_SUPERVISED").as_deref() == Ok("1") {
@@ -743,10 +755,10 @@ fn write_waiting_status(dir: &Path, device_id: &str) {
     }
 }
 
-/// Windows 没有本机控制接口（界面另有做法）。
-#[cfg(not(unix))]
+/// Windows XP 兼容版没有本机控制接口。
+#[cfg(not(any(unix, all(windows, not(lemon_galaxy_xp)))))]
 struct NoControl;
-#[cfg(not(unix))]
+#[cfg(not(any(unix, all(windows, not(lemon_galaxy_xp)))))]
 impl NoControl {
     fn set_host(&self, _h: Option<Arc<HostService>>) {}
     async fn woken(&self) {

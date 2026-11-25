@@ -1,10 +1,14 @@
-//! 本机控制接口的服务端（docs/linux-desktop.md 第 7 节；消息见 control.rs）。
+//! 本机控制接口的服务端（docs/linux-desktop.md 第 7 节，Windows 见 docs/spec.md 3.0.2；消息见 control.rs）。
 //!
-//! Unix 套接字，一行一个 JSON，按对端凭据（SO_PEERCRED）鉴权。改配置一律经 host.json：先把命令行的改动读进来，
-//! 改文件，再让服务重新读一遍，所以命令行与界面改的是同一份配置，不会互相覆盖。
+//! 一行一个 JSON。Linux / macOS 走 Unix 套接字，按对端凭据（SO_PEERCRED）鉴权；Windows 走命名管道，
+//! 读到第一行后模拟对方取令牌（账号、是否已提升的管理员、所在会话）鉴权，普通用户改配置经 UAC 授权（`Elevate`）。
+//! 改配置一律经 host.json：先把命令行的改动读进来，改文件，再让服务重新读一遍，所以命令行与界面改的是同一份配置，不会互相覆盖。
 
 use crate::control::*;
+#[cfg(unix)]
 use crate::localsys::{self, PolkitResult};
+#[cfg(windows)]
+use crate::localsys_win;
 use crate::{meta, store, WorkerOs, VERSION};
 use galaxy_client::account::{self, FirstLogin, LoggedIn, LoginOutcome};
 use galaxy_client::api::Api;
@@ -20,8 +24,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -33,30 +38,54 @@ const UNIT: &str = "lemon-galaxy-worker.service";
 /// 鉴权的输入（拆出来方便测试）。
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RightsInput {
-    /// 服务以 root 运行（系统服务）
+    /// 服务以最高权限运行（root / SYSTEM 的系统服务）
     pub service_root: bool,
-    pub service_uid: u32,
-    pub peer_uid: u32,
-    /// 对端是屏幕前图形会话的用户
+    /// 对端是 root、SYSTEM，或 Windows 上已提升的管理员
+    pub peer_super: bool,
+    /// 对端与服务是同一个系统用户
+    pub same_user: bool,
+    /// 对端是屏幕前图形会话的用户（Windows：对方所在的控制台或远程桌面会话连着）
     pub graphical: bool,
-    /// 对端在 sudo / wheel / admin 组
+    /// 对端在 sudo / wheel / admin 组（Windows：管理员组成员，没提升也算）
     pub admin_group: bool,
     /// 对端是某个账号绑定的系统用户
     pub bound_user: bool,
-    /// 系统上可能有 polkit
-    pub polkit: bool,
+    /// 普通用户改配置怎么授权：Polkit（Linux，系统上可能有 polkit）、Elevate（Windows UAC）；None 只有最高权限能改
+    pub auth: Option<ManageRight>,
+    /// Windows：这个连接已经经 UAC 授权，还没过期
+    pub elevated: bool,
 }
 
-/// 契约第 7 节的表。
+/// 契约第 7 节的表（Windows 见 spec.md 3.0.2）。
 pub(crate) fn rights_for(i: &RightsInput) -> Rights {
-    if i.peer_uid == 0 || (!i.service_root && i.peer_uid == i.service_uid) {
+    if i.peer_super || i.elevated || (!i.service_root && i.same_user) {
         return Rights { operate: true, view_config: true, manage: ManageRight::Direct };
     }
     if !i.service_root {
-        // 用户级服务的套接字是 0600，别人本来连不上；连上了也只给看状态
+        // 用户级服务的套接字是 0600（Windows 管道只给本人与 SYSTEM），别人本来连不上；连上了也只给看状态
         return Rights { operate: false, view_config: false, manage: ManageRight::Denied };
     }
-    Rights { operate: i.graphical, view_config: i.bound_user || i.admin_group, manage: if i.polkit { ManageRight::Polkit } else { ManageRight::Denied } }
+    Rights { operate: i.graphical, view_config: i.bound_user || i.admin_group, manage: i.auth.unwrap_or(ManageRight::Denied) }
+}
+
+/// 连接的另一头是谁。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Peer {
+    /// 系统用户名（Windows：「域\用户名」，与 SysUser::display_name 一致）
+    pub name: String,
+    pub pid: Option<u32>,
+    /// root / SYSTEM
+    pub system: bool,
+    /// root、SYSTEM 或已提升的管理员：什么都能做
+    pub superuser: bool,
+    #[cfg(unix)]
+    pub uid: u32,
+    #[cfg(windows)]
+    pub sid: String,
+    #[cfg(windows)]
+    pub session: u32,
+    #[cfg(windows)]
+    pub admin_member: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -70,9 +99,7 @@ enum Need {
 
 struct Conn {
     id: u64,
-    uid: u32,
-    pid: Option<u32>,
-    name: String,
+    peer: Peer,
     zh: AtomicBool,
     tx: mpsc::UnboundedSender<String>,
     login: tokio::sync::Mutex<Option<PendingLogin>>,
@@ -143,9 +170,10 @@ impl Drop for PendingGuard {
 pub(crate) struct Control {
     os: Arc<dyn WorkerOs>,
     dir: PathBuf,
+    /// Unix 套接字路径；Windows 是管道名
     socket: PathBuf,
     root: bool,
-    uid: u32,
+    me: SysUser,
     service_user: String,
     mode: ServiceMode,
     device_id: String,
@@ -159,7 +187,15 @@ pub(crate) struct Control {
     edit: tokio::sync::Mutex<()>,
     next_conn: AtomicU64,
     closed: AtomicBool,
+    listener: Mutex<Option<tokio::task::AbortHandle>>,
+    /// Windows：授权钥匙 → (连接号, 过期时间)
+    elevation_keys: Mutex<HashMap<String, (u64, Instant)>>,
+    /// Windows：经 UAC 授权过的连接 → 到期时间
+    elevated: Mutex<HashMap<u64, Instant>>,
 }
+
+/// 授权钥匙多久内有效
+const ELEVATION_KEY_SECS: u64 = 120;
 
 fn service_mode(root: bool) -> ServiceMode {
     let supervised = std::env::var("LEMON_GALAXY_SUPERVISED").as_deref() == Ok("1") || std::env::var_os("INVOCATION_ID").is_some();
@@ -176,20 +212,28 @@ fn chmod(p: &Path, mode: u32) {
     let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode));
 }
 
-/// 开始监听。另一个实例正在用这个套接字时返回 None（只记日志，不影响服务本身）。
+/// 开始监听。另一个实例正在用这个套接字（管道）时返回 None（只记日志，不影响服务本身）。
 pub(crate) async fn start(os: Arc<dyn WorkerOs>, dir: &Path) -> Option<Arc<Control>> {
     let root = galaxy_host::sysuser::is_root();
     // 环境变量 LEMON_GALAXY_CONTROL_SOCKET 可指定位置（测试、同一台机器跑多份时用；界面也认它）
-    let socket = match std::env::var_os("LEMON_GALAXY_CONTROL_SOCKET").filter(|v| !v.is_empty()) {
-        Some(p) => PathBuf::from(p),
+    let custom = std::env::var_os("LEMON_GALAXY_CONTROL_SOCKET").filter(|v| !v.is_empty()).map(PathBuf::from);
+    #[cfg(unix)]
+    let socket = match custom {
+        Some(p) => p,
         None if root => system_socket_path(),
         None => user_socket_path(dir),
+    };
+    #[cfg(windows)]
+    let socket = match custom {
+        Some(p) => p,
+        None if root => PathBuf::from(SYSTEM_PIPE),
+        None => PathBuf::from(user_pipe_name(&SysUser::current().sid)),
     };
     start_at(os, dir, socket).await
 }
 
-pub(crate) async fn start_at(os: Arc<dyn WorkerOs>, dir: &Path, socket: PathBuf) -> Option<Arc<Control>> {
-    let root = galaxy_host::sysuser::is_root();
+#[cfg(unix)]
+async fn listen_unix(socket: &Path, dir: &Path, root: bool) -> Option<UnixListener> {
     let parent = socket.parent()?.to_path_buf();
     let created = !parent.exists();
     if let Err(e) = std::fs::create_dir_all(&parent) {
@@ -202,20 +246,35 @@ pub(crate) async fn start_at(os: Arc<dyn WorkerOs>, dir: &Path, socket: PathBuf)
         chmod(&parent, 0o700);
     }
     if socket.exists() {
-        if UnixStream::connect(&socket).await.is_ok() {
+        if UnixStream::connect(socket).await.is_ok() {
             tracing::warn!("本机控制接口：{} 已被另一个实例占用，这个实例不提供控制接口", socket.display());
             return None;
         }
-        let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_file(socket);
     }
-    let listener = match UnixListener::bind(&socket) {
+    let listener = match UnixListener::bind(socket) {
         Ok(l) => l,
         Err(e) => {
             tracing::warn!("本机控制接口：无法监听 {}: {e}", socket.display());
             return None;
         }
     };
-    chmod(&socket, if root { 0o666 } else { 0o600 });
+    chmod(socket, if root { 0o666 } else { 0o600 });
+    Some(listener)
+}
+
+pub(crate) async fn start_at(os: Arc<dyn WorkerOs>, dir: &Path, socket: PathBuf) -> Option<Arc<Control>> {
+    let root = galaxy_host::sysuser::is_root();
+    #[cfg(unix)]
+    let listener = listen_unix(&socket, dir, root).await?;
+    #[cfg(windows)]
+    let listener = match pipe::Listener::bind(&socket.to_string_lossy(), root) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("本机控制接口：无法监听 {}（已被另一个实例占用？）: {e}", socket.display());
+            return None;
+        }
+    };
     // 上次没清掉的临时协助目录
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -233,8 +292,8 @@ pub(crate) async fn start_at(os: Arc<dyn WorkerOs>, dir: &Path, socket: PathBuf)
         dir: dir.to_path_buf(),
         socket: socket.clone(),
         root,
-        uid: me.uid,
-        service_user: me.name,
+        service_user: me.display_name(),
+        me,
         mode: service_mode(root),
         device_id: id.device_id.to_hex(),
         host: RwLock::new(None),
@@ -247,10 +306,14 @@ pub(crate) async fn start_at(os: Arc<dyn WorkerOs>, dir: &Path, socket: PathBuf)
         edit: tokio::sync::Mutex::new(()),
         next_conn: AtomicU64::new(1),
         closed: AtomicBool::new(false),
+        listener: Mutex::new(None),
+        elevation_keys: Mutex::new(HashMap::new()),
+        elevated: Mutex::new(HashMap::new()),
     });
     tracing::info!("本机控制接口：{}", socket.display());
     let weak = Arc::downgrade(&ctl);
-    tokio::spawn(async move {
+    #[cfg(unix)]
+    let task = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -260,10 +323,75 @@ pub(crate) async fn start_at(os: Arc<dyn WorkerOs>, dir: &Path, socket: PathBuf)
             if c.closed.load(Ordering::Relaxed) {
                 break;
             }
-            tokio::spawn(async move { c.serve(stream).await });
+            tokio::spawn(async move { c.serve_unix(stream).await });
         }
     });
+    #[cfg(windows)]
+    let task = tokio::spawn(listener.run(weak));
+    *ctl.listener.lock() = Some(task.abort_handle());
     Some(ctl)
+}
+
+/// Windows：命名管道的监听（每个连接一个管道实例，连上一个就再开一个等下一个）。
+#[cfg(windows)]
+mod pipe {
+    use super::Control;
+    use crate::localsys_win::{pipe_sddl, SecurityDescriptor};
+    use std::sync::atomic::Ordering;
+    use std::sync::Weak;
+    use std::time::Duration;
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+
+    pub(super) struct Listener {
+        name: String,
+        sd: SecurityDescriptor,
+        next: NamedPipeServer,
+    }
+
+    fn create(name: &str, sd: &SecurityDescriptor, first: bool) -> std::io::Result<NamedPipeServer> {
+        let mut sa = sd.attributes();
+        // first_pipe_instance：名字已被别的进程（另一个实例，或想冒充服务的程序）占了就失败
+        unsafe { ServerOptions::new().first_pipe_instance(first).reject_remote_clients(true).create_with_security_attributes_raw(name, &mut sa as *mut _ as *mut std::ffi::c_void) }
+    }
+
+    impl Listener {
+        pub(super) fn bind(name: &str, system: bool) -> std::io::Result<Self> {
+            let sid = galaxy_host::sysuser::SysUser::current().sid;
+            let sd = SecurityDescriptor::from_sddl(&pipe_sddl(system, &sid))?;
+            let next = create(name, &sd, true)?;
+            Ok(Self { name: name.to_string(), sd, next })
+        }
+
+        async fn fresh(&self) -> NamedPipeServer {
+            loop {
+                match create(&self.name, &self.sd, false) {
+                    Ok(s) => return s,
+                    Err(e) => {
+                        tracing::warn!("本机控制接口：无法新开管道实例：{e}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+
+        pub(super) async fn run(mut self, ctl: Weak<Control>) {
+            loop {
+                let r = self.next.connect().await;
+                let new = self.fresh().await;
+                let conn = std::mem::replace(&mut self.next, new);
+                if let Err(e) = r {
+                    // 对方连上又马上断了等：这个实例作废，换新的接着等
+                    tracing::debug!("本机控制接口：管道连接失败：{e}");
+                    continue;
+                }
+                let Some(c) = ctl.upgrade() else { break };
+                if c.closed.load(Ordering::Relaxed) {
+                    break;
+                }
+                tokio::spawn(async move { c.serve_pipe(conn).await });
+            }
+        }
+    }
 }
 
 impl Control {
@@ -290,9 +418,13 @@ impl Control {
         self.wake.notified().await
     }
 
-    /// 服务退出：删套接字、结束临时协助
+    /// 服务退出：停监听、删套接字、结束临时协助
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
+        if let Some(t) = self.listener.lock().take() {
+            t.abort();
+        }
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&self.socket);
         if let Some(a) = self.assist.lock().take() {
             a.host.shutdown();
@@ -315,22 +447,81 @@ impl Control {
         }
     }
 
+    fn same_user(&self, c: &Conn) -> bool {
+        #[cfg(unix)]
+        {
+            c.peer.uid == self.me.uid
+        }
+        #[cfg(windows)]
+        {
+            !self.me.sid.is_empty() && c.peer.sid == self.me.sid
+        }
+    }
+
+    fn is_elevated(&self, c: &Conn) -> bool {
+        self.elevated.lock().get(&c.id).is_some_and(|t| Instant::now() < *t)
+    }
+
     fn rights(&self, c: &Conn) -> Rights {
-        let input = if c.uid == 0 || c.uid == self.uid || !self.root {
-            RightsInput { service_root: self.root, service_uid: self.uid, peer_uid: c.uid, ..Default::default() }
-        } else {
-            let st = self.current_state();
-            RightsInput {
-                service_root: self.root,
-                service_uid: self.uid,
-                peer_uid: c.uid,
-                graphical: localsys::graphical_uids().contains(&c.uid),
-                admin_group: localsys::in_admin_group(c.uid),
-                bound_user: st.accounts.iter().any(|a| a.policy.system_user == c.name),
-                polkit: localsys::system_bus_present(),
-            }
+        let base = RightsInput { service_root: self.root, peer_super: c.peer.superuser, same_user: self.same_user(c), elevated: self.is_elevated(c), ..Default::default() };
+        if base.peer_super || base.elevated || base.same_user || !self.root {
+            return rights_for(&base);
+        }
+        let st = self.current_state();
+        #[cfg(unix)]
+        let input = RightsInput {
+            graphical: localsys::graphical_uids().contains(&c.peer.uid),
+            admin_group: localsys::in_admin_group(c.peer.uid),
+            bound_user: st.accounts.iter().any(|a| a.policy.system_user == c.peer.name),
+            auth: localsys::system_bus_present().then_some(ManageRight::Polkit),
+            ..base
+        };
+        #[cfg(windows)]
+        let input = RightsInput {
+            graphical: localsys_win::session_active(c.peer.session),
+            admin_group: c.peer.admin_member,
+            bound_user: st.accounts.iter().any(|a| localsys_win::same_user(&a.policy.system_user, &c.peer.name)),
+            auth: Some(ManageRight::Elevate),
+            ..base
         };
         rights_for(&input)
+    }
+
+    #[cfg(unix)]
+    async fn polkit(&self, c: &Conn) -> Result<(), Response> {
+        let Some(pid) = c.peer.pid else {
+            return Err(Response::err(ErrorCode::AuthFailed, c.tr("无法确认请求来自哪个进程。", "Cannot identify the requesting process.")));
+        };
+        match localsys::polkit_check(pid, c.peer.uid, MANAGE_ACTION).await {
+            PolkitResult::Authorized => Ok(()),
+            PolkitResult::Denied { dismissed: true, .. } => Err(Response::err(ErrorCode::AuthFailed, c.tr("已取消授权。", "Authorization was cancelled."))),
+            PolkitResult::Denied { challenge: true, .. } => Err(Response::err(
+                ErrorCode::AuthFailed,
+                c.tr(
+                    "需要管理员授权，但没有通过。如果没有弹出密码框：界面要从应用菜单打开（从终端、SSH 启动的不在桌面会话里，弹不出密码框），或者桌面没有运行 polkit 授权代理。",
+                    "Administrator authorization failed. If no password dialog appeared, open LemonGalaxy from the application menu (when started from a terminal or SSH it is outside the desktop session), or no polkit agent is running.",
+                ),
+            )),
+            PolkitResult::Denied { .. } => Err(Response::err(ErrorCode::AuthFailed, c.tr("没有通过管理员授权。", "Not authorized."))),
+            PolkitResult::Unavailable(e) => {
+                tracing::warn!("polkit 不可用：{e}");
+                Err(Response::err(
+                    ErrorCode::PolkitUnavailable,
+                    format!(
+                        "{} ({e})",
+                        c.tr(
+                            "无法向 polkit 请求授权，只有 root 能修改配置。请用 sudo lemon-galaxy-worker 命令修改，或安装 polkit 并确认 /usr/share/polkit-1/actions/cn.lemonit.galaxy.worker.policy 存在。",
+                            "Cannot ask polkit for authorization, so only root can change settings. Use sudo lemon-galaxy-worker, or install polkit and make sure /usr/share/polkit-1/actions/cn.lemonit.galaxy.worker.policy exists."
+                        )
+                    ),
+                ))
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn polkit(&self, c: &Conn) -> Result<(), Response> {
+        Err(Response::err(ErrorCode::PolkitUnavailable, c.tr("这台电脑没有 polkit。", "polkit is not available.")))
     }
 
     async fn check(&self, c: &Conn, need: Need) -> Result<(), Response> {
@@ -351,58 +542,58 @@ impl Control {
                     ),
                 )),
                 ManageRight::Denied => Err(denied("这个服务属于另一个用户。", "This service belongs to another user.")),
-                ManageRight::Polkit => {
-                    let Some(pid) = c.pid else {
-                        return Err(Response::err(ErrorCode::AuthFailed, c.tr("无法确认请求来自哪个进程。", "Cannot identify the requesting process.")));
-                    };
-                    match localsys::polkit_check(pid, c.uid, MANAGE_ACTION).await {
-                        PolkitResult::Authorized => Ok(()),
-                        PolkitResult::Denied { dismissed: true, .. } => Err(Response::err(ErrorCode::AuthFailed, c.tr("已取消授权。", "Authorization was cancelled."))),
-                        PolkitResult::Denied { challenge: true, .. } => Err(Response::err(
-                            ErrorCode::AuthFailed,
-                            c.tr(
-                                "需要管理员授权，但没有通过。如果没有弹出密码框：界面要从应用菜单打开（从终端、SSH 启动的不在桌面会话里，弹不出密码框），或者桌面没有运行 polkit 授权代理。",
-                                "Administrator authorization failed. If no password dialog appeared, open LemonGalaxy from the application menu (when started from a terminal or SSH it is outside the desktop session), or no polkit agent is running.",
-                            ),
-                        )),
-                        PolkitResult::Denied { .. } => Err(Response::err(ErrorCode::AuthFailed, c.tr("没有通过管理员授权。", "Not authorized."))),
-                        PolkitResult::Unavailable(e) => {
-                            tracing::warn!("polkit 不可用：{e}");
-                            Err(Response::err(
-                                ErrorCode::PolkitUnavailable,
-                                format!(
-                                    "{} ({e})",
-                                    c.tr(
-                                        "无法向 polkit 请求授权，只有 root 能修改配置。请用 sudo lemon-galaxy-worker 命令修改，或安装 polkit 并确认 /usr/share/polkit-1/actions/cn.lemonit.galaxy.worker.policy 存在。",
-                                        "Cannot ask polkit for authorization, so only root can change settings. Use sudo lemon-galaxy-worker, or install polkit and make sure /usr/share/polkit-1/actions/cn.lemonit.galaxy.worker.policy exists."
-                                    )
-                                ),
-                            ))
-                        }
-                    }
-                }
+                ManageRight::Polkit => self.polkit(c).await,
+                ManageRight::Elevate => Err(Response::err(
+                    ErrorCode::ElevationRequired,
+                    c.tr("需要管理员授权：在弹出的「用户账户控制」窗口里允许后重试。", "Administrator authorization is required. Allow it in the User Account Control prompt and try again."),
+                )),
             },
         }
     }
 
     // ---------------- 连接处理 ----------------
 
-    async fn serve(self: Arc<Self>, stream: UnixStream) {
+    #[cfg(unix)]
+    async fn serve_unix(self: Arc<Self>, stream: UnixStream) {
         let Ok(cred) = stream.peer_cred() else { return };
         let uid = cred.uid();
-        let pid = cred.pid().and_then(|p| u32::try_from(p).ok());
-        let (rd, mut wr) = stream.into_split();
+        let peer = Peer { name: localsys::user_name(uid), pid: cred.pid().and_then(|p| u32::try_from(p).ok()), system: uid == 0, superuser: uid == 0, uid };
+        let (rd, wr) = stream.into_split();
+        self.serve(BufReader::new(rd), wr, peer, None).await
+    }
+
+    /// Windows：先读第一行（管道那头写过数据才能模拟对方取令牌），再认人、开始服务。
+    #[cfg(windows)]
+    async fn serve_pipe(self: Arc<Self>, pipe: tokio::net::windows::named_pipe::NamedPipeServer) {
+        use std::os::windows::io::AsRawHandle;
+        // 裸句柄不是 Send：存成整数跨 await，管道本身活到这个函数结束
+        let handle = pipe.as_raw_handle() as usize;
+        let (rd, wr) = tokio::io::split(pipe);
+        let mut reader = BufReader::new(rd);
+        let mut first = Vec::new();
+        match tokio::time::timeout(Duration::from_secs(30), (&mut reader).take(MAX_LINE as u64 + 1).read_until(b'\n', &mut first)).await {
+            Ok(Ok(n)) if n > 0 && first.len() <= MAX_LINE => {}
+            _ => return,
+        }
+        let p = match localsys_win::identify_pipe_client(handle as *mut std::ffi::c_void) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("本机控制接口：认不出管道那头是谁：{e}");
+                return;
+            }
+        };
+        let peer = Peer { name: p.name, pid: p.pid, system: p.system, superuser: p.system || p.elevated_admin, sid: p.sid, session: p.session, admin_member: p.admin_member };
+        self.serve(reader, wr, peer, Some(first)).await
+    }
+
+    async fn serve<R, W>(self: Arc<Self>, mut reader: BufReader<R>, mut wr: W, peer: Peer, first: Option<Vec<u8>>)
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-        let conn = Arc::new(Conn {
-            id: self.next_conn.fetch_add(1, Ordering::Relaxed),
-            uid,
-            pid,
-            name: localsys::user_name(uid),
-            zh: AtomicBool::new(crate::zh()),
-            tx,
-            login: tokio::sync::Mutex::new(None),
-        });
-        tracing::debug!("本机控制接口：{}（uid {uid}）已连接", conn.name);
+        let conn = Arc::new(Conn { id: self.next_conn.fetch_add(1, Ordering::Relaxed), peer, zh: AtomicBool::new(crate::zh()), tx, login: tokio::sync::Mutex::new(None) });
+        tracing::debug!("本机控制接口：{}（进程 {:?}）已连接", conn.peer.name, conn.peer.pid);
         let writer = tokio::spawn(async move {
             while let Some(l) = rx.recv().await {
                 if wr.write_all(l.as_bytes()).await.is_err() {
@@ -441,14 +632,17 @@ impl Control {
                 }
             })
         };
-        let mut reader = BufReader::new(rd);
-        let mut buf = Vec::new();
+        let mut buf = first.unwrap_or_default();
+        let mut pending_first = !buf.is_empty();
         loop {
-            buf.clear();
-            match (&mut reader).take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
+            if !pending_first {
+                buf.clear();
+                match (&mut reader).take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
             }
+            pending_first = false;
             if buf.len() > MAX_LINE {
                 break;
             }
@@ -473,6 +667,8 @@ impl Control {
         }
         pusher.abort();
         forwarder.abort();
+        self.elevated.lock().remove(&conn.id);
+        self.elevation_keys.lock().retain(|_, (id, _)| *id != conn.id);
         // 开协助的窗口关了，协助随之结束
         let owned = self.assist.lock().as_ref().is_some_and(|a| a.shared.owner == conn.id);
         if owned {
@@ -715,13 +911,49 @@ impl Control {
                     let dir = self.dir.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(800)).await;
+                        #[cfg(unix)]
                         let _ = std::fs::remove_file(socket);
+                        #[cfg(not(unix))]
+                        let _ = socket;
                         let _ = std::fs::remove_file(dir.join("status.json"));
                         tracing::info!("已更新，重启服务");
                         std::process::exit(75);
                     });
                 }
                 Response::Updated { version: v, restarting }
+            }
+            Request::ElevationKey => {
+                if self.rights(c).manage == ManageRight::Denied {
+                    return Err(Response::err(ErrorCode::Denied, c.tr("这个服务属于另一个用户。", "This service belongs to another user.")));
+                }
+                let key: String = galaxy_crypto::random_bytes::<16>().iter().map(|b| format!("{b:02x}")).collect();
+                let mut keys = self.elevation_keys.lock();
+                let now = Instant::now();
+                keys.retain(|_, (_, t)| now < *t);
+                keys.insert(key.clone(), (c.id, now + Duration::from_secs(ELEVATION_KEY_SECS)));
+                Response::ElevationKey { key, ttl_secs: ELEVATION_KEY_SECS as u32 }
+            }
+            Request::Elevate { key } => {
+                // 只认真正有最高权限的连接（SYSTEM、已提升的管理员），不认「和服务同一个用户」
+                if !c.peer.superuser {
+                    return Err(Response::err(ErrorCode::Denied, c.tr("要以管理员身份运行才能授权。", "Authorization must run as administrator.")));
+                }
+                let found = self.elevation_keys.lock().remove(key.trim());
+                let Some((conn_id, _)) = found.filter(|(_, t)| Instant::now() < *t) else {
+                    return Err(Response::err(ErrorCode::NotFound, c.tr("授权已过期，请重试。", "The authorization expired. Please try again.")));
+                };
+                self.elevated.lock().insert(conn_id, Instant::now() + Duration::from_secs(ELEVATION_SECS));
+                tracing::info!("{} 授权了本机控制连接 {conn_id} 修改配置（{} 秒）", c.peer.name, ELEVATION_SECS);
+                self.bump();
+                // 到期时推一次状态，界面把按钮换回「要授权」
+                let weak = Arc::downgrade(self);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(ELEVATION_SECS) + Duration::from_millis(200)).await;
+                    if let Some(me) = weak.upgrade() {
+                        me.bump();
+                    }
+                });
+                Response::ok()
             }
         })
     }
@@ -739,7 +971,7 @@ impl Control {
         let assist = assist.map(|(s, mine)| {
             sessions.extend(s.sessions.iter().map(|x| session_view(x, true, &st)));
             let (dc, code) = s.assist.unwrap_or_default();
-            if mine || c.uid == 0 {
+            if mine || c.peer.superuser {
                 AssistInfo { mine, device_code: dc, code }
             } else {
                 AssistInfo { mine, device_code: String::new(), code: String::new() }
@@ -761,7 +993,7 @@ impl Control {
             sessions,
             assist,
             rights: self.rights(c),
-            you: c.name.clone(),
+            you: c.peer.name.clone(),
             config_rev: std::fs::metadata(self.state_path()).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0),
         }
     }
@@ -770,8 +1002,12 @@ impl Control {
         if !self.root {
             return (vec![self.service_user.clone()], self.service_user.clone());
         }
+        #[cfg(unix)]
         let users = localsys::login_users();
-        let default = if c.uid != 0 { c.name.clone() } else { self.os.default_system_user() };
+        #[cfg(windows)]
+        let users = localsys_win::login_users();
+        // 默认用界面那头的人自己（root、SYSTEM 连上来时用系统默认）
+        let default = if !c.peer.system { c.peer.name.clone() } else { self.os.default_system_user() };
         (users, default)
     }
 
@@ -803,7 +1039,9 @@ impl Control {
 
     async fn settings(&self, c: &Conn) -> Settings {
         let st = HostState::load(&self.state_path());
-        let login_screen_x11 = if !self.root {
+        let login_screen_x11 = if !cfg!(target_os = "linux") {
+            Feature { available: false, enabled: false, detail: c.tr("只有 Linux 有这一项。", "Linux only.") }
+        } else if !self.root {
             Feature { available: false, enabled: false, detail: c.tr("要以系统服务运行才能修改。", "Requires the system service.") }
         } else {
             match crate::gdm::state() {
@@ -836,6 +1074,13 @@ impl Control {
     }
 
     async fn autostart(&self, c: &Conn) -> Feature {
+        // Windows：系统服务的启动类型（自动 / 手动）
+        if let Some(s) = self.os.service_autostart() {
+            return match s {
+                Some(on) => Feature { available: true, enabled: on, detail: String::new() },
+                None => Feature { available: false, enabled: false, detail: c.tr("还没有安装为服务。", "Not installed as a service.") },
+            };
+        }
         if !Path::new("/run/systemd/system").exists() {
             return Feature { available: false, enabled: false, detail: c.tr("这台电脑没有使用 systemd。", "This computer does not use systemd.") };
         }
@@ -853,6 +1098,12 @@ impl Control {
         let f = self.autostart(c).await;
         if !f.available {
             return Err(Response::err(ErrorCode::NotApplicable, if f.detail.is_empty() { c.tr("不适用。", "Not applicable.") } else { f.detail }));
+        }
+        if self.os.service_autostart().is_some() {
+            let os = self.os.clone();
+            tokio::task::spawn_blocking(move || os.set_service_autostart(on)).await.map_err(|e| Response::err(ErrorCode::Failed, e.to_string()))?.map_err(|e| Response::err(ErrorCode::Failed, e))?;
+            self.bump();
+            return Ok(Response::ok());
         }
         let out = self.systemctl().args([if on { "enable" } else { "disable" }, UNIT]).output().await.map_err(|e| Response::err(ErrorCode::Failed, e.to_string()))?;
         if !out.status.success() {
@@ -1090,7 +1341,7 @@ impl Control {
             return Err(Response::err(ErrorCode::Failed, c.tr("连不上服务器，无法开启临时协助。", "Cannot reach the server, so assistance could not start.")));
         }
         *self.assist.lock() = Some(Assist { host, shared, tmp });
-        tracing::info!("临时协助已开启（{}）", c.name);
+        tracing::info!("临时协助已开启（{}）", c.peer.name);
         self.bump();
         Ok(Response::Assist { assist: self.assist_info(c) })
     }
@@ -1255,33 +1506,45 @@ fn read_events(dir: &Path, n: usize) -> Vec<LogEntry> {
 mod tests {
     use super::*;
 
-    fn input(peer: u32) -> RightsInput {
-        RightsInput { service_root: true, service_uid: 0, peer_uid: peer, polkit: true, ..Default::default() }
+    /// root / SYSTEM 服务，对方是普通用户（auth 为普通用户改配置的授权方式）
+    fn input(auth: ManageRight) -> RightsInput {
+        RightsInput { service_root: true, auth: Some(auth), ..Default::default() }
     }
 
     #[test]
     fn root_service_rights() {
-        // root 什么都能做
-        assert_eq!(rights_for(&input(0)), Rights { operate: true, view_config: true, manage: ManageRight::Direct });
+        // root、SYSTEM、已提升的管理员什么都能做
+        assert_eq!(rights_for(&RightsInput { peer_super: true, ..input(ManageRight::Polkit) }), Rights { operate: true, view_config: true, manage: ManageRight::Direct });
         // 普通用户：只能看状态；改配置要 polkit
-        assert_eq!(rights_for(&input(1000)), Rights { operate: false, view_config: false, manage: ManageRight::Polkit });
+        assert_eq!(rights_for(&input(ManageRight::Polkit)), Rights { operate: false, view_config: false, manage: ManageRight::Polkit });
         // 屏幕前的用户能断开、停 AI、开协助
-        let g = RightsInput { graphical: true, ..input(1000) };
+        let g = RightsInput { graphical: true, ..input(ManageRight::Polkit) };
         assert_eq!(rights_for(&g), Rights { operate: true, view_config: false, manage: ManageRight::Polkit });
         // 管理员组、绑定的系统用户能看配置
-        assert!(rights_for(&RightsInput { admin_group: true, ..input(1000) }).view_config);
-        assert!(rights_for(&RightsInput { bound_user: true, ..input(1000) }).view_config);
+        assert!(rights_for(&RightsInput { admin_group: true, ..input(ManageRight::Polkit) }).view_config);
+        assert!(rights_for(&RightsInput { bound_user: true, ..input(ManageRight::Polkit) }).view_config);
         // 没有 polkit：只有 root 能改
-        assert_eq!(rights_for(&RightsInput { polkit: false, graphical: true, admin_group: true, ..input(1000) }).manage, ManageRight::Denied);
+        assert_eq!(rights_for(&RightsInput { auth: None, graphical: true, admin_group: true, ..input(ManageRight::Polkit) }).manage, ManageRight::Denied);
+    }
+
+    #[test]
+    fn windows_rights() {
+        // 没提升的管理员：能看配置；改配置要 UAC 授权
+        let admin = RightsInput { graphical: true, admin_group: true, ..input(ManageRight::Elevate) };
+        assert_eq!(rights_for(&admin), Rights { operate: true, view_config: true, manage: ManageRight::Elevate });
+        // 授权过（还没过期）：同 SYSTEM
+        assert_eq!(rights_for(&RightsInput { elevated: true, ..admin }), Rights { operate: true, view_config: true, manage: ManageRight::Direct });
+        // 标准用户（不在屏幕前、没绑定）：只看状态，改配置一样走 UAC（输管理员密码）
+        assert_eq!(rights_for(&input(ManageRight::Elevate)), Rights { operate: false, view_config: false, manage: ManageRight::Elevate });
     }
 
     #[test]
     fn user_service_rights() {
-        let mine = RightsInput { service_root: false, service_uid: 1000, peer_uid: 1000, ..Default::default() };
+        let mine = RightsInput { service_root: false, same_user: true, ..Default::default() };
         assert_eq!(rights_for(&mine), Rights { operate: true, view_config: true, manage: ManageRight::Direct });
-        let other = RightsInput { peer_uid: 1001, graphical: true, admin_group: true, polkit: true, ..mine };
+        let other = RightsInput { same_user: false, graphical: true, admin_group: true, auth: Some(ManageRight::Polkit), ..mine };
         assert_eq!(rights_for(&other), Rights { operate: false, view_config: false, manage: ManageRight::Denied });
-        let root = RightsInput { peer_uid: 0, ..mine };
+        let root = RightsInput { peer_super: true, ..other };
         assert_eq!(rights_for(&root).manage, ManageRight::Direct);
     }
 
@@ -1320,6 +1583,7 @@ mod tests {
     }
 
     /// 真的走一遍套接字：握手、状态、改配置写进 host.json、错误请求、协助应答、退出删套接字。
+    #[cfg(unix)]
     #[tokio::test]
     async fn socket_end_to_end() {
         let dir = std::env::temp_dir().join(format!("lg-ctl-test-{}", std::process::id()));
@@ -1386,6 +1650,92 @@ mod tests {
         ctl.close();
         assert!(!sock.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows：真的走一遍命名管道：认出是自己、握手、状态、改配置、授权钥匙、同名管道不让第二个实例抢、关闭后连不上。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn pipe_end_to_end() {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        let dir = std::env::temp_dir().join(format!("lg-ctl-pipe-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!(r"\\.\pipe\LemonGalaxyWorker.test.{}", std::process::id());
+        let ctl = start_at(Arc::new(TestOs), &dir, PathBuf::from(&name)).await.expect("listen");
+        assert!(start_at(Arc::new(TestOs), &dir, PathBuf::from(&name)).await.is_none(), "同名管道不让第二个实例抢");
+        let client = ClientOptions::new().open(&name).unwrap();
+        let (rd, mut wr) = tokio::io::split(client);
+        let mut rd = BufReader::new(rd);
+        async fn reply<R: AsyncRead + Unpin>(rd: &mut BufReader<R>, id: u64) -> Response {
+            loop {
+                let mut l = String::new();
+                let n = tokio::time::timeout(Duration::from_secs(10), rd.read_line(&mut l)).await.unwrap().unwrap();
+                assert!(n > 0, "连接被关");
+                match serde_json::from_str::<ServerLine>(l.trim()).unwrap() {
+                    ServerLine::Response(r) if r.id == id => return r.resp,
+                    _ => {}
+                }
+            }
+        }
+        let mut next = 0u64;
+        let mut call = |req: Request| {
+            next += 1;
+            encode(&RequestLine { id: next, req })
+        };
+        wr.write_all(call(Request::Hello { lang: "zh-CN".into() }).as_bytes()).await.unwrap();
+        assert!(matches!(reply(&mut rd, 1).await, Response::Hello { protocol: PROTOCOL_VERSION, .. }));
+        wr.write_all(call(Request::Status).as_bytes()).await.unwrap();
+        let Response::Status { status } = reply(&mut rd, 2).await else { panic!() };
+        // 认出管道那头就是自己（与服务同一个用户：直接能改）
+        let me = SysUser::current();
+        assert!(localsys_win::same_user(&status.you, &me.display_name()), "{} vs {}", status.you, me.display_name());
+        assert_eq!(status.rights.manage, ManageRight::Direct);
+        wr.write_all(call(Request::SetLockOnEnd { enabled: true }).as_bytes()).await.unwrap();
+        assert_eq!(reply(&mut rd, 3).await, Response::ok());
+        assert!(HostState::load(&dir.join("host.json")).lock_on_end);
+        wr.write_all(call(Request::Settings).as_bytes()).await.unwrap();
+        let Response::Settings { settings } = reply(&mut rd, 4).await else { panic!() };
+        assert!(!settings.login_screen_x11.available);
+        // 授权钥匙：拿得到；用不存在的钥匙授权被拒（不是管理员时是 Denied，是管理员时是 NotFound）
+        wr.write_all(call(Request::ElevationKey).as_bytes()).await.unwrap();
+        let Response::ElevationKey { key, ttl_secs } = reply(&mut rd, 5).await else { panic!() };
+        assert_eq!(key.len(), 32);
+        assert_eq!(ttl_secs as u64, ELEVATION_KEY_SECS);
+        wr.write_all(call(Request::Elevate { key: "nope".into() }).as_bytes()).await.unwrap();
+        assert!(matches!(reply(&mut rd, 6).await, Response::Error { code: ErrorCode::NotFound | ErrorCode::Denied, .. }));
+        wr.write_all(call(Request::SystemUsers).as_bytes()).await.unwrap();
+        assert!(matches!(reply(&mut rd, 7).await, Response::SystemUsers { .. }));
+        drop(wr);
+        drop(rd);
+        ctl.close();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(ClientOptions::new().open(&name).is_err(), "关闭后管道不在了");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows：本进程连自己开的管道，模拟对方取到的令牌就是自己的。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn pipe_identify_self() {
+        use std::os::windows::io::AsRawHandle;
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        let name = format!(r"\\.\pipe\LemonGalaxyWorker.ident.{}", std::process::id());
+        let server = ServerOptions::new().first_pipe_instance(true).create(&name).unwrap();
+        let mut client = ClientOptions::new().open(&name).unwrap();
+        server.connect().await.unwrap();
+        client.write_all(b"{}\n").await.unwrap();
+        let mut rd = BufReader::new(server);
+        let mut l = String::new();
+        rd.read_line(&mut l).await.unwrap();
+        let p = localsys_win::identify_pipe_client(rd.get_ref().as_raw_handle() as _).unwrap();
+        let me = SysUser::current();
+        assert_eq!(p.sid, me.sid);
+        assert_eq!(p.system, me.sid == localsys_win::SYSTEM_SID);
+        assert_eq!(p.pid, Some(std::process::id()));
+        // 测试进程是已提升的管理员（CI 上就是）时，令牌里的管理员组应当生效
+        if galaxy_host::sysuser::is_admin() && !p.system {
+            assert!(p.elevated_admin && p.admin_member);
+        }
     }
 
     #[test]

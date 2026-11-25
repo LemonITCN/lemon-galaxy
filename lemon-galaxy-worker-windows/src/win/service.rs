@@ -129,6 +129,31 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// 服务的启动类型是不是「自动」（开机自启）；没装服务返回 None。
+pub fn autostart() -> Option<bool> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+    let s = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG).ok()?;
+    let c = s.query_config().ok()?;
+    Some(c.start_type == ServiceStartType::AutoStart)
+}
+
+/// 改服务启动类型：自动（开机自启）/ 手动。服务以 SYSTEM 运行，自己就能改；用 sc.exe 只改启动类型，不动其他配置。
+pub fn set_autostart(on: bool) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Windows"));
+    let out = std::process::Command::new(root.join("System32").join("sc.exe"))
+        .args(["config", SERVICE_NAME, "start=", if on { "auto" } else { "demand" }])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let msg = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Err(if msg.is_empty() { format!("sc.exe {}", out.status) } else { msg })
+    }
+}
+
 /// 重启服务（更新后用）。
 pub fn restart() -> bool {
     let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else { return false };

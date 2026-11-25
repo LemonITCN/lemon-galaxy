@@ -34,3 +34,7 @@ lemon-galaxy-control-windows/LemonGalaxy/bin/
 lemon-galaxy-control-windows/LemonGalaxy/obj/
 lemon-galaxy-control-windows/dist/
 lemon-galaxy-control-windows/selftest/
+lemon-galaxy-worker-windows/gui/bin/
+lemon-galaxy-worker-windows/gui/obj/
+lemon-galaxy-worker-windows/gui/dist/
+lemon-galaxy-worker-windows/gui/selftest/

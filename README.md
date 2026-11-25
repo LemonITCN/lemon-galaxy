@@ -17,7 +17,7 @@
 | 类型 | 作用 | 平台 |
 |---|---|---|
 | 主控端（control） | 控制别的设备，同时自己也能被控；只能登录一个账号 | macOS、Windows |
-| 被控端（worker） | 只被控制，体积小；可以同时登录多个账号，出现在每个账号的设备列表里 | Linux（窗口 + 托盘，或服务器上的命令行）、Windows（系统服务）、macOS |
+| 被控端（worker） | 只被控制，体积小；可以同时登录多个账号，出现在每个账号的设备列表里 | Linux（窗口 + 托盘，或服务器上的命令行）、Windows（窗口 + 托盘，或命令行单文件；都是系统服务）、macOS（菜单栏应用） |
 | 手机端（mobile） | 只控制，也能用 AI | 安卓、iOS |
 
 ## 支持的系统
@@ -47,7 +47,7 @@
    - 有桌面的机器：装 `.deb`（`sudo apt install ./lemon-galaxy-worker_<版本>_amd64.deb`）或 `.rpm`（`sudo dnf install ./lemon-galaxy-worker-<版本>.x86_64.rpm`），从应用菜单打开「LemonGalaxy 被控端」登录。服务开机自启，托盘显示状态。
    - 服务器：单文件 `./lemon-galaxy-worker login`，再 `sudo ./lemon-galaxy-worker install-service`。想远程看桌面就装 Xvfb 和一个桌面环境（如 `sudo apt install xvfb xfce4`），连上时自动开虚拟桌面。
    - Ubuntu 22.04 起默认是 Wayland：GNOME 不用额外设置；KDE 等第一次连接要有人在被控机上点一次「允许」。Wayland 锁屏时系统禁止远程桌面：远程期间被控端会阻止自动锁屏；无人值守的电脑可在被控端设置里打开「远程连入时自动解锁」（`sudo lemon-galaxy-worker unlock-on-connect on`，远程结束后自动重新锁上）。没人登录时自动开虚拟桌面（有 Xvfb 用 Xvfb，没有就用系统自带的 GNOME 无头桌面）。GNOME 48 及更早的 GDM 登录界面可用 `sudo lemon-galaxy-worker login-screen x11 on` 改成 X11，远程就能看到。
-4. Windows 被控端：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service`。服务以 SYSTEM 运行，锁屏和 UAC 界面也能远程操作。XP / Vista 没有 PowerShell 时用管理员身份的命令提示符，命令相同；老系统用哪个文件见 [docs/research/windows-xp-32bit.md](docs/research/windows-xp-32bit.md)。
+4. Windows 被控端：带界面版解压 `LemonGalaxyWorker-<版本>-windows-x64.zip`（ARM64 电脑用 arm64），双击 `LemonGalaxyWorker.exe` 点「安装」，装好后在窗口里登录账号，关掉窗口留在托盘（设计见 [docs/spec.md](docs/spec.md) 3.0.2）。命令行版：以管理员身份打开 PowerShell，运行 `.\lemon-galaxy-worker.exe login`，再 `.\lemon-galaxy-worker.exe install-service`。两种都是同一个以 SYSTEM 运行的服务，锁屏和 UAC 界面也能远程操作。XP / Vista 没有 PowerShell 时用管理员身份的命令提示符，命令相同；老系统用哪个文件见 [docs/research/windows-xp-32bit.md](docs/research/windows-xp-32bit.md)。
 5. 在 Mac、Windows 或手机上用同一个服务器地址和账号登录。
 
 被控端命令一览：`lemon-galaxy-worker help`。
@@ -59,7 +59,7 @@
 | `docs/` | 契约：`spec.md` 总体方案、`protocol.md` 协议、`security.md` 安全设计、`ai-agent.md` AI 智能体、`api.md` 服务器接口、`ffi.md` 内核导出接口 |
 | `lemon-galaxy-common-rust/` | 各端共用的 Rust 内核：协议、加密、网络（打洞 / 中转 / 局域网）、客户端、被控端、AI 智能体、SSH、导出给 Swift / Kotlin / C# 的接口 |
 | `lemon-galaxy-server/` | 服务器（Rust）与 Web 管理后台（Vue 3，打进同一个可执行文件） |
-| `lemon-galaxy-worker-linux/`、`lemon-galaxy-worker-windows/` | 被控端（Linux 含 `gui/` 图形界面，设计见 `docs/linux-desktop.md`） |
+| `lemon-galaxy-worker-linux/`、`lemon-galaxy-worker-windows/`、`lemon-galaxy-worker-macos/` | 被控端（Linux、Windows 都含 `gui/` 图形界面，设计见 `docs/linux-desktop.md` 与 `docs/spec.md` 3.0.2；macOS 是菜单栏应用） |
 | `lemon-galaxy-control-macos/`、`lemon-galaxy-control-windows/` | 主控端（SwiftUI、WPF） |
 | `lemon-galaxy-mobile-android/`、`lemon-galaxy-mobile-ios/` | 手机端（Kotlin + Compose、SwiftUI） |
 | `scripts/` | 构建与测试脚本 |

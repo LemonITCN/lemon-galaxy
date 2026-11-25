@@ -25,6 +25,18 @@ parking_lot.workspace = true
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["user"] }
 
+# Windows 本机控制接口（命名管道）：管道的访问控制、按令牌认人、会话状态、可选的系统用户
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Pipes",
+  "Win32_System_Registry",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Threading",
+] }
+
 # polkit（本机控制接口鉴权）：纯 Rust 的 D-Bus，不链接 libdbus
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio"] }

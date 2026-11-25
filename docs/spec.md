@@ -23,8 +23,8 @@
 | `lemon-galaxy-server` | 服务器：账号、设备、在线状态、信令、打洞协助、中转、端到端加密库同步、大模型网关、自动更新分发、Web 管理后台 | Rust（axum + rustls + quinn）、SQLite 单文件、Vue 3 + antdv-next 后台打进同一个可执行文件 |
 | `lemon-galaxy-common-rust` | 公共内核：协议、加密、连接层、会话、终端/文件/命令执行、AI 智能体、SSH 客户端、FFI | Rust workspace |
 | `lemon-galaxy-worker-linux` | Linux 纯被控端：内核（命令行 + 系统服务 + 桌面会话画面代理 + 虚拟桌面）与图形界面（窗口 + 托盘），见 [linux-desktop.md](linux-desktop.md) | Rust；内核只依赖 glibc 2.17（另有 musl 静态精简版），界面 GTK 3；x86_64 / ARM64 |
-| `lemon-galaxy-worker-macos` | macOS 纯被控端（小体积，菜单栏状态 + 登录） | Swift + Rust 内核（后续期） |
-| `lemon-galaxy-worker-windows` | Windows 纯被控端（小体积） | Rust + Win32：系统服务 + 会话画面代理 |
+| `lemon-galaxy-worker-macos` | macOS 纯被控端：菜单栏图标 + 设置窗口，有人值守 / 无人值守两种运行方式（3.0.1） | SwiftUI + AppKit + Rust 内核 |
+| `lemon-galaxy-worker-windows` | Windows 纯被控端：被控服务（命令行单文件：系统服务 + 会话画面代理）；`gui/` 是带界面版的界面（窗口 + 托盘 + 自带安装与卸载），经本机控制接口遥控服务（3.0.2） | Rust + Win32；界面 WPF（.NET Framework 4.8，纯代码界面） |
 | `lemon-galaxy-control-macos` | Mac 主控 + 被控 | SwiftUI + AppKit，macOS 13 起 |
 | `lemon-galaxy-control-windows` | Windows 主控 + 被控 | WPF（.NET Framework 4.8，Win7 SP1 起）（后续期） |
 | `lemon-galaxy-mobile-android` | 安卓主控（只能控制别人） | Kotlin + Jetpack Compose，Android 8.0 起 |
@@ -34,7 +34,7 @@
 ### 2.1 三类客户端
 
 - **control**（Windows / macOS）：主控 + 被控。**同一时间只能登录一个账号**，主控和被控都用这个账号。
-- **worker**（Windows / macOS / Linux）：纯被控，体积小。**可以同时登录多个账号**，出现在每个账号各自的设备列表里，能被这些账号分别控制。Linux 只有 worker：有桌面的机器装 .deb / .rpm 得到窗口 + 托盘，服务器用单文件命令行；都能远程桌面（2026-11-24 起，见 [linux-desktop.md](linux-desktop.md)）。
+- **worker**（Windows / macOS / Linux）：纯被控，体积小。**可以同时登录多个账号**，出现在每个账号各自的设备列表里，能被这些账号分别控制。Linux 只有 worker：有桌面的机器装 .deb / .rpm 得到窗口 + 托盘，服务器用单文件命令行；都能远程桌面（2026-11-24 起，见 [linux-desktop.md](linux-desktop.md)）。Windows worker 也是两种：带界面版（zip 里的 LemonGalaxyWorker.exe 自带安装，窗口 + 托盘）与命令行单文件，同一个被控服务（3.0.2）；macOS worker 是菜单栏应用（3.0.1）。
 - **mobile**（安卓 / iOS / 鸿蒙）：纯主控，不能被控。
 
 被控能力在所有端是同一套内核逻辑（`galaxy-host`）。control 与 worker 的区别只在「能登录几个账号」这条规则上。
@@ -72,6 +72,58 @@
 - 本机通信：Unix 域套接字 `/var/run/cn.lemonit.galaxy.worker.sock`（0666），每条消息 `[u32 头长][u32 正文长][u32 附件长]` + JSON 头 + JSON 正文 + 原始附件（画面帧、声音）。对端身份取内核给的 uid 与审计令牌，代码签名必须满足后台服务自己的指定要求；会话代理报的 uid 必须与对端一致。界面的权限：管理员（root 或 admin 组）全部可做；坐在屏幕前的普通用户可查看、开关远程、断开会话、管理对应到自己的账号；其他用户拒绝。账号登录时对应到发起登录的用户（不会对应到 root）。临时协助的会话目前以后台服务身份执行，所以后台服务以 root 运行时只有管理员能开启或允许协助。
 - 开启时把菜单栏应用原有的数据（`~/Library/Application Support/LemonGalaxyWorker/worker` 与本机安全存储里的设备身份）移交给后台服务，设备号不变，原目录改名 `worker.migrated` 留作备份（只有管理员能移交）；关闭时管理员把数据导回当前用户并让后台服务删除自己的数据，非管理员退回移交前的备份。两种运行方式切换时应用自动重新打开一次。应用更新后版本与后台服务不同时，后台服务与会话代理自动重启换成新程序。
 - 开了文件保险箱的 Mac 重启后要先在开机界面解锁磁盘（或用 `fdesetup authrestart` 计划重启），之后才能远程控制登录界面。
+
+菜单栏应用的功能对照 Linux 界面清单（[linux-desktop.md](linux-desktop.md) 第 9 节，2026-11-25 核对，有人值守与无人值守两种方式界面相同）：状态（设备 ID、公网 IP、服务器、账号、允许 / 禁止远程、逐个断开、全部断开、停止 AI）、账号（登录三步、退出、逐账号权限与系统用户、AI 上限、被控时提示）、临时协助（设备码与验证码、固定验证码、请求弹窗）、通用（开机启动 / 无人值守、远程结束后锁屏、无头兜底屏、通知、语言与外观）、事件日志、关于与检查更新、菜单栏图标与菜单都已有。这次补上两项：
+
+- 已有账号时换服务器：登录表单的地址先锁着，点「更换服务器」才能改；提交时地址变了先在表单里确认（会退出本机已登录的账号），确认后逐个退出旧服务器上的账号，再用新服务器登录（与 Linux 的 `ConfirmServerChange` 一致；内核 `WorkerHost.login` 在有账号时拒绝换服务器，所以要先退出）。
+- 有人连入的系统通知带「断开」「查看」按钮（断开那个会话 / 打开状态页），会话结束后收回这条通知；设置窗口在前台时也弹横幅。
+
+不做的：Linux 专有的「远程连入时自动解锁」「登录界面使用 X11」；「自动更新」只自动检查、下载 DMG 由用户替换（包是临时签名，自动替换应用后系统的屏幕录制、辅助功能授权会失效）。
+
+### 3.0.2 Windows 被控端的界面与本机控制接口
+
+2026-11-25 加。命令行版（`lemon-galaxy-worker-<版本>-windows-<架构>.exe`）照旧发布；新增带界面版 `LemonGalaxyWorker-<版本>-windows-<x64|arm64>.zip`：同一个被控服务 `lemon-galaxy-worker.exe` + 界面 `LemonGalaxyWorker.exe`。界面只是服务的「遥控器」，与 Linux 的 GTK 界面同一套逻辑、同一套消息（[linux-desktop.md](linux-desktop.md) 第 7、9 节），外观按 Windows 主控端（配色、矢量图标、控件与主控端共用源码），系统原生标题栏与托盘菜单。
+
+**本机控制接口（命名管道）**：系统服务（SYSTEM）监听 `\\.\pipe\LemonGalaxyWorker.control`；普通用户前台 `run` 时是 `…control.<用户 SID>`；环境变量 `LEMON_GALAXY_CONTROL_SOCKET` 可改（服务和界面都认）。消息与 Linux 相同：一行一个 JSON，类型在 `galaxy-worker/src/control.rs`，界面（C#）按同一格式读写，自测核对与 Rust 测试里的字面量逐字一致。
+
+- 管道的访问控制：属主 SYSTEM；SYSTEM、管理员组完全控制；Authenticated Users 只能读写、不能再建同名实例（第一个实例加 `FILE_FLAG_FIRST_PIPE_INSTANCE`，名字被占就不开控制接口）；不接受远程客户端。前台运行的只给本人与 SYSTEM。
+- 界面连上后先核对管道属主是 SYSTEM 或管理员组（前台运行的是本人），防止别的程序抢先建同名管道冒充服务骗密码；以「识别」级别连接（服务能认人，不能冒用身份）。
+- 服务读到第一行后模拟对方取令牌：账号 SID 与「域\用户名」、管理员组是否生效（已提升）、是不是管理员组成员（没提升也算）、所在会话；XP 兼容版没有本机控制接口（也没有界面）。
+
+**鉴权**（Linux 第 7 节的表在 Windows 上的对应）：
+
+| 操作 | 谁能做 |
+|---|---|
+| 看状态 | 任何本机用户 |
+| 断开远程、停止 AI、禁止远程、开始 / 结束临时协助 | SYSTEM、已提升的管理员；或对方所在会话正连着（控制台或远程桌面里坐在屏幕前的人）。重新允许远程要管理员授权 |
+| 看账号、设置、操作日志 | 管理员组成员（没提升也行）；账号绑定的系统用户 |
+| 改设置、登录 / 退出账号、改权限、开机自启、更新 | SYSTEM、已提升的管理员；其他人经 UAC 授权（`ManageRight::Elevate`） |
+
+UAC 授权（相当于 polkit 的 `auth_admin_keep`）：服务对要授权的操作回 `elevation_required`；界面向服务要一把一次性钥匙（`elevation_key`，2 分钟内有效），以管理员身份运行自己 `--elevate <钥匙> --pipe <管道>`（弹「用户账户控制」；标准用户输管理员密码），这个进程连上来发 `elevate`，服务核对它确实是 SYSTEM 或已提升的管理员后，把钥匙对应的那个连接提升 `ELEVATION_SECS`（300 秒），界面重试刚才的操作。授权过期时服务推一次状态。界面需要授权的按钮、开关旁画盾牌图标（Windows 惯例）。
+
+**界面**（功能清单同 Linux 第 9 节，去掉 Linux 专有的两项）：
+
+- 概览：设备名、系统、设备 ID（可复制）、状态；允许 / 禁止远程；服务器、公网 IP、账号数、服务版本；正在控制本机的会话（谁、哪台设备、直连还是中转、有没有 AI），逐个断开、全部断开、停止所有 AI；没账号、要重新登录、这份程序比已装的新时给提示条。
+- 账号与权限：列表；登录向导（服务器地址、用户名、密码 → 两步验证码 → 首次登录设新密码 → 选系统用户，选 SYSTEM 二次确认；换服务器确认）；退出；权限（系统用户、看画面、控制、文件、终端、剪贴板、声音、被控时提示、AI 上限）。可选的系统用户取注册表 ProfileList（在这台电脑上登录过的本机与域账号）加 SYSTEM，默认是界面那头的人自己。
+- 临时协助：开始 / 结束，设备码与验证码（可复制），固定验证码；有人请求时弹置顶的小窗口「允许 / 拒绝」（主窗口藏在托盘里也看得到）并发系统通知。
+- 设置：开机自动启动被控服务（服务启动类型自动 / 手动，`sc config`）、登录后在托盘显示图标、远程结束后自动锁屏、没有显示器时自动加虚拟屏（`headless_display`，开关 + 分辨率）、自动更新被控服务 + 检查更新 / 立即更新；我的偏好（有人连入时通知、语言、外观）。
+- 事件日志（可只看警告）、关于（界面与服务版本、运行方式、数据目录、控制接口、程序位置、系统、卸载）。
+- 托盘：状态图标（标志右下角的点：绿在线、橙被控、红禁止或服务没运行，没连上服务整体变灰），提示文字写谁在控制；右键是系统原生菜单：逐个断开、全部断开、停止 AI、允许远程（打勾）、临时协助（开着时显示设备码与验证码，点一下复制）、打开主界面、退出界面。单击 / 双击打开主窗口。关窗口只藏到托盘（第一次提示一下），注销、关机时直接关。
+- Linux 专有、Windows 不显示：远程连入时自动解锁（Windows 的锁屏界面本来就能远程看到和操作）、登录界面使用 X11。
+
+**两种「开机自启」分开**：被控服务是 Windows 服务（`LemonGalaxyWorker`，开机就运行、没人登录也能被控制），设置里「开机自动启动被控服务」改它的启动类型，要管理员；界面是每个用户登录后自己的托盘程序：安装时写 `HKLM\…\Run`（所有用户登录后 `LemonGalaxyWorker.exe --tray`），每个用户在「登录后在托盘显示图标」里关掉只对自己生效（记在 `%LOCALAPPDATA%\LemonGalaxy\worker-ui\settings.json`，`--tray` 启动时看到关了就直接退出）；没安装、直接从解压目录运行时写本用户的 `HKCU\…\Run`。
+
+**安装与卸载**（界面自带，没有另外的安装程序）：
+
+- 解压后双击 `LemonGalaxyWorker.exe`：服务没装时整页是安装卡片（安装位置、开机自动启动被控服务、所有用户登录后显示托盘），点「安装」弹 UAC，以管理员身份运行 `--install`：复制到 `%ProgramFiles%\LemonGalaxy\Worker`（与 `lemon-galaxy-worker install-service` 复制到的目录相同），运行那里的 `lemon-galaxy-worker.exe install-service` 建服务并启动，写托盘自启、开始菜单快捷方式（名字按安装时的界面语言）与「应用和功能」里的卸载入口（`--uninstall`）。装好后打开装好的那份（普通权限，`--replace` 接替同位置正在运行的旧实例），解压出来的那份退出。
+- 已装旧版本时同一张卡片变成「更新」：先停服务，正在运行的文件（旧界面、会话代理）先改名 `*.old*` 再复制，下次启动时删掉；账号与设置在 `%ProgramData%\LemonGalaxy\worker`，不动。服务停着时显示「启动服务」，服务在跑却连不上（没有本机控制接口的老版本）时提示用新包更新。
+- 卸载：「关于」页或「设置 → 应用」。停止并删除服务（`uninstall-service`），关掉所有用户正开着的界面，删 Run 项、快捷方式、卸载入口，延时删程序目录；账号与设置保留。
+- 单实例按程序位置区分（解压目录里的新版本与已装的旧版本可以同时开）；再开一次已在运行的那份就把窗口拉到前面。
+- 自动更新只换被控服务（发布文件里的单文件 exe，与命令行版同一个），界面不随之更新，下次用新包更新；带界面的 zip 不参与自动更新分类。
+
+**发布与测试**：CI 任务「Windows 被控端界面与发布包」用 `windows` 任务编好的被控服务，`lemon-galaxy-worker-windows/gui/scripts/build.sh` 编界面（AnyCPU，x64 与 ARM64 共用）、打两个 zip；自测（`--selftest`）核对请求格式与 Rust 一致、读样例状态，离屏渲染各页（浅色 / 深色 × 中文 / 英文）与托盘图标，核对中英文语言包；`--live` 再前台起一个真的被控服务（临时数据目录与临时管道），界面连上去握手、读状态与设置、改一项设置再读回、拿授权钥匙、读系统用户与账号。Rust 侧 `galaxy-worker` 的 Windows 单元测试走真管道：认出管道那头是自己、同名管道不让第二个实例抢、关闭后管道消失。
+
+界面要 .NET Framework 4.8（Windows 10 1903 起自带）；32 位与 XP / Vista / 7 兼容版暂不做界面，继续用命令行版。
 
 ### 3.1 远程桌面（Windows / macOS 被控）
 
@@ -173,6 +225,7 @@
   - Windows：申请 SignPath Foundation 开源签名，批下来之前不签名。
   - Android：LemonGalaxy 专用 keystore，存在仓库 Actions Secrets。
 - 所有发布文件附 SHA-256 与 LemonGalaxy 发布签名（Ed25519）。客户端自动更新只从自己的服务器下载（服务器定期从 GitHub 拉取并校验签名，也可在后台手动上传），安装前验签。
+- 被控端在 Windows 上发两种：带界面版 `LemonGalaxyWorker-<版本>-windows-<x64|arm64>.zip`（窗口 + 托盘，双击里面的 LemonGalaxyWorker.exe 安装）与命令行单文件 `lemon-galaxy-worker-<版本>-windows-<架构>.exe`（服务器、批量部署、脚本用）。两者是同一个被控服务，命令行装的服务也能用界面管理，反之亦然；自动更新只换被控服务。Release 说明里两行分开写。
 
 ## 7. 分期
 
@@ -198,7 +251,9 @@ lemon-galaxy/
     galaxy-ffi/                    uniffi 导出给 Swift / Kotlin / C#
     galaxy-dev/                    开发与集成测试用命令行主控端
   lemon-galaxy-server/             服务器（Rust）+ web/（管理后台源码）
-  lemon-galaxy-worker-linux/       Linux worker（Rust）
+  lemon-galaxy-worker-linux/       Linux worker（Rust 内核 + gui/ GTK 界面）
+  lemon-galaxy-worker-windows/     Windows worker（Rust 被控服务 + gui/ WPF 界面 + driver/ 虚拟屏驱动）
+  lemon-galaxy-worker-macos/       macOS worker（菜单栏应用，SwiftUI）
   lemon-galaxy-control-macos/      Mac 主控 + 被控（SwiftUI）
   lemon-galaxy-mobile-android/     安卓主控（Kotlin + Compose）
   scripts/                         构建与发布脚本
