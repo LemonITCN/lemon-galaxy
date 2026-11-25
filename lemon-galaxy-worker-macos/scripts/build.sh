@@ -10,7 +10,9 @@
 #     2. 本机文件 scripts/.sign-identity（不进仓库，内容同上）
 #     3. 钥匙串里第一张 Developer ID Application
 #     4. 证书主题含 LemonIT 的 Apple Development
-#     5. 都没有（例如 CI）才临时签名。临时签名的应用每次重新编译，屏幕录制等授权都会失效。
+#     5. 都没有才临时签名。临时签名的应用每次重新编译，屏幕录制等授权都会失效。
+#   CI 发布包用 Secrets 里的 LemonGalaxy 专用自签名证书（系统不信任它，但签名、校验、加固运行时都正常；
+#   系统授权认的「指定要求」= 标识 + 证书，每个版本都一样，所以升级后授权保留）。
 #   Rust 内核：Vendor/LemonGalaxyCore.xcframework 与 Sources/Generated/galaxy_ffi.swift 都在时自动接入并默认使用
 #   （仓库根 scripts/build-ffi-apple.sh 生成）；没有时只编译模拟内核。
 #   共享代码：Sources/Shared/ 下是指向 lemon-galaxy-control-macos 源码的符号链接，构建前不需要额外步骤。
@@ -100,7 +102,8 @@ TS=--timestamp=none
 if [ "$IDENTITY" != "-" ]; then
   case "$(security find-identity -v -p codesigning 2>/dev/null | grep -F "$IDENTITY" || true)" in *"Developer ID Application"*) TS=--timestamp ;; esac
 fi
-echo "签名：$( [ "$IDENTITY" = "-" ] && echo 临时签名 || security find-identity -v -p codesigning | grep -F "$IDENTITY" | sed 's/.*"\(.*\)"/\1/' | head -1)"
+# 显示名称不加 -v：自签名证书不受系统信任，-v 只列受信任的身份
+echo "签名：$( [ "$IDENTITY" = "-" ] && echo 临时签名 || { security find-identity -p codesigning | grep -F "$IDENTITY" | sed 's/.*"\(.*\)".*/\1/' | head -1; } )"
 # Hardened Runtime（--options runtime）下的例外权限：一个都不需要，Packaging/LemonGalaxyWorker.entitlements 是空的
 # （AMFI 不认 plist 里的注释，说明写在这里）：
 #   - 不开 App Sandbox：被控端要用 ScreenCaptureKit 截全屏、CGEvent 向其他应用注入键鼠、读其他应用的辅助功能控件树，

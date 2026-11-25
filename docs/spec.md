@@ -78,7 +78,7 @@
 - 已有账号时换服务器：登录表单的地址先锁着，点「更换服务器」才能改；提交时地址变了先在表单里确认（会退出本机已登录的账号），确认后逐个退出旧服务器上的账号，再用新服务器登录（与 Linux 的 `ConfirmServerChange` 一致；内核 `WorkerHost.login` 在有账号时拒绝换服务器，所以要先退出）。
 - 有人连入的系统通知带「断开」「查看」按钮（断开那个会话 / 打开状态页），会话结束后收回这条通知；设置窗口在前台时也弹横幅。
 
-不做的：Linux 专有的「远程连入时自动解锁」「登录界面使用 X11」；「自动更新」只自动检查、下载 DMG 由用户替换（包是临时签名，自动替换应用后系统的屏幕录制、辅助功能授权会失效）。
+不做的：Linux 专有的「远程连入时自动解锁」「登录界面使用 X11」；「自动更新」只自动检查、下载 DMG 由用户替换。
 
 ### 3.0.2 Windows 被控端的界面与本机控制接口
 
@@ -220,7 +220,7 @@ UAC 授权（相当于 polkit 的 `auth_admin_keep`）：服务对要授权的�
 - 公开仓库 `LemonITCN/lemon-galaxy`，MIT 许可证。GitHub Actions 构建全部工程。
 - 每次推送 main 且构建、测试全部通过后，自动发布 Release「LemonGalaxy <版本>.<构建序号>」并标为最新；推送 `v*` 标签按标签版本发布。
 - 签名：
-  - macOS：Developer ID 签名 + 公证（Secrets 未配置时退回临时签名）。
+  - macOS：LemonGalaxy 专用自签名代码签名证书（2046 年到期，存在仓库 Actions Secrets，私钥备份在维护者本机）。签名身份固定，系统记的「指定要求」（标识 + 证书）每个版本都一样，屏幕录制、辅助功能等授权升级后保留；从临时签名的旧版换过来时要再授权一次。未公证：首次打开要在「隐私与安全性」点「仍要打开」。以后换 Developer ID 时同名替换 Secrets 并配公证密钥即可。
   - iOS：TestFlight。
   - Windows：申请 SignPath Foundation 开源签名，批下来之前不签名。
   - Android：LemonGalaxy 专用 keystore，存在仓库 Actions Secrets。

@@ -13,7 +13,8 @@
 #   安卓客户端     LemonGalaxy.apk      Android 8.0 起
 #
 # 可选的签名（仓库 Settings → Secrets 配置后自动启用，不配置则跳过）
-#   MACOS_CERTIFICATE_P12 / MACOS_CERTIFICATE_PASSWORD / MACOS_SIGN_IDENTITY   Developer ID 证书
+#   MACOS_CERTIFICATE_P12 / MACOS_CERTIFICATE_PASSWORD / MACOS_SIGN_IDENTITY   Mac 签名证书（已配：LemonGalaxy 专用自签名代码签名证书，
+#     2046 年到期，私钥备份在维护者本机 ~/.lemon-galaxy-secrets/macos-codesign.*；签名身份固定，系统授权升级后保留。换 Developer ID 时同名替换）
 #   APPLE_NOTARY_KEY_P8 / APPLE_NOTARY_KEY_ID / APPLE_NOTARY_ISSUER_ID         公证
 #   LEMONGALAXY_KEYSTORE_BASE64 / LEMONGALAXY_KEYSTORE_PASSWORD / LEMONGALAXY_KEY_ALIAS / LEMONGALAXY_KEY_PASSWORD   安卓正式签名
 #   LEMONGALAXY_RELEASE_SIGNING_KEY   发布签名私钥（Ed25519 种子 base64）。有它才给 SHA256SUMS 签名；客户端只装签过名的更新
@@ -701,6 +702,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MAC_NOTARIZED: ${{ secrets.MACOS_SIGN_IDENTITY != '' && secrets.APPLE_NOTARY_KEY_P8 != '' }}
+          MAC_SIGNED: ${{ secrets.MACOS_SIGN_IDENTITY != '' && 'yes' || '' }}
           RELEASE_SIGNING_KEY: ${{ secrets.LEMONGALAXY_RELEASE_SIGNING_KEY }}
         run: |
           VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
@@ -836,6 +838,10 @@ jobs:
             echo "## 代码签名"
             echo
             echo "Windows 发布文件申请由 SignPath Foundation 免费签名，开通前暂不签名。详见 [代码签名策略](https://github.com/$GITHUB_REPOSITORY/blob/main/CODE_SIGNING_POLICY.md)。"
+            if [ -n "$MAC_SIGNED" ] && [ "$MAC_NOTARIZED" != true ]; then
+              echo
+              echo "macOS 应用用 LemonGalaxy 专用代码签名证书签名，每个版本签名身份相同：屏幕录制、辅助功能等授权升级后保留（从 0.1.0.62 之前的版本换过来时要再授权一次；系统设置里已勾选但仍提示的，先删掉 LemonGalaxy 再重新加）。"
+            fi
             echo
             echo "Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)."
             echo
