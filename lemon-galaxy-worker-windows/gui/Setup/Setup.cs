@@ -249,7 +249,7 @@ internal static class Installer
         };
         psi.EnvironmentVariables["LEMON_GALAXY_LANG"] = L.IsChinese ? "zh-CN" : "en";
         using var p = Process.Start(psi)!;
-        var err = p.StandardError.ReadToEndAsync();
+        var err = Bg.Run(() => p.StandardError.ReadToEnd());
         var outText = p.StandardOutput.ReadToEnd();
         p.WaitForExit();
         var all = (outText + "\n" + err.Result).Trim();

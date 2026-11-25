@@ -44,8 +44,10 @@ internal sealed class J
     {
         object?[] a => a,
         ArrayList al => al.Cast<object?>(),
-        _ => Array.Empty<object?>(),
-    } : Array.Empty<object?>();
+        _ => NoItems,
+    } : NoItems;
+
+    private static readonly object?[] NoItems = new object?[0];
 
     public List<J> A(string k) => Items(k).OfType<Dictionary<string, object?>>().Select(x => new J(x)).ToList();
     public List<string> AS(string k) => Items(k).OfType<string>().ToList();

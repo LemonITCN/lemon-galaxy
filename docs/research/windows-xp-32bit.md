@@ -16,6 +16,7 @@
 3. **顺带发现现有 Windows 7 兼容版很可能在 Win7 上根本启动不了**：`windows` 0.62 把 `CoTaskMemFree` 指到 Windows 8 才有的 `combase.dll`，被控端的声音、硬件编码代码用了它。已改成从 `ole32.dll` 导入，CI 改成按 Win7 导出表核对。主控端兼容版压缩包里的 `galaxy_ffi.dll` 也导入了 Win8 才有的 `api-ms-win-core-winrt-error-l1-1-0.dll`、`mmdevapi.dll` 里的函数，同样可能起不来，CI 会列出来但不挡发布（主控端不在这次范围）。【导入表已核实；起不来是按系统 DLL 导出表推断，待 Win7 实机确认】
 4. XP / Vista 上缺的功能：声音（WASAPI 是 Vista 起，XP 没有）、隐私屏（要 Win10 2004）、虚拟屏（要 Win10）、显卡编码（XP 没有 Media Foundation，32 位不带 NVENC）、伪终端（ConPTY 要 Win10 1809，老系统一直是简化终端）、远程发 Ctrl+Alt+Del（`SendSAS` 是 Win7 起）、AI 的「应用操作」（UI Automation 在 XP 上要另装）。远程桌面（GDI 截屏 + openh264）、键鼠、剪贴板、终端、文件、命令、端口映射、自动更新都在。
 5. 需要拍板的见第 8 节：给 ISO 实测；简化终端要不要换成 winpty；CPU 要求 SSE2。
+6. 2026-11-25 起三个兼容版也发桌面端（窗口 + 托盘，自带安装；界面同一份源码按 .NET Framework 4.0 编，XP SP3 起能装），XP 兼容版的被控服务也带了本机控制接口。见 [spec.md](../spec.md) 3.0.2 末尾。发布物叫法：桌面端 / CLI。
 
 ---
 

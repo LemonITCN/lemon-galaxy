@@ -119,6 +119,9 @@ mod tests {
         // Windows 被控端带界面的包：界面不自动更新，里面的被控服务按上面的单文件更新
         assert_eq!(classify_asset("LemonGalaxyWorker-0.1.0.5-windows-x64.zip"), None);
         assert_eq!(classify_asset("LemonGalaxyWorker-0.1.0.5-windows-arm64.zip"), None);
+        assert_eq!(classify_asset("LemonGalaxyWorker-0.1.0.62-windows7-x64.zip"), None);
+        assert_eq!(classify_asset("LemonGalaxyWorker-0.1.0.62-windows7-x86.zip"), None);
+        assert_eq!(classify_asset("LemonGalaxyWorker-0.1.0.62-windowsxp-x86.zip"), None);
         assert_eq!(classify_asset("lemon-galaxy-worker-0.1.0.5-windows-x86_64.exe"), Some(("worker", "windows", "x86_64".into())));
         assert_eq!(classify_asset("LemonGalaxy-0.1.0.5-windows-x64.zip"), Some(("control", "windows", "x86_64".into())));
         assert_eq!(classify_asset("lemon-galaxy-server-0.1.0.5-linux-x86_64.tar.gz"), Some(("server", "linux", "x86_64".into())));

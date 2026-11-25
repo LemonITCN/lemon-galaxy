@@ -351,7 +351,9 @@ mod pipe {
     fn create(name: &str, sd: &SecurityDescriptor, first: bool) -> std::io::Result<NamedPipeServer> {
         let mut sa = sd.attributes();
         // first_pipe_instance：名字已被别的进程（另一个实例，或想冒充服务的程序）占了就失败
-        unsafe { ServerOptions::new().first_pipe_instance(first).reject_remote_clients(true).create_with_security_attributes_raw(name, &mut sa as *mut _ as *mut std::ffi::c_void) }
+        // 拒绝远程客户端：Vista 起用建管道的标志；XP 不认这个标志，靠访问控制里拒绝网络登录（pipe_sddl）
+        let reject = crate::localsys_win::pipe_reject_remote_supported();
+        unsafe { ServerOptions::new().first_pipe_instance(first).reject_remote_clients(reject).create_with_security_attributes_raw(name, &mut sa as *mut _ as *mut std::ffi::c_void) }
     }
 
     impl Listener {

@@ -34,11 +34,19 @@ internal static class AppInfo
         catch { return false; }
     }
 
+    /// <summary>这一份界面按哪个 .NET Framework 编（Windows 10 起的包 4.8，老系统兼容版 4.0）</summary>
+#if NET40
+    public const string Framework = ".NET Framework 4.0";
+#else
+    public const string Framework = ".NET Framework 4.8";
+#endif
+
     public static string Version
     {
         get
         {
-            var v = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.1.0";
+            var a = Attribute.GetCustomAttribute(Assembly.GetExecutingAssembly(), typeof(AssemblyInformationalVersionAttribute)) as AssemblyInformationalVersionAttribute;
+            var v = a?.InformationalVersion ?? "0.1.0";
             var plus = v.IndexOf('+');
             return plus > 0 ? v.Substring(0, plus) : v;
         }
@@ -63,8 +71,8 @@ internal static class AppInfo
     public static IEnumerable<string> ResourceFiles(string sub, string ext)
     {
         var dir = IOPath.Combine(ResourcesDir, sub);
-        try { return Directory.Exists(dir) ? Directory.GetFiles(dir, "*." + ext).OrderBy(f => f, StringComparer.Ordinal).ToArray() : Array.Empty<string>(); }
-        catch { return Array.Empty<string>(); }
+        try { return Directory.Exists(dir) ? Directory.GetFiles(dir, "*." + ext).OrderBy(f => f, StringComparer.Ordinal).ToArray() : new string[0]; }
+        catch { return new string[0]; }
     }
 
     public static string OsName
@@ -85,7 +93,10 @@ internal static class AppInfo
     }
 }
 
+/// <summary>毫秒时间戳（DateTimeOffset 的 Unix 时间换算是 4.6 起才有的，老系统版按 4.0 编，自己算）</summary>
 internal static class Clock
 {
-    public static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    private static readonly DateTime Epoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    public static long NowMs => (long)(DateTime.UtcNow - Epoch).TotalMilliseconds;
+    public static DateTime Local(long ms) => Epoch.AddMilliseconds(ms).ToLocalTime();
 }

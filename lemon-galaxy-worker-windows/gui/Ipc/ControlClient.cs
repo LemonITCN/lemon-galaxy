@@ -132,7 +132,7 @@ internal sealed class ControlClient : IDisposable
         post(() => Connected?.Invoke());
         try
         {
-            using var reader = new StreamReader(p, new UTF8Encoding(false), false, 64 * 1024, leaveOpen: true);
+            var reader = new StreamReader(p, new UTF8Encoding(false), false, 64 * 1024);
             string? line;
             while (!disposed && (line = reader.ReadLine()) != null)
             {
@@ -177,13 +177,13 @@ internal sealed class ControlClient : IDisposable
     /// <summary>发请求，等回复。没连上服务时马上返回错误。</summary>
     public Task<Response> Call(Dictionary<string, object?> req)
     {
-        var tcs = new TaskCompletionSource<Response>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs = Bg.Tcs<Response>();
         NamedPipeClientStream? p;
         long id;
         lock (sync)
         {
             p = pipe;
-            if (p == null) return Task.FromResult(Gone());
+            if (p == null) return Bg.Done(Gone());
             id = next++;
             pending[id] = tcs;
         }
@@ -195,7 +195,7 @@ internal sealed class ControlClient : IDisposable
         catch
         {
             lock (sync) pending.Remove(id);
-            return Task.FromResult(Gone());
+            return Bg.Done(Gone());
         }
         return tcs.Task;
     }
@@ -217,7 +217,7 @@ internal sealed class ControlClient : IDisposable
         using (p)
         {
             var enc = new UTF8Encoding(false);
-            var reader = new StreamReader(p, enc, false, 64 * 1024, leaveOpen: true);
+            var reader = new StreamReader(p, enc, false, 64 * 1024);
             var outList = new List<Response>();
             long id = 0;
             var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
@@ -229,7 +229,7 @@ internal sealed class ControlClient : IDisposable
                 while (true)
                 {
                     if (DateTime.UtcNow > deadline) throw new TimeoutException();
-                    var readTask = reader.ReadLineAsync();
+                    var readTask = Bg.Run(() => reader.ReadLine());
                     if (!readTask.Wait(Math.Max(1, (int)(deadline - DateTime.UtcNow).TotalMilliseconds))) throw new TimeoutException();
                     var line = readTask.Result ?? throw new IOException(L.T("svc.lost"));
                     var j = J.Parse(line);

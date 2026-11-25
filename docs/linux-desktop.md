@@ -12,11 +12,11 @@
 | `lemon-galaxy-worker` | 内核：命令行、系统服务、桌面会话里的画面代理、虚拟桌面、显卡编码 | 只链接系统 C 库（glibc 2.17 起，CentOS 7 起都能跑）；X11、D-Bus 是纯 Rust 实现；NVENC、VA-API、PipeWire、PulseAudio 运行时按需加载，没有就跳过 |
 | `lemon-galaxy-worker-gui` | 窗口 + 托盘：内核服务的「遥控器」，经本机控制接口（第 7 节）通信 | GTK 3（Ubuntu 20.04、Debian 10、CentOS/RHEL 8 起自带） |
 
-发布：
+发布（叫法与各端一致：带窗口与托盘的叫桌面端，命令行单文件叫 CLI）：
 
-- `.deb` / `.rpm`：两个程序 + systemd 系统服务（装好即启用）+ 菜单图标 + 登录后自动显示托盘 + polkit 授权规则。依赖由包管理器装。
-- 单文件 `lemon-galaxy-worker-<版本>-linux-<架构>`：只有内核，给服务器用（没有桌面也能跑终端、文件；装了桌面环境的服务器能开虚拟桌面）。
-- 单文件 `…-linux-<架构>-musl`：静态精简版（Alpine 等 musl 系统），只有终端与文件，不含画面（编译时关掉 `desktop` 特性）。
+- 桌面端 `.deb` / `.rpm`：两个程序 + systemd 系统服务（装好即启用）+ 菜单图标 + 登录后自动显示托盘 + polkit 授权规则。依赖由包管理器装。
+- CLI `lemon-galaxy-worker-<版本>-linux-<架构>`：单文件，只有内核，给服务器用（没有桌面也能跑终端、文件；装了桌面环境的服务器能开虚拟桌面）。
+- CLI 精简版 `…-linux-musl-<架构>`：静态单文件（Alpine 等 musl 系统），只有终端与文件，不含画面（编译时关掉 `desktop` 特性）。
 
 ## 2. 进程结构
 
@@ -132,9 +132,9 @@ Windows 被控端用同一套消息，走命名管道，鉴权按管道那头的
 ## 8. 安装包与更新
 
 - `.deb` / `.rpm`：`/usr/bin/lemon-galaxy-worker`、`/usr/bin/lemon-galaxy-worker-gui`、`/usr/lib/systemd/system/lemon-galaxy-worker.service`（装好即启用，数据 `/var/lib/lemon-galaxy-worker`）、`/usr/share/applications/cn.lemonit.galaxy.worker.desktop`、`/etc/xdg/autostart/lemon-galaxy-worker-gui.desktop`（`--tray`）、`/usr/share/polkit-1/actions/cn.lemonit.galaxy.worker.policy`、hicolor 图标。依赖 GTK 3 与 librsvg（托盘的 SVG 图标）。包内单元带 `LEMON_GALAXY_SUPERVISED=1`。
-- 包装版在命令行运行 `install-service` / `uninstall-service` 只启用 / 停用包自带的服务，不再复制程序。
-- 自动更新：被控服务按发布签名下载新的内核单文件替换 `/usr/bin/lemon-galaxy-worker`（界面程序不随之更新，下次装新包时一起换；控制接口是 JSON，新旧版本互相兼容）。musl 精简版的平台名是 `linux-musl`，只会更新到精简版。
-- 发布文件：`lemon-galaxy-worker_<版本>_amd64.deb` / `_arm64.deb`、`lemon-galaxy-worker-<版本>.x86_64.rpm` / `.aarch64.rpm`、单文件 `lemon-galaxy-worker-<版本>-linux-<架构>`（glibc 2.17 起）、`lemon-galaxy-worker-<版本>-linux-musl-<架构>`。界面在 Debian 10 容器里编（glibc 2.28），内核用 cargo-zigbuild 按 glibc 2.17 编。
+- 桌面端（包管理器装的）在命令行运行 `install-service` / `uninstall-service` 只启用 / 停用包自带的服务，不再复制程序。
+- 自动更新：被控服务按发布签名下载新的 CLI（内核单文件）替换 `/usr/bin/lemon-galaxy-worker`（界面程序不随之更新，下次装新包时一起换；控制接口是 JSON，新旧版本互相兼容）。musl 精简版的平台名是 `linux-musl`，只会更新到精简版。
+- 发布文件：`lemon-galaxy-worker_<版本>_amd64.deb` / `_arm64.deb`、`lemon-galaxy-worker-<版本>.x86_64.rpm` / `.aarch64.rpm`（桌面端）、`lemon-galaxy-worker-<版本>-linux-<架构>`（CLI，glibc 2.17 起）、`lemon-galaxy-worker-<版本>-linux-musl-<架构>`（CLI 精简版）。界面在 Debian 10 容器里编（glibc 2.28），内核用 cargo-zigbuild 按 glibc 2.17 编。
 
 ## 9. 图形界面
 

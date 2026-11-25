@@ -26,7 +26,7 @@ internal static class Elevation
 
     public static string Quote(string s) => "\"" + s.Replace("\"", "") + "\"";
 
-    public static Task<Result> Run(params string[] args) => Task.Run(() => RunSync(args));
+    public static Task<Result> Run(params string[] args) => Bg.Run(() => RunSync(args));
 
     public static Result RunSync(string[] args)
     {

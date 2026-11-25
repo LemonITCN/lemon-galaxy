@@ -4,9 +4,12 @@
     经本机控制接口（命名管道，docs/spec.md 3.0.2）通信；窗口 + 托盘图标，自带安装与卸载（复制到 Program Files、装服务、开始菜单、卸载入口）。
     配色、图标、通用控件、语言包底座与 Windows 主控端（lemon-galaxy-control-windows）共用同一份源码（下面的链接），不另起分叉。
     AnyCPU：x64 与 ARM64 的 Windows 都按本机架构运行；被控服务是各架构自己的单文件。
+    同一份源码编两份：net48 给 Windows 10 起的发布包；net40 给老系统兼容版（XP SP3 / Vista / 7 / 8 / Server 2003–2012 R2，
+    4.0 缺的 async/await 等类型在 App/Net40.cs 里补）。下面链接的主控端源码也会按 4.0 编：那几个文件里别用 4.5 起才有的接口
+    （Task.Run、Dispatcher.InvokeAsync、Array.Empty 等），CI 的「Windows 被控端桌面端（老系统兼容版）」会编不过。
   -->
   <PropertyGroup>
-    <TargetFramework>net48</TargetFramework>
+    <TargetFrameworks>net48;net40</TargetFrameworks>
     <OutputType>WinExe</OutputType>
     <PlatformTarget>AnyCPU</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
@@ -17,6 +20,8 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ApplicationIcon>Resources\LemonGalaxyWorker.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 老系统版：多报 Vista；DPI 只按系统缩放（WPF 4.0 不会按显示器换 DPI） -->
+    <ApplicationManifest Condition="'$(TargetFramework)' == 'net40'">app.legacy.manifest</ApplicationManifest>
     <Version Condition="'$(Version)' == ''">0.1.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>LemonGalaxy Worker</Product>
@@ -32,7 +37,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
   </ItemGroup>
 

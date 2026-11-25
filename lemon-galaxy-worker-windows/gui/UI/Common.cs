@@ -146,7 +146,7 @@ internal static class Fmt
     public static string Time(long ms, bool seconds = false)
     {
         if (ms <= 0) return "—";
-        var t = DateTimeOffset.FromUnixTimeMilliseconds(ms).LocalDateTime;
+        var t = Clock.Local(ms);
         var f = seconds ? "HH:mm:ss" : "HH:mm";
         return t.Date == DateTime.Today ? t.ToString(f, CultureInfo.InvariantCulture) : t.ToString("yyyy-MM-dd " + f, CultureInfo.InvariantCulture);
     }

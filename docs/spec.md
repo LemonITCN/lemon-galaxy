@@ -22,9 +22,9 @@
 |---|---|---|
 | `lemon-galaxy-server` | 服务器：账号、设备、在线状态、信令、打洞协助、中转、端到端加密库同步、大模型网关、自动更新分发、Web 管理后台 | Rust（axum + rustls + quinn）、SQLite 单文件、Vue 3 + antdv-next 后台打进同一个可执行文件 |
 | `lemon-galaxy-common-rust` | 公共内核：协议、加密、连接层、会话、终端/文件/命令执行、AI 智能体、SSH 客户端、FFI | Rust workspace |
-| `lemon-galaxy-worker-linux` | Linux 纯被控端：内核（命令行 + 系统服务 + 桌面会话画面代理 + 虚拟桌面）与图形界面（窗口 + 托盘），见 [linux-desktop.md](linux-desktop.md) | Rust；内核只依赖 glibc 2.17（另有 musl 静态精简版），界面 GTK 3；x86_64 / ARM64 |
-| `lemon-galaxy-worker-macos` | macOS 纯被控端：菜单栏图标 + 设置窗口，有人值守 / 无人值守两种运行方式（3.0.1） | SwiftUI + AppKit + Rust 内核 |
-| `lemon-galaxy-worker-windows` | Windows 纯被控端：被控服务（命令行单文件：系统服务 + 会话画面代理）；`gui/` 是带界面版的界面（窗口 + 托盘 + 自带安装与卸载），经本机控制接口遥控服务（3.0.2） | Rust + Win32；界面 WPF（.NET Framework 4.8，纯代码界面） |
+| `lemon-galaxy-worker-linux` | Linux 纯被控端：CLI（单文件内核：命令行 + 系统服务 + 桌面会话画面代理 + 虚拟桌面）；桌面端（.deb / .rpm）另带图形界面（窗口 + 托盘），见 [linux-desktop.md](linux-desktop.md) | Rust；内核只依赖 glibc 2.17（另有 musl 静态精简版），界面 GTK 3；x86_64 / ARM64 |
+| `lemon-galaxy-worker-macos` | macOS 纯被控端（桌面端）：菜单栏图标 + 设置窗口，有人值守 / 无人值守两种运行方式（3.0.1） | SwiftUI + AppKit + Rust 内核 |
+| `lemon-galaxy-worker-windows` | Windows 纯被控端：CLI（单文件被控服务：系统服务 + 会话画面代理）；`gui/` 是桌面端的界面（窗口 + 托盘 + 自带安装与卸载），经本机控制接口遥控服务（3.0.2） | Rust + Win32；界面 WPF（.NET Framework 4.8，老系统兼容版 4.0，纯代码界面） |
 | `lemon-galaxy-control-macos` | Mac 主控 + 被控 | SwiftUI + AppKit，macOS 13 起 |
 | `lemon-galaxy-control-windows` | Windows 主控 + 被控 | WPF（.NET Framework 4.8，Win7 SP1 起）（后续期） |
 | `lemon-galaxy-mobile-android` | 安卓主控（只能控制别人） | Kotlin + Jetpack Compose，Android 8.0 起 |
@@ -34,7 +34,7 @@
 ### 2.1 三类客户端
 
 - **control**（Windows / macOS）：主控 + 被控。**同一时间只能登录一个账号**，主控和被控都用这个账号。
-- **worker**（Windows / macOS / Linux）：纯被控，体积小。**可以同时登录多个账号**，出现在每个账号各自的设备列表里，能被这些账号分别控制。Linux 只有 worker：有桌面的机器装 .deb / .rpm 得到窗口 + 托盘，服务器用单文件命令行；都能远程桌面（2026-11-24 起，见 [linux-desktop.md](linux-desktop.md)）。Windows worker 也是两种：带界面版（zip 里的 LemonGalaxyWorker.exe 自带安装，窗口 + 托盘）与命令行单文件，同一个被控服务（3.0.2）；macOS worker 是菜单栏应用（3.0.1）。
+- **worker**（Windows / macOS / Linux）：纯被控，体积小。**可以同时登录多个账号**，出现在每个账号各自的设备列表里，能被这些账号分别控制。worker 的发布物统一叫法：带窗口与托盘（菜单栏）的叫「桌面端」，命令行单文件叫「CLI」，两者是同一个被控服务。Linux 只有 worker：有桌面的机器装桌面端 .deb / .rpm，服务器用 CLI；都能远程桌面（2026-11-24 起，见 [linux-desktop.md](linux-desktop.md)）。Windows worker 也是桌面端（zip 里的 LemonGalaxyWorker.exe 自带安装）与 CLI 两种，老系统兼容版同样两种（3.0.2）；macOS worker 只有桌面端，是菜单栏应用（3.0.1）。
 - **mobile**（安卓 / iOS / 鸿蒙）：纯主控，不能被控。
 
 被控能力在所有端是同一套内核逻辑（`galaxy-host`）。control 与 worker 的区别只在「能登录几个账号」这条规则上。
@@ -80,15 +80,15 @@
 
 不做的：Linux 专有的「远程连入时自动解锁」「登录界面使用 X11」；「自动更新」只自动检查、下载 DMG 由用户替换。
 
-### 3.0.2 Windows 被控端的界面与本机控制接口
+### 3.0.2 Windows 被控端桌面端与本机控制接口
 
-2026-11-25 加。命令行版（`lemon-galaxy-worker-<版本>-windows-<架构>.exe`）照旧发布；新增带界面版 `LemonGalaxyWorker-<版本>-windows-<x64|arm64>.zip`：同一个被控服务 `lemon-galaxy-worker.exe` + 界面 `LemonGalaxyWorker.exe`。界面只是服务的「遥控器」，与 Linux 的 GTK 界面同一套逻辑、同一套消息（[linux-desktop.md](linux-desktop.md) 第 7、9 节），外观按 Windows 主控端（配色、矢量图标、控件与主控端共用源码），系统原生标题栏与托盘菜单。
+2026-11-25 加。CLI（`lemon-galaxy-worker-<版本>-windows-<架构>.exe`）照旧发布；新增桌面端 `LemonGalaxyWorker-<版本>-windows-<x64|arm64>.zip`（老系统兼容版见本节末尾）：同一个被控服务 `lemon-galaxy-worker.exe` + 界面 `LemonGalaxyWorker.exe`。界面只是服务的「遥控器」，与 Linux 的 GTK 界面同一套逻辑、同一套消息（[linux-desktop.md](linux-desktop.md) 第 7、9 节），外观按 Windows 主控端（配色、矢量图标、控件与主控端共用源码），系统原生标题栏与托盘菜单。
 
 **本机控制接口（命名管道）**：系统服务（SYSTEM）监听 `\\.\pipe\LemonGalaxyWorker.control`；普通用户前台 `run` 时是 `…control.<用户 SID>`；环境变量 `LEMON_GALAXY_CONTROL_SOCKET` 可改（服务和界面都认）。消息与 Linux 相同：一行一个 JSON，类型在 `galaxy-worker/src/control.rs`，界面（C#）按同一格式读写，自测核对与 Rust 测试里的字面量逐字一致。
 
-- 管道的访问控制：属主 SYSTEM；SYSTEM、管理员组完全控制；Authenticated Users 只能读写、不能再建同名实例（第一个实例加 `FILE_FLAG_FIRST_PIPE_INSTANCE`，名字被占就不开控制接口）；不接受远程客户端。前台运行的只给本人与 SYSTEM。
+- 管道的访问控制：属主 SYSTEM；SYSTEM、管理员组完全控制；Authenticated Users 只能读写、不能再建同名实例（第一个实例加 `FILE_FLAG_FIRST_PIPE_INSTANCE`，名字被占就不开控制接口）；前台运行的只给本人与 SYSTEM。不接受远程客户端：访问控制第一条拒绝网络登录（NU），Vista 起建管道时再加 `PIPE_REJECT_REMOTE_CLIENTS`（XP 不认这个标志，只靠前者）。
 - 界面连上后先核对管道属主是 SYSTEM 或管理员组（前台运行的是本人），防止别的程序抢先建同名管道冒充服务骗密码；以「识别」级别连接（服务能认人，不能冒用身份）。
-- 服务读到第一行后模拟对方取令牌：账号 SID 与「域\用户名」、管理员组是否生效（已提升）、是不是管理员组成员（没提升也算）、所在会话；XP 兼容版没有本机控制接口（也没有界面）。
+- 服务读到第一行后模拟对方取令牌：账号 SID 与「域\用户名」、管理员组是否生效（已提升）、是不是管理员组成员（没提升也算）、所在会话；对方进程号用 `GetNamedPipeClientProcessId`（Vista 起才有，运行时找，XP 上不填）。XP / 2003 没有会话 0 隔离，控制台用户就在会话 0，判断「坐在屏幕前」时会话 0 在 Vista 起不算、XP 上照常看连接状态（终端服务被停用、查不到时当作控制台）。
 
 **鉴权**（Linux 第 7 节的表在 Windows 上的对应）：
 
@@ -119,11 +119,17 @@ UAC 授权（相当于 polkit 的 `auth_admin_keep`）：服务对要授权的�
 - 已装旧版本时同一张卡片变成「更新」：先停服务，正在运行的文件（旧界面、会话代理）先改名 `*.old*` 再复制，下次启动时删掉；账号与设置在 `%ProgramData%\LemonGalaxy\worker`，不动。服务停着时显示「启动服务」，服务在跑却连不上（没有本机控制接口的老版本）时提示用新包更新。
 - 卸载：「关于」页或「设置 → 应用」。停止并删除服务（`uninstall-service`），关掉所有用户正开着的界面，删 Run 项、快捷方式、卸载入口，延时删程序目录；账号与设置保留。
 - 单实例按程序位置区分（解压目录里的新版本与已装的旧版本可以同时开）；再开一次已在运行的那份就把窗口拉到前面。
-- 自动更新只换被控服务（发布文件里的单文件 exe，与命令行版同一个），界面不随之更新，下次用新包更新；带界面的 zip 不参与自动更新分类。
+- 自动更新只换被控服务（桌面端里的被控服务就是同一版本的 CLI，按 CLI 的发布文件更新），界面不随之更新，下次用新包更新；桌面端的 zip 不参与自动更新分类。
 
-**发布与测试**：CI 任务「Windows 被控端界面与发布包」用 `windows` 任务编好的被控服务，`lemon-galaxy-worker-windows/gui/scripts/build.sh` 编界面（AnyCPU，x64 与 ARM64 共用）、打两个 zip；自测（`--selftest`）核对请求格式与 Rust 一致、读样例状态，离屏渲染各页（浅色 / 深色 × 中文 / 英文）与托盘图标，核对中英文语言包；`--live` 再前台起一个真的被控服务（临时数据目录与临时管道），界面连上去握手、读状态与设置、改一项设置再读回、拿授权钥匙、读系统用户与账号。Rust 侧 `galaxy-worker` 的 Windows 单元测试走真管道：认出管道那头是自己、同名管道不让第二个实例抢、关闭后管道消失。
+**发布与测试**：CI 任务「Windows 被控端桌面端」用 `windows` 任务编好的被控服务，`lemon-galaxy-worker-windows/gui/scripts/build.sh` 编界面（AnyCPU，x64 与 ARM64 共用）、打两个 zip；自测（`--selftest`）核对请求格式与 Rust 一致、读样例状态，离屏渲染各页（浅色 / 深色 × 中文 / 英文）与托盘图标，核对中英文语言包；`--live` 再前台起一个真的被控服务（临时数据目录与临时管道），界面连上去握手、读状态与设置、改一项设置再读回、拿授权钥匙、读系统用户与账号。Rust 侧 `galaxy-worker` 的 Windows 单元测试走真管道：认出管道那头是自己、同名管道不让第二个实例抢、关闭后管道消失。
 
-界面要 .NET Framework 4.8（Windows 10 1903 起自带）；32 位与 XP / Vista / 7 兼容版暂不做界面，继续用命令行版。
+**老系统兼容版桌面端**（2026-11-25 加）：`LemonGalaxyWorker-<版本>-windows7-x64.zip`（Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2 x64）、`-windows7-x86.zip`（Vista SP2 / 7 / 8 / 8.1 / 10 32 位、Server 2008）、`-windowsxp-x86.zip`（XP SP3 / Server 2003 SP2 32 位，实验），里面的被控服务是对应的兼容版 CLI。
+
+- 界面同一份源码另按 .NET Framework 4.0 编（`TargetFrameworks` 为 `net48;net40`）：4.5 起不支持 XP，4.6 起不支持 Vista，4.8 要 Windows 7 SP1；4.0 在 XP SP3 到 Windows 11 都能装（Windows 8 起自带 4.5 以上，XP / Vista / 7 要先装，没装时系统会提示下载）。Windows 10 起的包仍是 4.8（Windows 10 1903 起自带）。
+- 4.0 的类库没有 async/await 要的类型和值元组：`gui/App/Net40.cs` 只在 `NET40` 时补最小实现（await 有界面线程的同步上下文就回界面线程、失败时抛出里面的那个异常，与 4.5 起一致）；`Task.Run`、`Task.FromResult`、Unix 时间换算、`Array.Empty`、`StreamReader` 的 `leaveOpen` 等 4.5 / 4.6 起的接口改成两份都有的写法（`Bg`、`Clock`）。只装了 4.0 的系统上没人看的失败任务会让进程退出，启动时登记 `UnobservedTaskException` 记日志。
+- 清单用 `app.legacy.manifest`：多报 Vista，DPI 只按系统缩放（WPF 4.0 不会按显示器换 DPI）。共用控件里的 `WindowChrome`（4.5 起）在 4.0 版本是什么都不做的占位。链接进来的主控端源码（配色、图标、控件、语言包底座）也按 4.0 编，改那几个文件时别用 4.5 起才有的接口。
+- 被控服务（XP 兼容版也一样）带本机控制接口：管道拒绝远程客户端靠访问控制、取对方进程号运行时找、XP 的控制台会话 0 算坐在屏幕前（见上）。导入表照旧由 `scripts/check-legacy-imports.py` 核对。
+- CI 任务「Windows 被控端桌面端（老系统兼容版）」在 Windows Server 2025 上对三个包各跑一遍界面自测（含 await 行为核对）与 `--live`（真的兼容版被控服务），与兼容版 CLI 一样先不挡发布。这验证的是同一份程序在新系统上的行为：界面跑在 Server 2025 自带的 .NET 4.8 运行时上（用的仍是本程序补的 await 实现），4.0 运行时本身的差异（比如 WPF 4.0 在 XP 上走软件渲染）与 XP / Vista / 7 上的安装、托盘、授权都要实机看，还没跑过。
 
 ### 3.1 远程桌面（Windows / macOS 被控）
 
@@ -225,7 +231,7 @@ UAC 授权（相当于 polkit 的 `auth_admin_keep`）：服务对要授权的�
   - Windows：申请 SignPath Foundation 开源签名，批下来之前不签名。
   - Android：LemonGalaxy 专用 keystore，存在仓库 Actions Secrets。
 - 所有发布文件附 SHA-256 与 LemonGalaxy 发布签名（Ed25519）。客户端自动更新只从自己的服务器下载（服务器定期从 GitHub 拉取并校验签名，也可在后台手动上传），安装前验签。
-- 被控端在 Windows 上发两种：带界面版 `LemonGalaxyWorker-<版本>-windows-<x64|arm64>.zip`（窗口 + 托盘，双击里面的 LemonGalaxyWorker.exe 安装）与命令行单文件 `lemon-galaxy-worker-<版本>-windows-<架构>.exe`（服务器、批量部署、脚本用）。两者是同一个被控服务，命令行装的服务也能用界面管理，反之亦然；自动更新只换被控服务。Release 说明里两行分开写。
+- 被控端的发布物统一叫「桌面端」（窗口 + 托盘 / 菜单栏）与「CLI」（命令行单文件），Release 说明的资源表格、快速开始、README、文档都用这两个词，不再写「带界面版」「桌面版」「命令行版」「单文件版」。Windows 发两种：桌面端 `LemonGalaxyWorker-<版本>-windows-<x64|arm64>.zip`（双击里面的 LemonGalaxyWorker.exe 安装）与 CLI `lemon-galaxy-worker-<版本>-windows-<架构>.exe`（服务器、批量部署、脚本用），老系统兼容版也各有桌面端与 CLI；Linux 发桌面端 .deb / .rpm 与 CLI（含 musl 精简版）；macOS 发桌面端。同一系统的桌面端与 CLI 是同一个被控服务，CLI 装的服务也能用桌面端管理，反之亦然；自动更新只换被控服务。
 
 ## 7. 分期
 

@@ -49,6 +49,12 @@ internal static class Program
         try { Directory.CreateDirectory(AppInfo.DataDir); } catch { }
         Log.FilePath = IOPath.Combine(AppInfo.DataDir, "ui.log");
         AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Error("未处理的异常：" + e.ExceptionObject);
+        // 只装了 .NET 4.0 的系统（XP）上，没人看的失败任务被回收时会让整个程序退出（4.5 起不会），记下来就算看过了
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Log.Error("后台任务的异常：" + e.Exception);
+            e.SetObserved();
+        };
         settings.Load();
         L.LoadPacks();
         L.Apply(settings.Language);

@@ -23,7 +23,7 @@ internal static partial class Pages
     private static FrameworkElement ServiceSettings(AppModel app)
     {
         var r = app.Rights;
-        var tray = W.Switch(app.Settings.TrayAtLogin, v => { Installer.SetUserTray(v); return Task.FromResult(true); });
+        var tray = W.Switch(app.Settings.TrayAtLogin, v => { Installer.SetUserTray(v); return Bg.Done(true); });
         var trayRow = W.Row(L.T("settings.tray"), tray, L.T("settings.tray.info"));
         if (!r.ViewConfig)
             return K.Col(8, W.Section(L.T("settings.startup")), W.Rows(trayRow), W.Banner("lock", Th.P.TertiaryText, L.T("denied.settings")));
@@ -118,7 +118,7 @@ internal static partial class Pages
         {
             s.Notifications = v;
             s.Save();
-            return Task.FromResult(true);
+            return Bg.Done(true);
         });
         var langs = new List<(string, string)> { ("system", L.T("settings.language.system")) };
         langs.AddRange(L.Packs.Select(p => (p.Code, p.Name)));

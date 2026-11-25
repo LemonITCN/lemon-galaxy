@@ -4,7 +4,7 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <!-- 界面以普通权限运行；改配置、安装服务时只把授权程序单独提权（UAC），见 Control/Elevation.cs -->
+        <!-- 界面以普通权限运行；改配置、安装服务时只把授权程序单独提权（UAC），见 Ipc/Elevation.cs -->
         <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>

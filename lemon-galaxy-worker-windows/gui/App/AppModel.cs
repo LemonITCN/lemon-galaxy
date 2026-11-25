@@ -78,7 +78,7 @@ internal sealed class AppModel
 
     public void RefreshService()
     {
-        Task.Run(Installer.QueryService).ContinueWith(t =>
+        Bg.Run(Installer.QueryService).ContinueWith(t =>
         {
             if (t.Result == Service) return;
             Service = t.Result;

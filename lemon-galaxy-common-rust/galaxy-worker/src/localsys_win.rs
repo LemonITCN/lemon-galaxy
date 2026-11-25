@@ -6,7 +6,8 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE};
 use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, SDDL_REVISION_1};
 use windows_sys::Win32::Security::{GetTokenInformation, LookupAccountSidW, RevertToSelf, SECURITY_ATTRIBUTES, SID_NAME_USE, TOKEN_GROUPS, TOKEN_QUERY, TOKEN_USER, TokenGroups, TokenSessionId, TokenUser};
-use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, ImpersonateNamedPipeClient};
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Registry::{RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ};
 use windows_sys::Win32::System::RemoteDesktop::{WTSActive, WTSConnectState, WTSFreeMemory, WTSQuerySessionInformationW, WTS_CURRENT_SERVER_HANDLE};
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
@@ -70,12 +71,30 @@ impl Drop for SecurityDescriptor {
 /// 系统服务：属主 SYSTEM；SYSTEM、管理员组完全控制；登录过的用户（Authenticated Users）只能读写，
 /// 不能再建同名管道实例（去掉 FILE_CREATE_PIPE_INSTANCE），也就抢不了这个名字。鉴权按连上来的令牌另做。
 /// 普通用户前台运行：只给这个用户和 SYSTEM。
+/// 两种都先拒绝网络登录（NU）：Vista 起建管道时另有「拒绝远程客户端」标志，XP 没有这个标志，只能靠这一条。
 pub fn pipe_sddl(system: bool, owner_sid: &str) -> String {
     if system {
-        "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;AU)".into()
+        "O:SYG:SYD:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;AU)".into()
     } else {
-        format!("D:P(A;;GA;;;{owner_sid})(A;;GA;;;SY)")
+        format!("D:P(D;;GA;;;NU)(A;;GA;;;{owner_sid})(A;;GA;;;SY)")
     }
+}
+
+/// 建管道时能不能带「拒绝远程客户端」标志（PIPE_REJECT_REMOTE_CLIENTS，Vista 起）
+pub fn pipe_reject_remote_supported() -> bool {
+    galaxy_host::win::os_version().0 >= 6
+}
+
+/// 管道对方的进程号。GetNamedPipeClientProcessId 是 Vista 起才有的，XP 兼容版不能直接导入，运行时找。
+unsafe fn pipe_client_pid(pipe: HANDLE) -> Option<u32> {
+    type F = unsafe extern "system" fn(HANDLE, *mut u32) -> i32;
+    let k = GetModuleHandleW(wide("kernel32.dll").as_ptr());
+    if k.is_null() {
+        return None;
+    }
+    let f: F = std::mem::transmute(GetProcAddress(k, b"GetNamedPipeClientProcessId\0".as_ptr())?);
+    let mut pid = 0u32;
+    (f(pipe, &mut pid) != 0).then_some(pid)
 }
 
 /// 管道那头是谁（按对方的令牌）。
@@ -168,10 +187,7 @@ pub fn identify_pipe_client(pipe: HANDLE) -> std::io::Result<PipePeer> {
         }
         let token = Token(t);
         let mut peer = peer_from_token(token.0).ok_or_else(|| std::io::Error::other("token"))?;
-        let mut pid = 0u32;
-        if GetNamedPipeClientProcessId(pipe, &mut pid) != 0 {
-            peer.pid = Some(pid);
-        }
+        peer.pid = pipe_client_pid(pipe);
         Ok(peer)
     }
 }
@@ -200,16 +216,19 @@ unsafe fn peer_from_token(token: HANDLE) -> Option<PipePeer> {
     Some(peer)
 }
 
-/// 会话是不是有人在屏幕前（控制台或远程桌面里已登录且连着）。会话 0 是服务会话，不算。
+/// 会话是不是有人在屏幕前（控制台或远程桌面里已登录且连着）。
+/// Vista 起会话 0 是服务会话，不算；XP / 2003 的控制台用户就在会话 0（与服务同一个），照常看状态，
+/// 查不到状态（XP 上终端服务被停用时查询会失败）就当会话 0 是控制台。
 pub fn session_active(session: u32) -> bool {
-    if session == 0 {
+    let legacy = galaxy_host::win::os_version().0 < 6;
+    if session == 0 && !legacy {
         return false;
     }
     unsafe {
         let mut buf: *mut u16 = null_mut();
         let mut len = 0u32;
         if WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSConnectState, &mut buf, &mut len) == 0 || buf.is_null() {
-            return false;
+            return session == 0 && legacy;
         }
         let state = *(buf as *const i32);
         WTSFreeMemory(buf as _);
@@ -291,6 +310,20 @@ mod tests {
         assert!(!me.sid.is_empty());
         assert!(SecurityDescriptor::from_sddl(&pipe_sddl(false, &me.sid)).is_ok());
         assert!(SecurityDescriptor::from_sddl("not sddl").is_err());
+        assert!(pipe_reject_remote_supported());
+    }
+
+    #[test]
+    fn pid_of_own_pipe() {
+        use std::os::windows::io::AsRawHandle;
+        let name = format!(r"\\.\pipe\lemon-galaxy-pid-test-{}", std::process::id());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let server = tokio::net::windows::named_pipe::ServerOptions::new().create(&name).unwrap();
+            let _client = tokio::net::windows::named_pipe::ClientOptions::new().open(&name).unwrap();
+            server.connect().await.unwrap();
+            assert_eq!(unsafe { pipe_client_pid(server.as_raw_handle() as HANDLE) }, Some(std::process::id()));
+        });
     }
 
     #[test]

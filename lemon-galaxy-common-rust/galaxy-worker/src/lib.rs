@@ -15,13 +15,12 @@
 //! 各系统的差异（数据目录、服务安装、画面与输入等）由 [`WorkerOs`] 提供。
 
 pub mod control;
-// Windows XP 兼容版没有本机控制接口（也没有界面）：命名管道认人要用的接口 XP 没有
-#[cfg(any(unix, all(windows, not(lemon_galaxy_xp))))]
+#[cfg(any(unix, windows))]
 mod control_server;
 pub mod gdm;
 #[cfg(unix)]
 mod localsys;
-#[cfg(all(windows, not(lemon_galaxy_xp)))]
+#[cfg(windows)]
 mod localsys_win;
 
 use galaxy_client::account::{self, DeviceMeta, LoginOutcome};
@@ -608,9 +607,9 @@ fn platform_for(os: &dyn WorkerOs) -> Option<Arc<dyn galaxy_host::platform::Host
 pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl std::future::Future<Output = ()>) -> i32 {
     let _ = std::fs::create_dir_all(dir);
     os.secure_data_dir(dir);
-    #[cfg(any(unix, all(windows, not(lemon_galaxy_xp))))]
+    #[cfg(any(unix, windows))]
     let ctl = control_server::start(os.clone(), dir).await;
-    #[cfg(not(any(unix, all(windows, not(lemon_galaxy_xp)))))]
+    #[cfg(not(any(unix, windows)))]
     let ctl: Option<Arc<NoControl>> = None;
     // 服务模式下定期自动更新：换好程序后退出，由服务管理器拉起新版本
     if std::env::var("LEMON_GALAXY_SUPERVISED").as_deref() == Ok("1") {
@@ -755,10 +754,10 @@ fn write_waiting_status(dir: &Path, device_id: &str) {
     }
 }
 
-/// Windows XP 兼容版没有本机控制接口。
-#[cfg(not(any(unix, all(windows, not(lemon_galaxy_xp)))))]
+/// 没有本机控制接口的系统。
+#[cfg(not(any(unix, windows)))]
 struct NoControl;
-#[cfg(not(any(unix, all(windows, not(lemon_galaxy_xp)))))]
+#[cfg(not(any(unix, windows)))]
 impl NoControl {
     fn set_host(&self, _h: Option<Arc<HostService>>) {}
     async fn woken(&self) {

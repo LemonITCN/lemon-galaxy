@@ -15,7 +15,9 @@ namespace LemonGalaxy;
 ///   1. 协议：请求写出来的 JSON 与 galaxy-worker/src/control.rs 测试里的字面量逐字一致；样例状态、设置、登录步骤能读对。
 ///   2. 界面：用假数据把各页面离屏渲染成 PNG（浅色 / 深色 × 中文 / 英文），不显示窗口、不连服务、不读写用户设置。
 ///   3. 语言包：渲染过程中用到但缺的键。
-///   4. --live：连真的被控服务（环境变量 LEMON_GALAXY_CONTROL_SOCKET 指定的管道），握手、读状态与设置、改一项设置再读回、拿授权钥匙。
+///   4. --live：连真的被控服务（环境变量 LEMON_GALAXY_CONTROL_SOCKET 指定的管道），握手、读状态与设置、改一项设置再读回、拿授权钥匙；
+///      再用界面平时用的后台连接（await）发一次请求。
+///   5. await：回到界面线程、失败时抛出里面的那个异常（老系统版按 .NET 4.0 编，这些是 App/Net40.cs 里补的）。
 /// 退出码：0 全部通过；1 有问题（见输出目录 report.txt）。
 /// </summary>
 internal static class SelfTest
@@ -42,6 +44,8 @@ internal static class SelfTest
             Region.RequireAttached = true;
             Styles.Install(app);
             if (Styles.LoadError != null) Problems.Add("控件模板解析失败：" + Styles.LoadError);
+            Report.AppendLine("运行时 " + Environment.Version + "，界面按 " + AppInfo.Framework + " 编");
+            AsyncCheck();
             foreach (var lang in new[] { "zh-Hans", "en" })
                 foreach (var theme in new[] { "light", "dark" })
                     RenderAll(settings, lang, theme);
@@ -270,5 +274,59 @@ internal static class SelfTest
             Report.AppendLine("服务版本 " + rs[0].J.S("version") + "，管道 " + name);
         }
         catch (Exception e) { Problems.Add("连服务失败：" + e.Message); }
+        LiveAsync();
+    }
+
+    /// <summary>界面平时的连法：后台线程连接与读，回复经 await 回到界面线程</summary>
+    private static void LiveAsync()
+    {
+        var ui = Thread.CurrentThread.ManagedThreadId;
+        using var client = new ControlClient(a => Ui.Post(a));
+        var connected = false;
+        client.Connected += () => connected = true;
+        client.Start();
+        if (!Ui.WaitFor(() => connected, 10000))
+        {
+            Problems.Add("连服务（后台连接）：10 秒没连上");
+            return;
+        }
+        string? result = null;
+        Ui.Run(async () =>
+        {
+            try
+            {
+                var r = await client.Call(Req.Status());
+                var st = r.J.O("status") is { } sj ? Status.From(sj) : null;
+                result = (Thread.CurrentThread.ManagedThreadId == ui) + "|" + (st?.DeviceId.Length == 32);
+            }
+            catch (Exception e) { result = "异常 " + e.Message; }
+        });
+        Ui.WaitFor(() => result != null, 10000);
+        Check(result == "True|True", "连服务（后台连接）：await 拿到状态并回到界面线程 " + result);
+    }
+
+    /// <summary>await 的行为与 .NET 4.5 起一致（老系统版用的是自己补的实现）</summary>
+    private static void AsyncCheck()
+    {
+        var ui = Thread.CurrentThread.ManagedThreadId;
+        string? result = null;
+        async Task<string> Steps()
+        {
+            var bg = await Bg.Run(() => Thread.CurrentThread.ManagedThreadId);
+            var back = Thread.CurrentThread.ManagedThreadId;
+            var err = "";
+            try { await Bg.Run<int>(() => throw new InvalidOperationException("boom")); }
+            catch (InvalidOperationException e) { err = e.Message; }
+            var done = await Bg.Done(5);
+            await Bg.Run(() => Thread.Sleep(20));
+            return $"{bg != ui}|{back == ui}|{err}|{done}|{Thread.CurrentThread.ManagedThreadId == ui}";
+        }
+        Ui.Run(async () =>
+        {
+            try { result = await Steps(); }
+            catch (Exception e) { result = "异常 " + e; }
+        });
+        Ui.WaitFor(() => result != null, 10000);
+        Check(result == "True|True|boom|5|True", "await：后台跑完回到界面线程、失败时抛出里面的异常 " + result);
     }
 }
