@@ -31,17 +31,25 @@ echo "地址 $ADDR"
 step "主控端首次登录（改密码、生成账号密钥）"
 "$BIN/galaxy-dev" --data "$WORK/ctl" login "$ADDR" alice init-pass-123 alice-new-pass-456 | tail -1
 
+# 被控端登录：CI 上偶发连接级错误（请求没发出去），重试几次，仍失败时 fail 会带上各日志
+#   worker_login <数据目录> [系统账号] [sudo]
+worker_login() {
+  local dir="$1" sysuser="${2:-$(id -un)}" i
+  local cmd=(env LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$dir" login --server "$ADDR" --user alice --system-user "$sysuser")
+  [ "${3:-}" = sudo ] && cmd=(sudo -n "${cmd[@]}")
+  for i in 1 2 3; do
+    if "${cmd[@]}" >"$WORK/worker-login.log" 2>&1; then
+      tail -2 "$WORK/worker-login.log"
+      return 0
+    fi
+    cat "$WORK/worker-login.log"
+    sleep 1
+  done
+  fail "被控端登录失败（$dir）"
+}
+
 step "被控端登录并运行"
-# CI 上偶发连接级错误（请求没发出去）：重试几次，仍失败时 fail 会带上各日志
-for i in 1 2 3; do
-  if LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" login --server "$ADDR" --user alice --system-user "$(id -un)" >"$WORK/worker-login.log" 2>&1; then
-    tail -2 "$WORK/worker-login.log"
-    break
-  fi
-  cat "$WORK/worker-login.log"
-  [ "$i" = 3 ] && fail "被控端登录失败"
-  sleep 1
-done
+worker_login "$WORK/worker"
 # 测试平台：一路测试音；收到剪贴板文件清单时立刻「粘贴」进 $WORK/pasted（见 galaxy-host clipoffer::test_paste）
 LEMON_GALAXY_TEST_TONE=1 LEMON_GALAXY_TEST_CLIP_DIR="$WORK/pasted" "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker" run >"$WORK/worker.log" 2>&1 &
 WPID=$!
@@ -136,7 +144,7 @@ sleep 1
 "$BIN/galaxy-dev" --data "$WORK/ctl" devices >"$WORK/devices.txt" 2>&1 || true
 cat "$WORK/devices.txt"
 if grep "^$W1" "$WORK/devices.txt" | grep -qE "([0-9A-F]{2}:){5}[0-9A-F]{2}"; then
-  LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker2" login --server "$ADDR" --user alice --system-user "$(id -un)" | tail -1
+  worker_login "$WORK/worker2"
   "$BIN/lemon-galaxy-worker" --data-dir "$WORK/worker2" run >"$WORK/worker2.log" 2>&1 &
   W2PID=$!
   PIDS+=($W2PID)
@@ -150,7 +158,7 @@ fi
 if [ "$WIN" = 0 ] && sudo -n true 2>/dev/null; then
   step "以 root 运行被控端，终端与文件以普通用户身份执行"
   ME="$(id -un)"
-  sudo -n env LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$WORK/rootworker" login --server "$ADDR" --user alice --system-user "$ME" | tail -1
+  worker_login "$WORK/rootworker" "$ME" sudo
   sudo -n "$BIN/lemon-galaxy-worker" --data-dir "$WORK/rootworker" run >"$WORK/rootworker.log" 2>&1 &
   PIDS+=($!)
   sleep 2
@@ -169,7 +177,7 @@ if [ "$WIN" = 1 ] && net session >/dev/null 2>&1; then
   step "装成 Windows 服务（SYSTEM），命令与文件以当前账号身份执行"
   ME="${USERNAME:-$(id -un)}"
   SVC="$WORK/svc"
-  LEMON_GALAXY_PASSWORD=alice-new-pass-456 "$BIN/lemon-galaxy-worker" --data-dir "$SVC" login --server "$ADDR" --user alice --system-user "$ME" | tail -1
+  worker_login "$SVC" "$ME"
   "$BIN/lemon-galaxy-worker" --data-dir "$SVC" install-service || fail "安装服务失败"
   cleanup_svc() { "$BIN/lemon-galaxy-worker" uninstall-service >/dev/null 2>&1 || true; }
   trap 'cleanup_svc; cleanup' EXIT
