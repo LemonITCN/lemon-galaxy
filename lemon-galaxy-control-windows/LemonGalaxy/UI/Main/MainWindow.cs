@@ -54,7 +54,11 @@ internal sealed class MainWindow : Window
             try { app.Client.SetLocale(L.Pack.CoreLocale); } catch { }
             Rebuild();
         }));
-        StateChanged += (_, _) => FixMaximizedMargin();
+        StateChanged += (_, _) =>
+        {
+            FixMaximizedMargin();
+            if (WindowState != WindowState.Minimized) restoreState = WindowState;
+        };
         // 窗口级快捷键：只处理终端、远程画面没有占用的按键（它们自己标记了 Handled）
         KeyDown += (_, e) =>
         {
@@ -84,6 +88,7 @@ internal sealed class MainWindow : Window
             }
         };
         if (s.WindowMaximized) WindowState = WindowState.Maximized;
+        app.Mcp.Attention += OnMcpAttention;
         Closing += (_, _) =>
         {
             s.WindowMaximized = WindowState == WindowState.Maximized;
@@ -94,6 +99,9 @@ internal sealed class MainWindow : Window
             }
             app.CloseAllTabs();
             app.Forwards.StopAll();
+            app.Mcp.Attention -= OnMcpAttention;
+            tray?.Dispose();
+            tray = null;
         };
         // 系统切换深浅色时跟随（外观设为「跟随系统」时）
         Microsoft.Win32.SystemEvents.UserPreferenceChanged += (_, e) =>
@@ -102,6 +110,103 @@ internal sealed class MainWindow : Window
                 Dispatcher.BeginInvoke(new Action(() => s.LookChanged.Notify()));
         };
     }
+
+    // ---------- MCP 待批准提醒 ----------
+
+    private System.Windows.Forms.NotifyIcon? tray;
+    private McpAttention? lastAttention;
+    private readonly object attentionKey = new();
+
+    /// <summary>
+    /// 外部智能体有新的待批准：窗口不在前台时闪任务栏按钮并发系统通知（托盘气泡，Windows 10 起显示为通知横幅），
+    /// 在前台但不在 MCP 页时在窗口里提示；点开都跳到 MCP 页。
+    /// </summary>
+    private void OnMcpAttention(McpAttention a)
+    {
+        var onPage = app.Section == NavSection.Mcp && app.ActiveTabId == null && app.LoggedIn;
+        if (IsActive && onPage) return;
+        lastAttention = a;
+        // 一下子来好几个只提醒一次
+        Ui.Coalesce(attentionKey, () =>
+        {
+            if (lastAttention is not { } x) return;
+            lastAttention = null;
+            if (!IsActive || WindowState == WindowState.Minimized)
+            {
+                FlashTaskbar();
+                ShowTrayNotice(x);
+            }
+            else app.ShowToast(NoticeText(x), false, L.T("mcp.notify.view"), app.OpenMcp);
+        });
+    }
+
+    private static string NoticeText(McpAttention a)
+        => a.Pending > 1 ? L.T("mcp.notify.many", a.Pending) : L.T("mcp.notify.body", a.ClientName, a.What);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FlashInfo
+    {
+        public uint Size;
+        public IntPtr Hwnd;
+        public uint Flags;
+        public uint Count;
+        public uint Timeout;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool FlashWindowEx(ref FlashInfo info);
+
+    /// <summary>闪任务栏按钮，直到窗口回到前台（FLASHW_ALL | FLASHW_TIMERNOFG）</summary>
+    private void FlashTaskbar()
+    {
+        try
+        {
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero) return;
+            var info = new FlashInfo { Size = (uint)Marshal.SizeOf(typeof(FlashInfo)), Hwnd = hwnd, Flags = 3 | 12, Count = uint.MaxValue, Timeout = 0 };
+            FlashWindowEx(ref info);
+        }
+        catch (Exception e) { Log.Error("闪任务栏按钮失败：" + e.Message); }
+    }
+
+    /// <summary>托盘图标只在有通知时出现：点通知或图标把窗口带到前台并打开 MCP 页，通知收起后图标随之隐藏</summary>
+    private void ShowTrayNotice(McpAttention a)
+    {
+        try
+        {
+            if (tray == null)
+            {
+                tray = new System.Windows.Forms.NotifyIcon { Text = "LemonGalaxy" };
+                try
+                {
+                    var ico = IOPath.Combine(AppInfo.ResourcesDir, "LemonGalaxy.ico");
+                    tray.Icon = System.IO.File.Exists(ico) ? new System.Drawing.Icon(ico) : System.Drawing.SystemIcons.Application;
+                }
+                catch { tray.Icon = System.Drawing.SystemIcons.Application; }
+                tray.BalloonTipClicked += (_, _) => Dispatcher.BeginInvoke(new Action(BringToMcp));
+                tray.MouseClick += (_, _) => Dispatcher.BeginInvoke(new Action(BringToMcp));
+                tray.BalloonTipClosed += (_, _) => Dispatcher.BeginInvoke(new Action(() => { if (tray != null) tray.Visible = false; }));
+            }
+            tray.Visible = true;
+            tray.ShowBalloonTip(8000, L.T("mcp.notify.title"), NoticeText(a), System.Windows.Forms.ToolTipIcon.Info);
+        }
+        catch (Exception e) { Log.Error("显示 MCP 通知失败：" + e.Message); }
+    }
+
+    private void BringToMcp()
+    {
+        if (tray != null) tray.Visible = false;
+        if (WindowState == WindowState.Minimized) WindowState = restoreState;
+        Show();
+        Activate();
+        // 别的程序在前台时 Activate 可能只闪按钮：临时置顶一下把窗口带到最前
+        Topmost = true;
+        Topmost = false;
+        Focus();
+        app.OpenMcp();
+    }
+
+    private WindowState restoreState = WindowState.Normal;
 
     /// <summary>外观或语言变化：常驻控件（终端、画面）保留在标签模型里，其余全部重建</summary>
     private void Rebuild()

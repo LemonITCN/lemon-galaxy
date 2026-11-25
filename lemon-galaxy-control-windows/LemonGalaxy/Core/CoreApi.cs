@@ -59,6 +59,28 @@ internal interface ICoreClient
     Task<ICoreConversation> OpenConversation(string id, ConversationConfig? config, AgentListener listener);
     void DeleteConversation(string id);
 
+    // ---------- 本机 MCP 服务（docs/mcp.md 第 4 节）----------
+
+    /// <summary>默认端口（内核常量，外部客户端的配置不用跟着变）</summary>
+    ushort McpDefaultPort();
+    /// <summary>开启（或按新设置重启）；listener 在任意内核线程回调。端口被占用等失败时抛错（同时 on_status 带 error）</summary>
+    Task<McpStatus> McpStart(McpConfig config, McpListener listener);
+    /// <summary>关闭服务：等批准的步骤一律拒绝，正在跑的命令停止</summary>
+    void McpStop();
+    /// <summary>没开时也能拿到令牌（从端点文件读，还没生成过时为空）</summary>
+    McpStatus McpStatus();
+    /// <summary>换新令牌；服务开着时随即用新令牌重启（外部客户端的智能体随之作废）</summary>
+    Task<McpStatus> McpRegenerateToken();
+    /// <summary>档位立即作用于所有外部客户端；服务没开时不生效（下次开启按 McpConfig）</summary>
+    void McpSetMode(AiMode mode, uint? trustMinutes);
+    void McpDecide(string clientKey, string callId, ApprovalDecision decision);
+    /// <summary>回应 request_secret：内容直接送到设备，不经过外部智能体</summary>
+    void McpProvideSecret(string clientKey, string requestId, string secret);
+    /// <summary>拒绝这个客户端等批准的步骤、停止它正在跑的命令（之后的新调用照常）</summary>
+    void McpStopClient(string clientKey);
+    /// <summary>某个客户端最近的操作记录（只有工具卡片，没有时间）</summary>
+    AgentMessage[] McpHistory(string clientKey);
+
     /// <summary>control 客户端内核自带的本机被控服务。Windows 上被控交给 lemon-galaxy-worker 系统服务，这里只用来关掉它。</summary>
     /// <returns>已关闭（或本来就关着）时为 true；内核还没给出被控服务时为 false，稍后再试</returns>
     bool DisableBuiltInHost();

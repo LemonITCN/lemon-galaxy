@@ -690,7 +690,7 @@ internal static class AiViews
         return K.Col(4, head, body);
     }
 
-    private static string ToolIcon(string tool) => tool switch
+    internal static string ToolIcon(string tool) => tool switch
     {
         "run_command" => "terminal",
         "screenshot" => "camera",
@@ -707,6 +707,8 @@ internal static class AiViews
         "use_app" or "app_list" or "app_state" or "app_click" or "app_set_value" or "app_type" or "app_key" or "app_scroll" or "app_action" or "app_open" => "appWindow",
         "web_fetch" => "globe",
         "system_info" => "chip",
+        "list_displays" => "display",
+        "wake_device" => "power",
         "update_plan" => "checklist",
         "list_devices" => "server",
         "list_snippets" => "code",
@@ -718,7 +720,7 @@ internal static class AiViews
     };
 
     /// <summary>工具的显示名；内核以后加了界面还不认识的工具时直接显示工具名</summary>
-    private static string ToolLabel(string tool)
+    internal static string ToolLabel(string tool)
     {
         var key = "ai.tool." + tool;
         return L.Pack.Strings.ContainsKey(key) ? L.T(key) : tool;
@@ -805,7 +807,7 @@ internal static class AiViews
     }
 
     /// <summary>命令、参数、文件改动：等宽字体；edit_file 的原文 / 改为按删除 / 新增着色</summary>
-    private static FrameworkElement CommandBox(string tool, string text)
+    internal static FrameworkElement CommandBox(string tool, string text)
     {
         if (tool == "edit_file" && text.StartsWith("--- ", StringComparison.Ordinal))
         {
@@ -829,7 +831,7 @@ internal static class AiViews
         return K.Box(box, Th.CodeBg, 7, null, 0, new Thickness(10, 8, 10, 8));
     }
 
-    private static FrameworkElement RiskRow(ToolCallView call)
+    internal static FrameworkElement RiskRow(ToolCallView call)
     {
         var rc = Img.RiskColor(call.Risk);
         var reasons = call.RiskReasons.Select(r => (UIElement?)K.Text(r, 12.5, Th.Text, wrap: true)).ToList();

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -56,9 +57,11 @@ internal static class SelfTest
             if (Styles.LoadError != null) Problems.Add("控件模板解析失败：" + Styles.LoadError);
             CheckIcons();
             CheckForwardDraft();
+            CheckMcpConfigs();
             CheckMarkdown();
             Clock.FrozenMs = 1_795_225_692_000;      // 2026-11-21 09:48:12（北京时间）
             VirtualDisplayMode.LocalOverride = (2736, 1824);
+            McpConfigs.ExePathOverride = @"C:\Program Files\LemonGalaxy\LemonGalaxy.exe";
             var fakeHome = MakeFakeHome();
             LocalFileSource.HomeOverride = fakeHome;
             fakeHomeDir = fakeHome;
@@ -131,6 +134,256 @@ internal static class SelfTest
         d.Via = "ssh:s-web1";
         d.LocalPort = "15432";
         Expect(d.Build().Data is VaultData.PortForward { ViaDeviceId: null, ViaSshHostId: "s-web1", LocalPort: 15432 }, "经由 SSH 主机的规则组装不对");
+    }
+
+    /// <summary>外部智能体配置片段：四种写法、JSON 能解析、Windows 路径里的反斜杠转义、TOML 字符串转义</summary>
+    private static void CheckMcpConfigs()
+    {
+        void Expect(bool ok, string what) { if (!ok) Problems.Add("MCP 配置片段：" + what); }
+        const string url = "http://127.0.0.1:47821/mcp", token = "lgm_AbC-123_xyz";
+        Expect(McpConfigs.ClaudeCode(url, token) == "claude mcp add --transport http --scope user lemongalaxy http://127.0.0.1:47821/mcp --header \"Authorization: Bearer lgm_AbC-123_xyz\"",
+            "Claude Code 命令不对：" + McpConfigs.ClaudeCode(url, token));
+        Expect(McpConfigs.Codex(url, token) == "[mcp_servers.lemongalaxy]\r\nurl = \"http://127.0.0.1:47821/mcp\"\r\nhttp_headers = { \"Authorization\" = \"Bearer lgm_AbC-123_xyz\" }",
+            "Codex 配置不对：" + McpConfigs.Codex(url, token));
+        var js = new JavaScriptSerializer();
+        try
+        {
+            var cursor = (Dictionary<string, object>)((Dictionary<string, object>)((Dictionary<string, object>)js.DeserializeObject(McpConfigs.Cursor(url, token)))["mcpServers"])["lemongalaxy"];
+            Expect((string)cursor["url"] == url && (string)((Dictionary<string, object>)cursor["headers"])["Authorization"] == "Bearer " + token, "Cursor JSON 内容不对");
+            const string exe = @"D:\Apps\LemonGalaxy 2026\LemonGalaxy.exe";
+            var stdioText = McpConfigs.Stdio(exe);
+            Expect(stdioText.Contains(@"""D:\\Apps\\LemonGalaxy 2026\\LemonGalaxy.exe"""), "stdio JSON 里的反斜杠没转义：" + stdioText);
+            var stdio = (Dictionary<string, object>)((Dictionary<string, object>)((Dictionary<string, object>)js.DeserializeObject(stdioText))["mcpServers"])["lemongalaxy"];
+            Expect((string)stdio["command"] == exe && stdio["args"] is object[] { Length: 1 } a && (string)a[0] == "--mcp-stdio", "stdio JSON 内容不对");
+        }
+        catch (Exception e) { Problems.Add("MCP 配置片段：JSON 解析失败 " + e.Message); }
+        Expect(McpConfigs.Str("a\tb\u0001\"c\\") == "\"a\\tb\\u0001\\\"c\\\\\"", "引号、反斜杠、控制字符转义不对：" + McpConfigs.Str("a\tb\u0001\"c\\"));
+        Expect(McpConfigs.Mask("lgm_secret-token-value").StartsWith("lgm_", StringComparison.Ordinal) && !McpConfigs.Mask("lgm_secret-token-value").Contains("secret"), "令牌遮挡不对");
+        Expect(McpHub.ParsePort("47821") == 47821 && McpHub.ParsePort("0") == null && McpHub.ParsePort("65536") == null && McpHub.ParsePort("abc") == null && McpHub.ParsePort(" 8080 ") == 8080, "端口解析不对");
+    }
+
+    private static T? FindNamed<T>(DependencyObject root, string name) where T : FrameworkElement
+    {
+        if (root is T fe && fe.Name == name) return fe;
+        var n = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < n; i++)
+            if (FindNamed<T>(VisualTreeHelper.GetChild(root, i), name) is { } hit) return hit;
+        return null;
+    }
+
+    /// <summary>界面上所有文字（TextBlock 与只读文本框）</summary>
+    private static List<string> AllText(DependencyObject root)
+    {
+        var list = new List<string>();
+        void Walk(DependencyObject d)
+        {
+            if (d is TextBlock tb) list.Add(tb.Text);
+            else if (d is TextBox tx) list.Add(tx.Text);
+            var n = VisualTreeHelper.GetChildrenCount(d);
+            for (var i = 0; i < n; i++) Walk(VisualTreeHelper.GetChild(d, i));
+        }
+        Walk(root);
+        return list;
+    }
+
+    /// <summary>MCP 页滚到某一块（null 回到顶部）</summary>
+    private static void ScrollMcp(FrameworkElement root, string? section)
+    {
+        Settle(root, WindowSize);
+        if (FindNamed<ScrollViewer>(root, "McpPage") is not { } sv)
+        {
+            Problems.Add("MCP：找不到页面的滚动区");
+            return;
+        }
+        double y = 0;
+        if (section != null && sv.Content is UIElement content)
+        {
+            if (FindNamed<FrameworkElement>(sv, section) is { } el) y = Math.Max(0, el.TranslatePoint(new Point(0, 0), content).Y - 16);
+            else Problems.Add("MCP：页面里找不到 " + section);
+        }
+        sv.ScrollToVerticalOffset(y);
+        Settle(root, WindowSize);
+    }
+
+    /// <summary>
+    /// MCP 页（docs/mcp.md 第 5 节）：未开启；开启后（一个客户端 claude-code、一条待批准的危险命令、几条记录）；展开的记录；
+    /// 连接确认、操作应用确认（第二个客户端）与要密码；拒绝填理由；完全信任限时；端口被占用。
+    /// 核对：默认设置、令牌默认遮住、批准 / 拒绝 / 密码 / 调用方取消 / 停止客户端的结果、提醒次数、档位传到内核、完全信任到时回退、
+    /// 补齐历史、记录上限、换端口重启、重新生成令牌、登录后自动开启、关闭。
+    /// </summary>
+    private static void RenderMcp(AppModel app, FrameworkElement root, string prefix, bool zh)
+    {
+        var m = app.Mcp;
+        if ((app.Client as MockClient)?.Mcp is not { } mock)
+        {
+            Problems.Add("MCP：不是模拟内核");
+            return;
+        }
+        void Expect(bool ok, string what) { if (!ok) Problems.Add("MCP：" + what); }
+        var attention = 0;
+        m.Attention += _ => attention++;
+        var s = app.Settings;
+
+        // 1. 默认关闭、端口 47821、危险操作确认
+        Expect(!s.McpEnabled && s.McpPort == 0 && s.McpMode == AiMode.ConfirmDangerous && s.McpTrustMinutes == 0, "默认设置不对");
+        Expect(m.DefaultPort == 47821 && m.EffectivePort == 47821 && m.Url == "http://127.0.0.1:47821/mcp", "默认端口或地址不对：" + m.Url);
+        app.SelectHome(NavSection.Mcp);
+        Expect(!m.Running && m.PendingCount == 0 && m.Records.Count == 0, "开启前不应在运行、不应有记录");
+        ScrollMcp(root, null);
+        Capture($"{prefix}-72-mcp-off", root);
+
+        // 2. 开启：一个客户端、一条待批准的危险命令、七条已结束的记录
+        m.SetEnabled(true);
+        Wait("MCP 开启", () => m.Running && !m.Busy && m.PendingCount == 1 && m.Records.Count == 8 && m.Records.All(r => r.Phase is McpPhase.Pending or McpPhase.Finished)
+            && m.Clients is [{ PendingApprovals: 1 }]);
+        Expect(s.McpEnabled, "开启后设置没记住");
+        Expect(m.Clients is [{ Key: "claude-code", PendingApprovals: 1 }], "客户端列表不对");
+        Expect(attention == 1, $"新的待批准应提醒一次（实际 {attention}）");
+        Expect(m.Approvals is [{ Call.Risk: RiskLevel.Dangerous, Call.Tool: "run_command" }] && ReferenceEquals(m.Records[0], m.Approvals[0]), "待批准卡片不对或不在记录最上面");
+        Expect(m.Records.Count(r => r.Outcome == McpOutcome.Success) == 4 && m.Records.Count(r => r.Outcome == McpOutcome.Denied) == 1
+            && m.Records.Count(r => r.Outcome == McpOutcome.Failed) == 1 && m.Records.Count(r => r.Outcome == McpOutcome.Cancelled) == 1, "记录的结果分类不对");
+        // 截图里的时间错开（模拟内核一次性回放，时间都一样）
+        for (var i = 0; i < m.Records.Count; i++)
+        {
+            m.Records[i].Time = Clock.NowMs - i * 47_000L;
+            m.Records[i].Notify();
+        }
+        var token = m.Token;
+        Expect(token.StartsWith("lgm_", StringComparison.Ordinal) && token.Length > 20, "令牌不对：" + token);
+        ScrollMcp(root, null);
+        Capture($"{prefix}-73-mcp-running", root);
+        ScrollMcp(root, "McpConnection");
+        Expect(!AllText(root).Any(t => t.Contains(token)), "令牌默认应遮住（配置片段里也是）");
+        Capture($"{prefix}-74-mcp-connection", root);
+        m.TokenVisible = true;
+        m.Changed.Notify();
+        Settle(root, WindowSize);
+        Expect(AllText(root).Any(t => t == token), "显示令牌后应能看到");
+        m.TokenVisible = false;
+        m.Changed.Notify();
+        m.Copy(McpConfigs.Stdio(McpConfigs.ExePath));
+        Expect(m.LastCopied == "{\"mcpServers\":{\"lemongalaxy\":{\"command\":\"C:\\\\Program Files\\\\LemonGalaxy\\\\LemonGalaxy.exe\",\"args\":[\"--mcp-stdio\"]}}}", "复制的 stdio 配置不对：" + m.LastCopied);
+        ClearToast(app);
+
+        // 3. 展开一条记录（命令、输出、结果）
+        var df = m.Records.FirstOrDefault(r => r.Call.Summary == "df -h");
+        if (df != null)
+        {
+            df.Expanded = true;
+            df.Notify();
+        }
+        ScrollMcp(root, "McpClients");
+        Capture($"{prefix}-75-mcp-records", root);
+        if (df != null)
+        {
+            df.Expanded = false;
+            df.Notify();
+        }
+
+        // 4. 批准危险命令：卡片收起、执行完、输出到了
+        var first = m.Approvals[0];
+        m.Decide(first, new ApprovalDecision.AllowOnce());
+        Expect(m.PendingCount == 0, "批准后卡片应立即收起");
+        Wait("批准后执行完", () => first.Outcome == McpOutcome.Success && m.Clients is [{ PendingApprovals: 0, Running: false }]);
+        Expect(first.Output.Contains("23"), "批准后的输出没收到");
+
+        // 5. 连接确认、操作应用确认（第二个客户端）、要密码
+        mock.SimulateUseTarget();
+        mock.SimulateUseApp();
+        mock.SimulateSecret();
+        Wait("三张待批准卡片", () => m.Approvals.Count == 2 && m.Secrets.Count == 1 && m.Clients.Length == 2);
+        Expect(attention == 4, $"三个新的待批准应各提醒一次（实际共 {attention}）");
+        Expect(m.PendingItems() is [McpCall { IsUseTarget: true }, McpCall { IsUseApp: true }, McpSecret], "待批准卡片顺序不对");
+        ScrollMcp(root, null);
+        Capture($"{prefix}-76-mcp-approvals", root);
+        // 拒绝连接并填理由：理由交给内核（回给智能体）
+        var ut = m.Approvals.First(a => a.IsUseTarget);
+        ut.Denying = true;
+        ut.DenyReason = zh ? "先别动办公室电脑" : "Leave the office PC alone";
+        ut.Notify();
+        Capture($"{prefix}-77-mcp-deny-reason", root);
+        m.Decide(ut, new ApprovalDecision.Deny(ut.DenyReason));
+        Wait("拒绝连接", () => ut.Outcome == McpOutcome.Denied);
+        Expect(ut.Result?.Output == ut.DenyReason, "拒绝理由没交给内核");
+        var ua = m.Approvals.FirstOrDefault(a => a.IsUseApp);
+        if (ua != null) m.Decide(ua, new ApprovalDecision.AllowOnce());
+        Wait("允许操作应用", () => ua?.Outcome == McpOutcome.Success);
+        // 密码：送到内核，不进记录
+        const string secret = "s3cret-Pass!";
+        m.ProvideSecret(m.Secrets[0], secret);
+        Wait("密码送到内核", () => mock.LastSecret == secret && m.PendingCount == 0 && m.Records.FirstOrDefault(r => r.Call.Tool == "request_secret")?.Outcome == McpOutcome.Success);
+        Expect(!m.Records.Any(r => r.Output.Contains(secret) || r.Call.Summary.Contains(secret) || (r.Result?.Summary.Contains(secret) ?? false)), "密码不应出现在操作记录里");
+
+        // 6. 调用方取消（客户端断开）：卡片收起，记录标成已取消
+        var cancelled = mock.SimulatePending("tail -f /var/log/syslog");
+        Wait("待取消的命令", () => m.Approvals.Count == 1);
+        mock.SimulateCallerCancel(cancelled);
+        Wait("调用方取消", () => m.Approvals.Count == 0 && m.Records[0].Outcome == McpOutcome.Cancelled);
+
+        // 7. 停止客户端：拒绝它等批准的步骤
+        mock.SimulatePending("rm -rf /tmp/build-cache");
+        Wait("待停止的命令", () => m.Approvals.Count == 1);
+        m.StopClient("claude-code");
+        Expect(m.PendingCount == 0, "停止客户端后卡片应收起");
+        Wait("停止客户端", () => m.Records[0].Outcome == McpOutcome.Denied && m.Clients.All(c => !c.Running));
+
+        // 8. 档位：立即传给内核并记进设置；完全信任限时，到时回到之前的档位
+        m.SetMode(AiMode.FullTrust, 60);
+        Expect(s.McpMode == AiMode.FullTrust && s.McpTrustMinutes == 60 && mock.LastMode == AiMode.FullTrust && mock.LastTrust == 60, "档位没传到内核或没记住");
+        Wait("完全信任到期时间", () => m.TrustUntilMs == Clock.NowMs + 60 * 60_000L);
+        ScrollMcp(root, "McpPermissions");
+        Capture($"{prefix}-78-mcp-full-trust", root);
+        m.HandleEvent("claude-code", new AgentEvent.ModeChanged(AiMode.ConfirmDangerous, AiMode.ConfirmDangerous, null));
+        Expect(s.McpMode == AiMode.ConfirmDangerous && mock.LastMode == AiMode.ConfirmDangerous && mock.LastTrust == null && m.TrustUntilMs == null, "完全信任到时没回到之前的档位");
+        m.SetMode(AiMode.ReadOnly, 0);
+        Expect(s.McpMode == AiMode.ReadOnly && mock.LastMode == AiMode.ReadOnly && mock.LastTrust == null, "只读档没传到内核");
+        m.SetMode(AiMode.ConfirmDangerous, 0);
+
+        // 9. 补齐：界面漏收的记录从 mcp_history 补回来（没有时间），已有的不重复
+        var total = m.Clients.Sum(c => mock.History(c.Key).Length);
+        m.SyncHistory();
+        Expect(m.Records.Count == Math.Min(total, McpHub.MaxLog), $"补齐不应重复加记录（{m.Records.Count} / {total}）");
+        m.ForgetRecordsForSelfTest();
+        m.SyncHistory();
+        Expect(m.Records.Count == Math.Min(total, McpHub.MaxLog) && m.Records.All(r => r.Time == null && r.Result != null), $"补齐历史不对（{m.Records.Count} / {total}）");
+
+        // 10. 记录上限 200，最新在上
+        mock.SimulateMany(230);
+        Wait("记录上限", () => m.Records.Count == McpHub.MaxLog && m.Records[0].Call.Summary == "/var/log/app-229");
+        Expect(m.Records[McpHub.MaxLog - 1].Call.Summary == "/var/log/app-30", "挤掉的不是最旧的记录");
+
+        // 11. 端口被占用：显示原因；换端口重启（客户端作废）；恢复默认
+        m.PortDraft = "80";
+        m.ApplyPort();
+        Wait("端口被占用", () => !m.Busy && m.ShownError != null);
+        Expect(!m.Running && s.McpPort == 80 && s.McpEnabled, "端口被占用时状态不对");
+        ScrollMcp(root, null);
+        Capture($"{prefix}-79-mcp-port-error", root);
+        m.PortDraft = "47900";
+        m.ApplyPort();
+        Wait("换端口重启", () => m.Running && !m.Busy && m.Status.Port == 47900);
+        Expect(m.Url == "http://127.0.0.1:47900/mcp" && m.Clients.Length == 0 && m.ShownError == null, "换端口后地址、客户端或错误不对");
+        m.ResetPort();
+        Wait("恢复默认端口", () => m.Running && !m.Busy && m.Status.Port == 47821);
+        Expect(s.McpPort == 0, "恢复默认端口后设置应为 0");
+
+        // 12. 重新生成令牌：先确认；之后服务用新令牌继续运行
+        m.AskRegenerateToken();
+        Expect(app.Modal != null, "重新生成令牌应先确认");
+        app.CloseModal();
+        var old = m.Token;
+        m.RegenerateToken();
+        Wait("重新生成令牌", () => !m.Busy && m.Running && m.Token.Length > 20 && m.Token != old);
+        ClearToast(app);
+
+        // 13. 关闭；开关开着时登录后自动开启
+        m.SetEnabled(false);
+        Expect(!m.Running && !s.McpEnabled && m.PendingCount == 0, "关闭后状态不对");
+        s.McpEnabled = true;
+        m.OnLogin();
+        Wait("登录后自动开启", () => m.Running && !m.Busy);
+        m.SetEnabled(false);
+        Wait("关闭", () => !m.Running);
     }
 
     private static void ClearToast(AppModel app)
@@ -997,6 +1250,9 @@ internal static class SelfTest
         ClearToast(app);
         app.SelectedForward = null;
         app.Nav.Notify();
+
+        // 7c. 本机 MCP 服务
+        RenderMcp(app, root, prefix, zh);
 
         // 8. 本机被控（Windows 被控端系统服务）
         app.SelectHome(NavSection.Local);

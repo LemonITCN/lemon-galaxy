@@ -116,6 +116,7 @@ internal sealed class MockClient : ICoreClient
         await Delay(150);
         store.Remove("mock.session");
         lock (lk) { user = null; server = null; }
+        mcp?.ResetClients();
         liveTimer?.Dispose();
         liveTimer = null;
         SetState(ClientState.LoggedOut);
@@ -422,6 +423,22 @@ internal sealed class MockClient : ICoreClient
     }
 
     public void DeleteConversation(string id) { lock (lk) saved.Remove(id); }
+
+    // ---------- 本机 MCP 服务（不监听端口，见 MockMcp）----------
+
+    private MockMcp? mcp;
+    public MockMcp Mcp => mcp ??= new MockMcp(this);
+
+    public ushort McpDefaultPort() => MockMcp.DefaultPort;
+    public Task<McpStatus> McpStart(McpConfig config, McpListener l) => Mcp.Start(config, l);
+    public void McpStop() => Mcp.Stop();
+    public McpStatus McpStatus() => Mcp.Status();
+    public Task<McpStatus> McpRegenerateToken() => Mcp.Regenerate();
+    public void McpSetMode(AiMode mode, uint? trustMinutes) => Mcp.SetMode(mode, trustMinutes);
+    public void McpDecide(string clientKey, string callId, ApprovalDecision decision) => Mcp.Decide(clientKey, callId, decision);
+    public void McpProvideSecret(string clientKey, string requestId, string secret) => Mcp.ProvideSecret(clientKey, requestId, secret);
+    public void McpStopClient(string clientKey) => Mcp.StopClient(clientKey);
+    public AgentMessage[] McpHistory(string clientKey) => Mcp.History(clientKey);
 
     public bool DisableBuiltInHost() => true;
     public ITermScreen CreateScreen(ushort rows, ushort cols, uint scrollback) => new SimpleVt(rows, cols, scrollback);

@@ -73,6 +73,20 @@ internal sealed class AppSettings : Observable
     /// <summary>完全信任的时限（分钟），0 表示「本对话」（不限时）</summary>
     public int AiTrustMinutes { get => I("aiTrustMinutes", 0); set => Set("aiTrustMinutes", value); }
 
+    // 本机 MCP 服务（docs/mcp.md）
+    /// <summary>开关：开着时登录后自动开启服务</summary>
+    public bool McpEnabled { get => B("mcpEnabled", false); set => Set("mcpEnabled", value); }
+    /// <summary>端口；0 表示内核的默认端口（mcp_default_port）</summary>
+    public int McpPort { get => I("mcpPort", 0); set => Set("mcpPort", value is > 0 and <= 65535 ? value : 0); }
+    /// <summary>档位：readOnly | confirmAll | confirmDangerous | fullTrust（没有「禁止」，要停用就关掉服务）</summary>
+    public AiMode McpMode
+    {
+        get => AiModes.From(S("mcpMode", "confirmDangerous")) is var m && m != AiMode.Off ? m : AiMode.ConfirmDangerous;
+        set => Set("mcpMode", value.Key());
+    }
+    /// <summary>完全信任的时限（分钟），0 表示不限时</summary>
+    public int McpTrustMinutes { get => I("mcpTrustMinutes", 0); set => Set("mcpTrustMinutes", Math.Max(0, value)); }
+
     // 登录与窗口
     public string LastServer { get => S("lastServer", ""); set => Set("lastServer", value); }
     public string LastUsername { get => S("lastUsername", ""); set => Set("lastUsername", value); }

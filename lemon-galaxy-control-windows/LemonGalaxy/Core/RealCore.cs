@@ -49,6 +49,17 @@ internal sealed class RealClient : ICoreClient
     public async Task<ICoreConversation> OpenConversation(string id, ConversationConfig? config, AgentListener listener) => new RealConversation(await c.OpenConversation(id, config, listener));
     public void DeleteConversation(string id) => c.DeleteConversation(id);
 
+    public ushort McpDefaultPort() => GalaxyFfiMethods.McpDefaultPort();
+    public Task<McpStatus> McpStart(McpConfig config, McpListener listener) => c.McpStart(config, listener);
+    public void McpStop() => c.McpStop();
+    public McpStatus McpStatus() => c.McpStatus();
+    public Task<McpStatus> McpRegenerateToken() => c.McpRegenerateToken();
+    public void McpSetMode(AiMode mode, uint? trustMinutes) => c.McpSetMode(mode, trustMinutes);
+    public void McpDecide(string clientKey, string callId, ApprovalDecision decision) => c.McpDecide(clientKey, callId, decision);
+    public void McpProvideSecret(string clientKey, string requestId, string secret) => c.McpProvideSecret(clientKey, requestId, secret);
+    public void McpStopClient(string clientKey) => c.McpStopClient(clientKey);
+    public AgentMessage[] McpHistory(string clientKey) => c.McpHistory(clientKey);
+
     /// 内核按 CoreConfig.host_enabled = false 不会起进程内被控；万一起了也关掉远程。
     public bool DisableBuiltInHost()
     {

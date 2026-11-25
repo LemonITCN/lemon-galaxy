@@ -6,7 +6,7 @@ using LemonGalaxy.Core;
 
 namespace LemonGalaxy.UI;
 
-internal enum NavSection { Hosts, Sftp, Ai, Forwards, Snippets, Local, Settings }
+internal enum NavSection { Hosts, Sftp, Ai, Mcp, Forwards, Snippets, Local, Settings }
 internal enum HostsListTab { Hosts, Credentials, KnownHosts }
 internal enum SettingsPage { Account, Appearance, Terminal, Connection, Ai, About }
 internal enum TabKind { Terminal, Sftp, Remote }
@@ -81,6 +81,7 @@ internal sealed class AppModel
 
     public readonly TransferQueue Transfers = new();
     public readonly AiHub Ai;
+    public readonly McpHub Mcp;
     public readonly WorkerServiceModel Worker;
     public readonly Updater Updater;
     public readonly PortForwardHub Forwards;
@@ -107,6 +108,7 @@ internal sealed class AppModel
             HostEnabled: false);
         (Client, CoreFallbackReason) = CoreProvider.Make(config, store, adapter, forceMock, mockOptions);
         Ai = new AiHub(this);
+        Mcp = new McpHub(this);
         Forwards = new PortForwardHub(this);
         Worker = new WorkerServiceModel(this);
         Updater = new Updater(this);
@@ -127,6 +129,8 @@ internal sealed class AppModel
         Ai.ReloadSummaries();
         PhaseChanged.Notify();
         Data.Notify();
+        // 本机 MCP 服务：开关开着就开启（退出登录不关服务，再登录时已在运行就不动）
+        Mcp.OnLogin();
         Ui.Run(async () =>
         {
             try { await Client.RefreshDevices(); } catch { }
@@ -156,6 +160,7 @@ internal sealed class AppModel
         CloseAllTabs();
         Forwards.StopAll();
         try { await Client.Logout(); } catch { }
+        Mcp.OnLogout();
         LoggedIn = false;
         builtInHostOff = false;
         User = null;
@@ -173,6 +178,7 @@ internal sealed class AppModel
         {
             LoggedIn = false;
             Forwards.StopAll();
+            Mcp.OnLogout();
             PhaseChanged.Notify();
         }
         if (s == ClientState.Online && LoggedIn)
@@ -188,6 +194,7 @@ internal sealed class AppModel
     {
         CloseAllTabs();
         Forwards.StopAll();
+        Mcp.OnLogout();
         LoggedIn = false;
         PhaseChanged.Notify();
         ShowToast(L.T("login.revoked"), true);
@@ -514,6 +521,14 @@ internal sealed class AppModel
         Section = NavSection.Ai;
         ActiveTabId = null;
         Ai.StartWith(targets.Select(t => t.Kind == AgentTargetKind.Device ? AiHub.DeviceRef(this, t.Id) : AiHub.SshRef(this, t.Id)));
+        Nav.Notify();
+    }
+
+    /// <summary>切到 MCP 页（新的待批准通知点开时）</summary>
+    public void OpenMcp()
+    {
+        Section = NavSection.Mcp;
+        ActiveTabId = null;
         Nav.Notify();
     }
 

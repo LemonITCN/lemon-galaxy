@@ -4,10 +4,10 @@ using System.Windows.Media;
 
 namespace LemonGalaxy.UI;
 
-/// <summary>左侧导航：标志、七个分区、底部账号</summary>
+/// <summary>左侧导航：标志、八个分区、底部账号</summary>
 internal static class Sidebar
 {
-    private static readonly NavSection[] Sections = { NavSection.Hosts, NavSection.Sftp, NavSection.Ai, NavSection.Forwards, NavSection.Snippets, NavSection.Local, NavSection.Settings };
+    private static readonly NavSection[] Sections = { NavSection.Hosts, NavSection.Sftp, NavSection.Ai, NavSection.Mcp, NavSection.Forwards, NavSection.Snippets, NavSection.Local, NavSection.Settings };
 
     public static FrameworkElement Build(AppModel app)
     {
@@ -36,7 +36,7 @@ internal static class Sidebar
             {
                 Width = compact ? 58 : 200, Background = Th.Sidebar, Padding = new Thickness(compact ? 7 : 10, 0, compact ? 7 : 10, 10), Child = col,
             };
-        }).On(app.Nav, app.Data, s, app.Worker.Changed, app.Forwards.Changed);
+        }).On(app.Nav, app.Data, s, app.Worker.Changed, app.Forwards.Changed, app.Mcp.Changed);
     }
 
     private static FrameworkElement Item(AppModel app, NavSection sec, bool compact)
@@ -44,7 +44,17 @@ internal static class Sidebar
         var selected = app.Section == sec && app.ActiveTabId == null;
         var current = app.Section == sec;
         var fg = selected ? Th.Accent : Th.SidebarText;
-        var content = new List<UIElement?> { K.Width(K.Center(K.Icon(Shell.SectionIcon(sec), 16, fg, 1.9)), 22) };
+        var icon = K.Width(K.Center(K.Icon(Shell.SectionIcon(sec), 16, fg, 1.9)), 22);
+        // 收起的侧栏没有地方放数字：MCP 有待批准时在图标右上角叠一个小角标
+        if (compact && sec == NavSection.Mcp && app.Mcp.PendingCount > 0)
+        {
+            var bubble = CountBubble(app.Mcp.PendingCount, 9.5);
+            bubble.HorizontalAlignment = HorizontalAlignment.Right;
+            bubble.VerticalAlignment = VerticalAlignment.Top;
+            bubble.Margin = new Thickness(0, -6, -9, 0);
+            icon = new Grid { Width = 22, Children = { icon, bubble } };
+        }
+        var content = new List<UIElement?> { icon };
         if (!compact)
         {
             content.Add(K.Grow(K.Text(L.T(Shell.SectionKey(sec)), 13.5, selected ? Th.Accent : Th.SidebarText, selected ? FontWeights.SemiBold : FontWeights.Normal)));
@@ -70,6 +80,13 @@ internal static class Sidebar
             var n = app.Devices.Count(d => d.Online && !d.IsSelf && d.Kind != DeviceKind.Mobile);
             return n > 0 ? K.Text(n.ToString(), 11.5, Th.Tertiary, FontWeights.Medium) : null;
         }
+        if (sec == NavSection.Mcp)
+        {
+            // 等用户批准的步骤（含要输入密码的）
+            var n = app.Mcp.PendingCount;
+            if (n > 0) return CountBubble(n, 10.5);
+            return app.Mcp.Running ? K.StatusDot(DotState.Online, 7, Th.Sidebar) : null;
+        }
         if (sec == NavSection.Forwards)
         {
             // 正在运行的端口映射数
@@ -86,6 +103,18 @@ internal static class Sidebar
             };
         }
         return null;
+    }
+
+    /// <summary>醒目的数字角标（待批准）</summary>
+    private static Border CountBubble(int n, double size)
+    {
+        var t = K.Text(n > 99 ? "99+" : n.ToString(), size, Brushes.White, FontWeights.SemiBold);
+        t.TextAlignment = TextAlignment.Center;
+        return new Border
+        {
+            MinWidth = size + 7, Height = size + 7, CornerRadius = new CornerRadius((size + 7) / 2), Padding = new Thickness(4, 0, 4, 0),
+            Background = Th.Danger, Child = K.Center(t), IsHitTestVisible = false,
+        };
     }
 
     private static FrameworkElement AccountChip(AppModel app, bool compact)
