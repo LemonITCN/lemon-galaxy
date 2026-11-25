@@ -6,6 +6,7 @@ pub mod capture;
 pub mod clipoffer;
 pub mod exec;
 pub mod files;
+pub mod held;
 pub mod fio;
 pub mod platform;
 pub mod rate;

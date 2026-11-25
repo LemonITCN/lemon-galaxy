@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import CoreMedia
+import Carbon.HIToolbox
 
 /// --selftest <输出目录> [--scale 2] [--only 名称片段]
 /// 用模拟内核把主要界面离屏渲染成 PNG：浅色 / 深色 × 中文 / 英文。
@@ -71,6 +72,7 @@ enum SelfTest {
         defer { pasteboard.releaseGlobally() }
         // 粘贴时才传的组件自检（自己换私有剪贴板，结束后换回上面这个）
         problems += LazyPasteSelfTest.run(verbose: false)
+        problems += checkModifierSync()
         checkClipboardCacheCleanup()
         RemoteVideoNSView.snapshotMode = true
         checkAudioConversion()
@@ -189,6 +191,29 @@ enum SelfTest {
     /// 远程桌面复制粘贴文件：本机复制 → 老被控端（进度条、取消、完成提示，同一次复制不重复推）、新被控端（只发清单）；
     /// 对方复制 → 清单放进本机剪贴板，模拟访达粘贴后落盘（同一批不重复放，标记不推回去）；失败显示原因；文字照旧同步；
     /// 粘贴键先同步本机刚复制的文字再发
+    /// 远端修饰键按本机实际状态算（docs/protocol.md 8.4 键盘）：左右分开；不带设备相关位的合成事件算左边；
+    /// 设备无关位说没按着时，残留的设备位不算数（漏掉松开事件时远端也不会卡着 Ctrl / Shift）
+    static func checkModifierSync() -> [String] {
+        typealias F = NSEvent.ModifierFlags
+        func f(_ independent: F, _ device: UInt) -> F { F(rawValue: independent.rawValue | device) }
+        let cases: [(String, F, Set<Int>)] = [
+            ("左 Command", f(.command, 0x08), [kVK_Command]),
+            ("右 Command", f(.command, 0x10), [kVK_RightCommand]),
+            ("左 Shift + 右 Option", f([.shift, .option], 0x02 | 0x40), [kVK_Shift, kVK_RightOption]),
+            ("两边 Control", f(.control, 0x0001 | 0x2000), [kVK_Control, kVK_RightControl]),
+            ("合成事件只有 Control", f(.control, 0), [kVK_Control]),
+            ("残留设备位不算", f([], 0x08 | 0x02), []),
+            ("什么都没按", f([], 0), []),
+        ]
+        var out: [String] = []
+        for (name, flags, want) in cases {
+            let got = RemoteVideoNSView.actualModifiers(flags)
+            let expect = Set(want.map { UInt16($0) })
+            if got != expect { out.append("修饰键同步「\(name)」得到 \(got.sorted())，应为 \(expect.sorted())") }
+        }
+        return out
+    }
+
     static func checkFileClip(_ r: RemoteDesktopModel, prefix: String, dark: Bool, window: NSWindow, host: NSHostingView<RootView>) {
         guard let session = r.peer?.session as? MockPeerSession, let home = fakeHome else {
             problems.append("复制粘贴文件：没有模拟会话")
@@ -329,6 +354,27 @@ enum SelfTest {
         r.pollClipboard()
         wait("文字同步到对方") { if case .text(let t)? = session.remoteClipboard { return t == "selftest" }; return false }
         if r.fileClip != nil || r.lastRemoteFiles != nil { problems.append("复制粘贴文件：同步文字后状态没复位") }
+
+        // 6. 本机复制了图片（截图工具放的）后鼠标回到画面：对方文字没变，不能盖掉本机图片
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        func holdsImage() -> Bool { pb.data(forType: .png) != nil && pb.string(forType: .string) == nil }
+        pb.clearContents()
+        pb.setData(png, forType: .png)
+        r.pollClipboard()
+        r.pullRemoteClipboard()
+        pump(0.2)
+        if !holdsImage() { problems.append("剪贴板：本机刚复制的图片被对方没变的文字盖掉了") }
+        // 对方又复制了新文字、本机没再复制：拉过来
+        session.remoteClipboard = .text(text: "对方新复制")
+        r.pullRemoteClipboard()
+        wait("对方新复制的文字放进本机") { pb.string(forType: .string) == "对方新复制" }
+        // 两边都复制了新东西（对方先、本机后）：以本机为准
+        session.remoteClipboard = .text(text: "对方又复制")
+        pb.clearContents()
+        pb.setData(png, forType: .png)
+        r.pullRemoteClipboard()
+        pump(0.2)
+        if !holdsImage() { problems.append("剪贴板：两边都变了时本机图片被对方文字盖掉") }
     }
 
     private static func app(_ r: RemoteDesktopModel) -> AppModel { r.app! }

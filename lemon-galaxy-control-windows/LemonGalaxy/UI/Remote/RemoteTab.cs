@@ -70,6 +70,10 @@ internal sealed partial class RemoteTab : TabModel
     private string? lastClipboard;
     /// <summary>上次处理过的剪贴板序号：同一次复制只处理一次</summary>
     private uint lastClipSeq;
+    /// <summary>上次和对方同步时（推过去或拉过来）本机剪贴板的序号：之后本机又复制了东西，鼠标回到画面时以本机为准</summary>
+    private uint clipSeqAtSync = ClipFiles.Sequence();
+    /// <summary>上次同步时对方剪贴板里的文字（推过去的或拉过来的）：对方没再复制新文字就不拉</summary>
+    private string? lastRemoteText;
     private bool skipExistingFiles;
     private string? lastFilesKey;
     /// <summary>复制粘贴文件的进度条（画面上方）；null 时不显示</summary>
@@ -95,6 +99,43 @@ internal sealed partial class RemoteTab : TabModel
     /// <summary>当前画面通道（selftest 模拟画面断了用）</summary>
     public ICoreDisplay? Channel => channel;
     private readonly HashSet<uint> pressed = new();
+    /// <summary>发过「按下」还没抬起的鼠标键（及位置）：失去焦点、应用不在前台时一并抬起</summary>
+    private readonly Dictionary<PointerButton, (int x, int y)> buttonsDown = new();
+
+    /// <summary>修饰键（WPF 键 → HID）：远端的修饰键状态按本机实际状态对齐，不只靠按下 / 抬起事件</summary>
+    private static readonly (Key key, uint hid)[] ModifierKeyMap =
+    {
+        (Key.LeftCtrl, 0xE0), (Key.LeftShift, 0xE1), (Key.LeftAlt, 0xE2), (Key.LWin, 0xE3),
+        (Key.RightCtrl, 0xE4), (Key.RightShift, 0xE5), (Key.RightAlt, 0xE6), (Key.RWin, 0xE7),
+    };
+
+    private static bool IsModifierHid(uint hid) => hid >= 0xE0 && hid <= 0xE7;
+
+    /// <summary>
+    /// 把远端的修饰键对齐本机实际状态（多的抬起、少的按下）。键盘与鼠标事件发出前都调一次：漏了某次抬起
+    /// （窗口外松开、Alt+Tab 切走后才松开等）时下一个键鼠事件就纠正，远端不会一直卡着 Ctrl / Shift / Alt，
+    /// 点什么都成了 Ctrl+点击。
+    /// </summary>
+    private void SyncModifiers()
+    {
+        foreach (var (key, hid) in ModifierKeyMap)
+        {
+            var down = Keyboard.IsKeyDown(key);
+            if (down && pressed.Add(hid)) Send(new InputEvent.Key(hid, true));
+            else if (!down && pressed.Remove(hid)) Send(new InputEvent.Key(hid, false));
+        }
+    }
+
+    /// <summary>把按着的键、修饰键与鼠标键全部抬起（失去焦点、应用切到后台：之后的抬起不会再交给我们）</summary>
+    private void ReleaseAllInput()
+    {
+        foreach (var k in pressed.ToList()) Send(new InputEvent.Key(k, false));
+        pressed.Clear();
+        foreach (var kv in buttonsDown.ToList()) Send(new InputEvent.MouseButton(kv.Key, false, kv.Value.x, kv.Value.y));
+        buttonsDown.Clear();
+    }
+
+    private void OnAppDeactivated(object? sender, EventArgs e) => ReleaseAllInput();
     /// <summary>按过输入法处理的键、还没收到它交出的文字</summary>
     private bool imeComposing;
     /// <summary>暂存的输入（粘贴前等文字同步、等输入法交出文字时，之后的输入按顺序排在这里）；null 表示直接发</summary>
@@ -878,6 +919,7 @@ internal sealed partial class RemoteTab : TabModel
                 return;
             }
             lastFilesKey = key;
+            clipSeqAtSync = seq;
             SendLocalFiles(files);
             return;
         }
@@ -885,6 +927,8 @@ internal sealed partial class RemoteTab : TabModel
         // 有序号时每次复制都同步（对方剪贴板可能已被文件换掉）；拿不到序号时按内容去重
         if (t == null || seq == 0 && t == lastClipboard) return;
         lastClipboard = t;
+        lastRemoteText = t;
+        clipSeqAtSync = seq;
         // 本机又复制了东西：还在传的文件作废，之前发过去的清单也不再算数
         if (FileClip != null) CancelFileClip();
         offerGen++;
@@ -899,7 +943,12 @@ internal sealed partial class RemoteTab : TabModel
         catch (Exception e) { Log.Info("同步剪贴板文字失败：" + e.Message); }
     }
 
-    /// <summary>拉取对方剪贴板：文字直接放进本机剪贴板，文件做成虚拟文件放进去（粘贴时才传）</summary>
+    /// <summary>
+    /// 拉取对方剪贴板：文字直接放进本机剪贴板，文件做成虚拟文件放进去（粘贴时才传）。
+    /// 只在「对方上次同步后又复制了新东西，且本机这段时间没再复制」时才放进本机：本机后来复制的东西
+    /// （截图工具放的图片等，图片不同步给对方）不能被对方的旧文字盖掉；两边都变了以本机为准
+    /// （鼠标在画面外时复制的总比进画面前在对方那边复制的晚）
+    /// </summary>
     public void PullRemoteClipboard()
     {
         // 正在重新连接时不同步（本机剪贴板的变化等连上后照常推过去）
@@ -910,18 +959,32 @@ internal sealed partial class RemoteTab : TabModel
             ClipboardData? data;
             try { data = await p.Session.ClipboardGet(); }
             catch { return; }
+            var seqNow = ClipFiles.Sequence();
+            // 拿不到序号（0）时无从判断本机变没变，按没变处理
+            var localChanged = !App.SelfTest && seqNow != 0 && seqNow != clipSeqAtSync;
             switch (data)
             {
                 case ClipboardData.Text t:
                     LastRemoteFiles = null;
                     if (App.SelfTest) return;
+                    var remoteChanged = t.TextValue != lastRemoteText;
+                    lastRemoteText = t.TextValue;
+                    clipSeqAtSync = seqNow;
+                    if (!remoteChanged || localChanged) return;
                     // 本机剪贴板里是我们放的对方文件时不是文字，不用比较
                     if (!VirtualClipboard.OwnsClipboard && t.TextValue == SysClipboard.GetText()) return;
                     lastClipboard = t.TextValue;
                     SysClipboard.SetText(t.TextValue);
-                    lastClipSeq = ClipFiles.Sequence();
+                    lastClipSeq = clipSeqAtSync = ClipFiles.Sequence();
                     break;
                 case ClipboardData.Files f:
+                    if (localChanged)
+                    {
+                        // 本机更新：这批对方文件当作已看过，不放进来
+                        LastRemoteFiles = f.Paths;
+                        clipSeqAtSync = seqNow;
+                        break;
+                    }
                     PlaceRemoteFiles(f.Paths);
                     break;
                 case ClipboardData.Image:
@@ -1053,7 +1116,7 @@ internal sealed partial class RemoteTab : TabModel
                     ShowFileClipResult(new FileClip(FileClipDirection.Pull, names) { State = FileClipState.Failed, Error = L.T("remote.files.localFailed") });
                 return;
             }
-            lastClipSeq = ClipFiles.Sequence();
+            lastClipSeq = clipSeqAtSync = ClipFiles.Sequence();
         });
     }
 
@@ -1170,23 +1233,37 @@ internal sealed partial class RemoteTab : TabModel
     {
         var h = VideoHost;
         h.MouseEnter += (_, _) => { if (!App.SelfTest) PullRemoteClipboard(); };
-        h.MouseMove += (_, e) => { if (Remote(e.GetPosition(h)) is { } r) Send(new InputEvent.MouseMove(r.x, r.y)); };
+        h.MouseMove += (_, e) =>
+        {
+            SyncModifiers();
+            if (Remote(e.GetPosition(h)) is { } r) Send(new InputEvent.MouseMove(r.x, r.y));
+        };
         h.MouseDown += (_, e) =>
         {
             h.Focus();
             Keyboard.Focus(h);
-            if (ButtonOf(e.ChangedButton) is { } b && Remote(e.GetPosition(h)) is { } r) Send(new InputEvent.MouseButton(b, true, r.x, r.y));
+            SyncModifiers();
+            if (ButtonOf(e.ChangedButton) is { } b && Remote(e.GetPosition(h)) is { } r)
+            {
+                buttonsDown[b] = (r.x, r.y);
+                Send(new InputEvent.MouseButton(b, true, r.x, r.y));
+            }
             h.CaptureMouse();
             e.Handled = true;
         };
         h.MouseUp += (_, e) =>
         {
-            if (ButtonOf(e.ChangedButton) is { } b && Remote(e.GetPosition(h)) is { } r) Send(new InputEvent.MouseButton(b, false, r.x, r.y));
+            SyncModifiers();
+            if (ButtonOf(e.ChangedButton) is { } b && Remote(e.GetPosition(h)) is { } r)
+            {
+                buttonsDown.Remove(b);
+                Send(new InputEvent.MouseButton(b, false, r.x, r.y));
+            }
             if (Mouse.LeftButton == MouseButtonState.Released && Mouse.RightButton == MouseButtonState.Released && Mouse.MiddleButton == MouseButtonState.Released) h.ReleaseMouseCapture();
             e.Handled = true;
         };
         // 滚轮一格 120 → 40 像素（与 Mac 端按行换算一致）
-        h.MouseWheel += (_, e) => { Send(new InputEvent.Wheel(0, e.Delta / 3)); e.Handled = true; };
+        h.MouseWheel += (_, e) => { SyncModifiers(); Send(new InputEvent.Wheel(0, e.Delta / 3)); e.Handled = true; };
         h.ContextMenuOpening += (_, e) => e.Handled = true;
         h.PreviewKeyDown += (_, e) =>
         {
@@ -1200,11 +1277,16 @@ internal sealed partial class RemoteTab : TabModel
                 imeWait = new TaskCompletionSource<bool>();
                 HoldInput(imeWait.Task, 80, ime: true);
             }
+            SyncModifiers();
             if (HidKeyMap.Hid(e) is { } hid)
             {
                 if (!e.IsRepeat && IsPasteKey(e)) SyncBeforePaste();
-                pressed.Add(hid);
-                Send(new InputEvent.Key(hid, true));
+                // 修饰键本身已由 SyncModifiers 按实际状态发过；普通键每次（含按住的重复）都发
+                if (!IsModifierHid(hid) || pressed.Add(hid))
+                {
+                    pressed.Add(hid);
+                    Send(new InputEvent.Key(hid, true));
+                }
             }
             // 触摸键盘、按 Unicode 打字的工具送来的是 VK_PACKET（Key.None，没有对应的 HID 键）：不拦，字符从 TextInput 按 Text 发
             else if (e.Key == Key.None)
@@ -1220,9 +1302,10 @@ internal sealed partial class RemoteTab : TabModel
             if (e.Key == Key.ImeProcessed) return;
             if (HidKeyMap.Hid(e) is { } hid)
             {
-                pressed.Remove(hid);
-                Send(new InputEvent.Key(hid, false));
+                // 只给发过「按下」的发抬起（修饰键可能已由 SyncModifiers 抬过）
+                if (pressed.Remove(hid)) Send(new InputEvent.Key(hid, false));
             }
+            SyncModifiers();
             e.Handled = true;
         };
         // 输入法提交的文字按 Text 发送。普通键在 PreviewKeyDown 里已按 HID 发过并标记已处理，系统不会再为它们产生字符，
@@ -1235,11 +1318,9 @@ internal sealed partial class RemoteTab : TabModel
             e.Handled = true;
         };
         // 失去焦点时把按住的键都抬起来，避免远端卡住修饰键
-        h.LostKeyboardFocus += (_, _) =>
-        {
-            foreach (var k in pressed.ToList()) Send(new InputEvent.Key(k, false));
-            pressed.Clear();
-        };
+        h.LostKeyboardFocus += (_, _) => ReleaseAllInput();
+        // 应用整个切到后台（Alt+Tab、按 Win 弹开始菜单）时也全部抬起
+        if (Application.Current != null) Application.Current.Deactivated += OnAppDeactivated;
     }
 
     // ---------- 全屏 ----------
@@ -1289,6 +1370,8 @@ internal sealed partial class RemoteTab : TabModel
     {
         // 关标签：先结束录像拿到保存位置，再关画面；等着的自动重连作废
         StopRecording();
+        if (Application.Current != null) Application.Current.Deactivated -= OnAppDeactivated;
+        ReleaseAllInput();
         closed = true;
         CancelReconnect();
         StopAudio();

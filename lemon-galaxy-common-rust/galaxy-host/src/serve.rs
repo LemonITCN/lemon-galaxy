@@ -340,9 +340,14 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
                     }
                 })
             };
+            // 这路画面按下还没抬起的键与鼠标键：画面结束（主控停了、断线、出错）时全部抬起，被控机上不会卡键
+            let mut held = crate::held::HeldInput::default();
             while let Ok(Some(m)) = fio::read::<_, DisplayIn>(&mut recv).await {
                 match m {
-                    DisplayIn::Input(ev) if can_control => platform.inject(req.display_id, ev),
+                    DisplayIn::Input(ev) if can_control => {
+                        held.track(&ev);
+                        platform.inject(req.display_id, ev)
+                    }
                     DisplayIn::Input(_) => {}
                     DisplayIn::RequestKeyframe => platform.request_keyframe(req.display_id),
                     DisplayIn::SetBitrate(k) => {
@@ -351,6 +356,12 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
                     }
                     DisplayIn::Stop => break,
                     DisplayIn::ClientCursor(on) => host.captures.set_client_cursor(&platform, req.display_id, sub_id, on),
+                }
+            }
+            if !held.is_empty() {
+                tracing::info!("画面结束时还按着的键与鼠标键已抬起");
+                for ev in held.release_all() {
+                    platform.inject(req.display_id, ev);
                 }
             }
             adapt.abort();
@@ -569,9 +580,15 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             }
             let n = events.len();
             tokio::task::spawn_blocking(move || {
+                // AI 一次操作里按下没抬起的键，操作完抬起（不让一次操作留下按着的键）
+                let mut held = crate::held::HeldInput::default();
                 for ev in events {
+                    held.track(&ev);
                     platform.inject(display, ev);
                     std::thread::sleep(std::time::Duration::from_millis(8));
+                }
+                for ev in held.release_all() {
+                    platform.inject(display, ev);
                 }
             })
             .await

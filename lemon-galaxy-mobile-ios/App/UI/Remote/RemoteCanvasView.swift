@@ -214,6 +214,8 @@ final class RemoteCanvasView: UIView, UIKeyInput {
     }
 
     override func touchesBegan(_ set: Set<UITouch>, with event: UIEvent?) {
+        // 点击前把远端修饰键对齐外接键盘的实际状态（远端卡着的 Ctrl 会让点击变成 Ctrl+点击）
+        if let e = event { syncModifiers(e.modifierFlags) }
         let wasEmpty = touches.isEmpty
         touches.formUnion(set)
         if wasEmpty {
@@ -479,12 +481,45 @@ final class RemoteCanvasView: UIView, UIKeyInput {
     /// 发过「按下」还没抬起的外接键盘按键（HID 用法码）
     private var heldKeys = Set<UInt32>()
 
+    /// 外接键盘的修饰键按 UIKey / UIEvent 的 modifierFlags 对齐：漏了哪次抬起，下一次按键或点击就纠正，
+    /// 远端不会一直卡着 Ctrl / Shift / Option / Command（左右分不出时按左边那个算）
+    private func syncModifiers(_ flags: UIKeyModifierFlags) {
+        let pairs: [(UIKeyModifierFlags, UInt32, UInt32)] = [(.control, 0xE0, 0xE4), (.shift, 0xE1, 0xE5), (.alternate, 0xE2, 0xE6), (.command, 0xE3, 0xE7)]
+        var events: [InputEvent] = []
+        for (flag, left, right) in pairs {
+            if !flags.contains(flag) {
+                for u in [left, right] where heldKeys.remove(u) != nil { events.append(.key(hidUsage: u, down: false)) }
+            } else if !heldKeys.contains(left) && !heldKeys.contains(right) {
+                heldKeys.insert(left)
+                events.append(.key(hidUsage: left, down: true))
+            }
+        }
+        if !events.isEmpty { emit(events) }
+    }
+
+    /// 修饰键用法码 → 对应的 modifierFlags
+    private static func modifierFlag(_ usage: UInt32) -> UIKeyModifierFlags? {
+        switch usage {
+        case 0xE0, 0xE4: return .control
+        case 0xE1, 0xE5: return .shift
+        case 0xE2, 0xE6: return .alternate
+        case 0xE3, 0xE7: return .command
+        default: return nil
+        }
+    }
+
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         var handled = false
         for p in presses {
             guard let key = p.key else { continue }
             let usage = UInt32(key.keyCode.rawValue)
             let isModifier = (0xE0...0xE7).contains(usage)
+            // 普通键：先对齐修饰键再发（不然漏掉的 Command 按下会让 Cmd+A 变成 A）
+            if !isModifier { syncModifiers(key.modifierFlags) }
+            // 修饰键本身：先记下再对齐，且对齐时一定算它按着（事件里的标志位可能还没包含它）
+            defer {
+                if isModifier, let f = Self.modifierFlag(usage) { syncModifiers(key.modifierFlags.union(f)) }
+            }
             if !isModifier, key.modifierFlags.contains(.command) {
                 // 按着 Command 的组合键：系统可能不再送这个键的「抬起」，按下即抬起，免得远端一直当它按着
                 // （GNOME Wayland 上卡住的键会在每个新输入框里自动重复，比如一串 a）
@@ -505,6 +540,10 @@ final class RemoteCanvasView: UIView, UIKeyInput {
             let usage = UInt32(key.keyCode.rawValue)
             // 按下时已经抬起过的组合键不再发
             if heldKeys.remove(usage) != nil { emit([.key(hidUsage: usage, down: false)]) }
+            // 松开的修饰键一定算抬起（事件里的标志位可能还包含它，照原样对齐会把它又按下去）
+            var flags = key.modifierFlags
+            if let f = Self.modifierFlag(usage) { flags.remove(f) }
+            syncModifiers(flags)
             handled = true
         }
         if !handled { super.pressesEnded(presses, with: event) }

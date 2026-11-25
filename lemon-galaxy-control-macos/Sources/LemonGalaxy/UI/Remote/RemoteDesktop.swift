@@ -71,6 +71,10 @@ final class RemoteDesktopModel: TabModel {
     private var statsTimer: Timer?
     private var clipboardTimer: Timer?
     private var lastPasteboardChange = ClipboardFiles.pasteboard.changeCount
+    /// 上次和对方同步时（推过去或拉过来）本机剪贴板的 changeCount：之后本机又复制了东西，鼠标回到画面时以本机为准
+    private var pasteboardChangeAtSync = ClipboardFiles.pasteboard.changeCount
+    /// 上次同步时对方剪贴板里的文字（推过去的或拉过来的）：对方没再复制新文字就不拉
+    private(set) var lastRemoteText: String?
     /// 复制粘贴文件的进度条（画面上方）；nil 时不显示
     @Published var fileClip: RemoteFileClip?
     private(set) var clipTransfer: ClipboardTransfer?
@@ -561,28 +565,44 @@ final class RemoteDesktopModel: TabModel {
         // 访达里复制文件时剪贴板同时带文件名文字，先按文件处理
         let urls = ClipboardFiles.fileURLs(on: pb)
         if !urls.isEmpty {
+            pasteboardChangeAtSync = pb.changeCount
             return pushFiles(urls.map(\.path))
         }
         guard let text = pb.string(forType: .string) else { return nil }
         lastRemoteFiles = nil
+        lastRemoteText = text
+        pasteboardChangeAtSync = pb.changeCount
         let session = peer.session
         return Task { try? await session.clipboardSet(data: .text(text: text)) }
     }
 
+    /// 鼠标回到画面时拉取对方剪贴板。只在「对方上次同步后又复制了新东西，且本机这段时间没再复制」时才放进本机：
+    /// 本机后来复制的东西（截图工具放的图片等，图片不同步给对方）不能被对方的旧文字盖掉；两边都变了以本机为准
+    /// （鼠标在画面外时复制的总比进画面前在对方那边复制的晚）
     func pullRemoteClipboard() {
         guard clipboardSync, let peer else { return }
         Task {
             guard let data = try? await peer.session.clipboardGet() else { return }
+            let pb = ClipboardFiles.pasteboard
+            let localChanged = pb.changeCount != pasteboardChangeAtSync
             switch data {
             case .text(let text):
                 lastRemoteFiles = nil
-                let pb = ClipboardFiles.pasteboard
-                if pb.string(forType: .string) != text {
+                let remoteChanged = text != lastRemoteText
+                lastRemoteText = text
+                if remoteChanged, !localChanged, pb.string(forType: .string) != text {
                     pb.clearContents()
                     pb.setString(text, forType: .string)
                     lastPasteboardChange = pb.changeCount
                 }
+                pasteboardChangeAtSync = pb.changeCount
             case .files(let paths):
+                if localChanged {
+                    // 本机更新：这批对方文件当作已看过，不放进来
+                    lastRemoteFiles = paths
+                    pasteboardChangeAtSync = pb.changeCount
+                    return
+                }
                 pullFiles(paths)
             case .image:
                 lastRemoteFiles = nil
@@ -655,6 +675,7 @@ final class RemoteDesktopModel: TabModel {
                 }
                 remoteOfferId = info.id
                 lastPasteboardChange = pb.changeCount
+                pasteboardChangeAtSync = pb.changeCount
             } catch {
                 guard gen == clipGen else { return }
                 // 下次鼠标进来再试
@@ -787,6 +808,47 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
     private var pressedModifiers: Set<UInt16> = []
     /// 已按物理键发出「按下」的键（Mac 键码）：抬起只发给这些键，输入法吃掉的键不发不成对的抬起
     private var keysDown: Set<UInt16> = []
+    /// 发过「按下」还没抬起的鼠标键（及按下时的位置）：失去焦点时一并抬起
+    private var buttonsDown: [PointerButton: (Int32, Int32)] = [:]
+
+    /// 修饰键在 NSEvent 设备相关标志位里的位置（左右分开）：远端的修饰键状态照这个算，不靠按下 / 松开次数翻转
+    private static let modifierBits: [(code: Int, mask: UInt)] = [
+        (kVK_Control, 0x0001), (kVK_Shift, 0x0002), (kVK_RightShift, 0x0004), (kVK_Command, 0x0008),
+        (kVK_RightCommand, 0x0010), (kVK_Option, 0x0020), (kVK_RightOption, 0x0040), (kVK_RightControl, 0x2000),
+    ]
+
+    /// 本机此刻实际按着的修饰键（Mac 键码）
+    static func actualModifiers(_ flags: NSEvent.ModifierFlags) -> Set<UInt16> {
+        var s = Set<UInt16>()
+        for (code, mask) in modifierBits where flags.rawValue & mask != 0 { s.insert(UInt16(code)) }
+        // 有的键盘、合成事件不带设备相关位：设备无关位说按着而左右都没有时算左边那个；说没按着时左右都去掉
+        let pairs: [(NSEvent.ModifierFlags, Int, Int)] = [(.control, kVK_Control, kVK_RightControl), (.shift, kVK_Shift, kVK_RightShift),
+                                                          (.option, kVK_Option, kVK_RightOption), (.command, kVK_Command, kVK_RightCommand)]
+        for (flag, left, right) in pairs {
+            let l = UInt16(left), r = UInt16(right)
+            if !flags.contains(flag) {
+                s.remove(l)
+                s.remove(r)
+            } else if !s.contains(l) && !s.contains(r) {
+                s.insert(l)
+            }
+        }
+        return s
+    }
+
+    /// 把远端的修饰键对齐本机实际状态（多的抬起、少的按下）。键盘与鼠标事件发出前都调一次：漏了某次 flagsChanged
+    /// （窗口不在前台时按下、点进窗口后才松开等）也能马上纠正，远端不会一直卡着 Ctrl / Shift / Option。
+    private func syncModifiers(_ flags: NSEvent.ModifierFlags) {
+        let want = Self.actualModifiers(flags)
+        guard want != pressedModifiers else { return }
+        for c in pressedModifiers.subtracting(want) {
+            if let h = mapped(c) { model?.send(.key(hidUsage: h, down: false)) }
+        }
+        for c in want.subtracting(pressedModifiers) {
+            if let h = mapped(c) { model?.send(.key(hidUsage: h, down: true)) }
+        }
+        pressedModifiers = want
+    }
     /// 正交给输入法处理的按键；输入法没要（退格、回车、方向键……）时在 doCommand 里按物理键发出
     private var imeEvent: NSEvent?
     private var imeEventSent = false
@@ -870,14 +932,20 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
     }
 
     override func mouseEntered(with event: NSEvent) { model?.pullRemoteClipboard() }
-    override func mouseMoved(with event: NSEvent) { if let (x, y) = remotePoint(event) { model?.send(.mouseMove(x: x, y: y)) } }
+    override func mouseMoved(with event: NSEvent) {
+        syncModifiers(event.modifierFlags)
+        if let (x, y) = remotePoint(event) { model?.send(.mouseMove(x: x, y: y)) }
+    }
     override func mouseDragged(with event: NSEvent) { mouseMoved(with: event) }
     override func rightMouseDragged(with event: NSEvent) { mouseMoved(with: event) }
     override func otherMouseDragged(with event: NSEvent) { mouseMoved(with: event) }
 
     private func button(_ event: NSEvent, _ b: PointerButton, down: Bool) {
         if down { window?.makeFirstResponder(self) }
+        // 先把远端的修饰键对齐本机实际状态，不然远端卡着的 Ctrl / Shift 会让这一下变成 Ctrl+点击
+        syncModifiers(event.modifierFlags)
         guard let (x, y) = remotePoint(event) else { return }
+        if down { buttonsDown[b] = (x, y) } else { buttonsDown[b] = nil }
         model?.send(.mouseButton(button: b, down: down, x: x, y: y))
     }
 
@@ -893,6 +961,7 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
         // 像素滚动量；触控板的精确滚动直接用，滚轮按行换算
         let k: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 40
         let dx = Int32(event.scrollingDeltaX * k), dy = Int32(event.scrollingDeltaY * k)
+        syncModifiers(event.modifierFlags)
         if dx != 0 || dy != 0 { model?.send(.wheel(dx: dx, dy: dy)) }
     }
 
@@ -941,6 +1010,10 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
             if let hid = mapped(code) { model?.send(.key(hidUsage: hid, down: false)) }
         }
         pressedModifiers.removeAll()
+        for (b, p) in buttonsDown {
+            model?.send(.mouseButton(button: b, down: false, x: p.0, y: p.1))
+        }
+        buttonsDown.removeAll()
     }
 
     override func resignFirstResponder() -> Bool {
@@ -967,6 +1040,7 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
     }
 
     override func keyDown(with event: NSEvent) {
+        syncModifiers(event.modifierFlags)
         if usingInputMethod, event.modifierFlags.intersection([.command, .control]).isEmpty {
             // 输入法在组字时自己处理；没在组字时退格、回车、方向键、Tab、Esc 等会经 doCommand(by:) 交回来，
             // 那时按物理键发给远端（以前 doCommand 是空的，开着中文输入法这些键全被丢掉）
@@ -984,6 +1058,7 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
     override func keyUp(with event: NSEvent) {
         // 只给发过「按下」的键发抬起：输入法吃掉的键（组字、提交成文字的）两头都不发
         if keysDown.contains(event.keyCode) { sendKey(event, down: false) }
+        syncModifiers(event.modifierFlags)
     }
 
     /// 输入法交回来的命令：按当前这个物理键发出去，抬起在 keyUp 里发
@@ -996,12 +1071,17 @@ final class RemoteVideoNSView: NSView, NSTextInputClient {
 
     override func flagsChanged(with event: NSEvent) {
         let code = event.keyCode
-        guard HIDKeyMap.modifierKeyCodes.contains(Int(code)), let hid = mapped(code) else { return }
-        let down = !pressedModifiers.contains(code)
-        if down { pressedModifiers.insert(code) } else { pressedModifiers.remove(code) }
-        model?.send(.key(hidUsage: hid, down: down))
+        if code == UInt16(kVK_CapsLock) {
+            // 大写锁定是开关：macOS 每按一下只来一次 flagsChanged，按「按下 / 抬起」翻转会让远端一直按着它。按一下就发一次按下即抬起
+            if let hid = mapped(code) {
+                model?.send(.key(hidUsage: hid, down: true))
+                model?.send(.key(hidUsage: hid, down: false))
+            }
+            return
+        }
+        syncModifiers(event.modifierFlags)
         // 松开 Command 时还记着按下的键（理论上没有，兜底）：一并抬起
-        if !down, code == UInt16(kVK_Command) || code == UInt16(kVK_RightCommand), !event.modifierFlags.contains(.command), !keysDown.isEmpty {
+        if !event.modifierFlags.contains(.command), code == UInt16(kVK_Command) || code == UInt16(kVK_RightCommand), !keysDown.isEmpty {
             for c in keysDown { if let h = mapped(c) { model?.send(.key(hidUsage: h, down: false)) } }
             keysDown.removeAll()
         }
