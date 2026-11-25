@@ -80,16 +80,29 @@ internal sealed partial class RemoteTab : TabModel
     private ClipTransferListener? clipListener;
     /// <summary>每次开始或作废一次文件传输加一：迟到的回调按它丢弃</summary>
     private int clipGen;
-    /// <summary>上次同步过的对方剪贴板文件列表（拉取过的，或推送后对方剪贴板里的暂存路径）：同一列表不重复下载</summary>
+    /// <summary>上次处理过的对方剪贴板文件列表（放进过本机剪贴板的，或老被控端推送后对方剪贴板里的暂存路径）：同一列表不重复放</summary>
     public string[]? LastRemoteFiles { get; private set; }
-    /// <summary>最近一次放进本机剪贴板的文件（selftest 不写系统剪贴板，用它核对）</summary>
-    public string[]? LocalClipboardFiles { get; private set; }
+    /// <summary>放进本机剪贴板的对方文件（虚拟文件，粘贴时才读）；selftest 不写系统剪贴板，用它核对</summary>
+    public RemoteFileData? PasteData { get; private set; }
+    /// <summary>每次放对方文件或作废时加一：迟到的展开结果按它丢弃</summary>
+    private int pasteGen;
+    /// <summary>每次发清单或本机又复制了文字时加一：迟到的失败提示按它丢弃</summary>
+    private int offerGen;
+    /// <summary>最近一次把本机文字设到对方剪贴板（粘贴键等它完成）</summary>
+    private Task? textSync;
     /// <summary>selftest 核对用</summary>
     public ICoreClipboardTransfer? ClipTransfer => clipTransfer;
     /// <summary>当前画面通道（selftest 模拟画面断了用）</summary>
     public ICoreDisplay? Channel => channel;
     private readonly HashSet<uint> pressed = new();
+    /// <summary>按过输入法处理的键、还没收到它交出的文字</summary>
     private bool imeComposing;
+    /// <summary>暂存的输入（粘贴前等文字同步、等输入法交出文字时，之后的输入按顺序排在这里）；null 表示直接发</summary>
+    private List<InputEvent>? heldInput;
+    private int holds;
+    /// <summary>输入法交出的文字插到暂存队列的这个位置；-1 表示没在等输入法</summary>
+    private int imeInsertAt = -1;
+    private TaskCompletionSource<bool>? imeWait;
     private ICoreAudio? audio;
     /// <summary>每次开始或停止声音加一：开到一半被关掉、断线或关闭标签时，迟到的结果直接停掉丢弃</summary>
     private int audioGen;
@@ -182,6 +195,8 @@ internal sealed partial class RemoteTab : TabModel
         if (p.ClosedReason == null || !ReferenceEquals(Peer, p)) return;
         StopAudio();
         StopRecording();
+        // 放进本机剪贴板的对方文件随会话失效，重连后鼠标移回画面时重新放
+        CancelPaste();
         ResetVirtual();
         Privacy = false;
         ConnectionLost(p.ClosedReason.Length == 0 ? L.T("path.closed") : p.ClosedReason);
@@ -749,15 +764,75 @@ internal sealed partial class RemoteTab : TabModel
         return path;
     }
 
+    /// <summary>发输入；正在暂存时（粘贴前等文字同步、等输入法交出文字）排到暂存队列里，保持先后顺序</summary>
     private void Send(InputEvent e)
+    {
+        if (heldInput != null)
+        {
+            heldInput.Add(e);
+            return;
+        }
+        SendNow(e);
+    }
+
+    private void SendNow(InputEvent e)
     {
         try { channel?.SendInput(e); }
         catch (Exception ex) { Log.Error("发送输入失败：" + ex.Message); }
     }
 
-    // ---------- 剪贴板同步：本机变化推给远端；鼠标进入画面时拉取远端。文件走内核的复制粘贴文件（protocol.md 8.4.1） ----------
+    /// <summary>暂存之后的输入，直到 until 完成或过了 ms 毫秒，再按原顺序发出（不阻塞界面线程；几次暂存重叠时等最后一次结束）。
+    /// ime：等输入法交出文字，交出的文字插到暂存开始的位置（排在结束组字的那个键前面）</summary>
+    private async void HoldInput(Task until, int ms, bool ime = false)
+    {
+        heldInput ??= new List<InputEvent>();
+        holds++;
+        if (ime) imeInsertAt = heldInput.Count;
+        await Task.WhenAny(until, Task.Delay(ms));
+        if (ime) imeInsertAt = -1;
+        if (--holds > 0 || heldInput == null) return;
+        var list = heldInput;
+        heldInput = null;
+        foreach (var e in list) SendNow(e);
+    }
 
-    /// <summary>工具栏开关。关掉时正在传的文件作废；重新打开时对方剪贴板里的文件可以再拉一次</summary>
+    /// <summary>粘贴键：Ctrl+V、Win+V（对方是 Mac 时即 Command+V）、Shift+Insert</summary>
+    private static bool IsPasteKey(KeyEventArgs e)
+    {
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        var m = Keyboard.Modifiers;
+        return key == Key.V && (m & (ModifierKeys.Control | ModifierKeys.Windows)) != 0 || key == Key.Insert && (m & ModifierKeys.Shift) != 0;
+    }
+
+    /// <summary>
+    /// 远程画面里按了粘贴键：本机刚复制、每秒一次的轮询还没同步过去的文字先立刻同步，这个键和之后的输入排在同步完成后
+    /// （最多等 300 毫秒）再发，免得粘出对方剪贴板里的旧内容。文件走清单，不在这里等
+    /// </summary>
+    private void SyncBeforePaste()
+    {
+        PollClipboard();
+        if (textSync is { IsCompleted: false } t) HoldInput(t, 300);
+    }
+
+    /// <summary>输入法交出的文字按 Text 发；只有控制字符的（回车、退格等，按键已按 HID 发过）不发</summary>
+    private void SendImeText(string text)
+    {
+        var clean = new string(text.Where(c => c >= 0x20 && c != 0x7F).ToArray());
+        if (clean.Length == 0) return;
+        var e = new InputEvent.Text(clean);
+        if (heldInput != null && imeInsertAt >= 0 && imeInsertAt <= heldInput.Count)
+        {
+            heldInput.Insert(imeInsertAt++, e);
+            imeWait?.TrySetResult(true);
+            return;
+        }
+        Send(e);
+    }
+
+    // ---------- 剪贴板同步（protocol.md 8.4.1）：本机变化推给远端，鼠标进入画面时拉取远端。文字即时同步；
+    // 文件复制时只交换清单，在哪边粘贴才传、进度显示在那边（老被控端没有 clipboard_offer 时本机复制的文件仍整批上传） ----------
+
+    /// <summary>工具栏开关。关掉时正在传的文件作废；重新打开时对方剪贴板里的文件可以再放一次</summary>
     public void SetClipboardSync(bool on)
     {
         if (ClipboardSync == on) return;
@@ -777,15 +852,21 @@ internal sealed partial class RemoteTab : TabModel
         }
     }
 
-    /// <summary>本机剪贴板变了（按剪贴板序号判断，同一次复制只处理一次）：文件推给对方，文字直接设过去</summary>
+    /// <summary>被控端支持「复制时只发清单、粘贴时才传」（新版本都有）</summary>
+    public bool ClipOfferSupported => Peer?.Info.Capabilities.Contains("clipboard_offer") == true;
+
+    /// <summary>本机剪贴板变了（按剪贴板序号判断，同一次复制只处理一次）：文件交给 SendLocalFiles，文字直接设过去</summary>
     private void PollClipboard()
     {
+        ReleaseStalePaste();
         if (!ClipboardSync || Peer == null || Phase != RemotePhase.Streaming || FullscreenWindow == null && App.ActiveTabId != Id) return;
         var seq = ClipFiles.Sequence();
         if (seq != 0 && seq == lastClipSeq) return;
         lastClipSeq = seq;
         var skip = skipExistingFiles;
         skipExistingFiles = false;
+        // 剪贴板里是我们放进来的对方文件：不当成本机复制，不传回去（也不去问它的格式，免得等正在进行的粘贴）
+        if (VirtualClipboard.OwnsClipboard) return;
         var files = ClipFiles.GetFiles();
         if (files != null)
         {
@@ -797,21 +878,28 @@ internal sealed partial class RemoteTab : TabModel
                 return;
             }
             lastFilesKey = key;
-            PushFiles(files);
+            SendLocalFiles(files);
             return;
         }
         var t = SysClipboard.GetText();
         // 有序号时每次复制都同步（对方剪贴板可能已被文件换掉）；拿不到序号时按内容去重
         if (t == null || seq == 0 && t == lastClipboard) return;
         lastClipboard = t;
-        // 本机又复制了东西：还在传的文件作废
+        // 本机又复制了东西：还在传的文件作废，之前发过去的清单也不再算数
         if (FileClip != null) CancelFileClip();
+        offerGen++;
         LastRemoteFiles = null;
-        var p = Peer;
-        Ui.Run(async () => { try { await p.Session.ClipboardSet(new ClipboardData.Text(t)); } catch { } });
+        textSync = SetRemoteText(Peer, t);
     }
 
-    /// <summary>拉取对方剪贴板：文字直接放进本机剪贴板，文件下载后放进去</summary>
+    /// <summary>把文字设成对方剪贴板（失败只记日志）；粘贴键据此等同步完成</summary>
+    private static async Task SetRemoteText(PeerConnection p, string text)
+    {
+        try { await p.Session.ClipboardSet(new ClipboardData.Text(text)); }
+        catch (Exception e) { Log.Info("同步剪贴板文字失败：" + e.Message); }
+    }
+
+    /// <summary>拉取对方剪贴板：文字直接放进本机剪贴板，文件做成虚拟文件放进去（粘贴时才传）</summary>
     public void PullRemoteClipboard()
     {
         // 正在重新连接时不同步（本机剪贴板的变化等连上后照常推过去）
@@ -826,13 +914,15 @@ internal sealed partial class RemoteTab : TabModel
             {
                 case ClipboardData.Text t:
                     LastRemoteFiles = null;
-                    if (App.SelfTest || t.TextValue == SysClipboard.GetText()) return;
+                    if (App.SelfTest) return;
+                    // 本机剪贴板里是我们放的对方文件时不是文字，不用比较
+                    if (!VirtualClipboard.OwnsClipboard && t.TextValue == SysClipboard.GetText()) return;
                     lastClipboard = t.TextValue;
                     SysClipboard.SetText(t.TextValue);
                     lastClipSeq = ClipFiles.Sequence();
                     break;
                 case ClipboardData.Files f:
-                    PullFiles(f.Paths);
+                    PlaceRemoteFiles(f.Paths);
                     break;
                 case ClipboardData.Image:
                     LastRemoteFiles = null;
@@ -841,7 +931,40 @@ internal sealed partial class RemoteTab : TabModel
         });
     }
 
-    /// <summary>本机文件 / 文件夹 → 对方暂存区，完成后对方剪贴板就是它们</summary>
+    /// <summary>本机复制了文件：被控端支持时只发清单（对方粘贴时才传，进度在对方那边，这边不显示进度条）；老被控端整批上传</summary>
+    public void SendLocalFiles(string[] paths)
+    {
+        if (ClipOfferSupported) OfferFiles(paths);
+        else PushFiles(paths);
+    }
+
+    /// <summary>本机文件 / 文件夹的清单 → 对方剪贴板。只在失败时提示</summary>
+    private void OfferFiles(string[] paths)
+    {
+        if (Peer == null || paths.Length == 0) return;
+        CancelFileClip();
+        // 对方剪贴板马上换成这份清单（ClipboardGet 不会返回它）：对方之后再复制的文件照常放进本机
+        LastRemoteFiles = null;
+        var names = paths.Select(f => IOPath.GetFileName(f.TrimEnd('\\', '/'))).ToArray();
+        if (!FileClipSupported)
+        {
+            ShowFileClipResult(new FileClip(FileClipDirection.Push, names) { State = FileClipState.Failed, Error = L.T("remote.files.noPermission") });
+            return;
+        }
+        var p = Peer;
+        var gen = ++offerGen;
+        Ui.Run(async () =>
+        {
+            try { await p.Session.ClipboardOfferFiles(paths); }
+            catch (Exception e)
+            {
+                if (gen != offerGen || closed || !ReferenceEquals(Peer, p)) return;
+                ShowFileClipResult(new FileClip(FileClipDirection.Push, names) { State = FileClipState.Failed, Error = Fmt.Error(e) });
+            }
+        });
+    }
+
+    /// <summary>老被控端：本机文件 / 文件夹整批传到对方暂存区，完成后对方剪贴板就是它们</summary>
     public void PushFiles(string[] paths)
     {
         if (Peer == null || paths.Length == 0) return;
@@ -865,16 +988,15 @@ internal sealed partial class RemoteTab : TabModel
         ClipChanged.Notify();
     }
 
-    /// <summary>对方剪贴板里的文件 → 本机缓存目录，完成后放进本机剪贴板。同一列表只下载一次</summary>
-    public void PullFiles(string[] remotePaths)
+    /// <summary>
+    /// 对方复制了文件：展开成清单（不下载），做成虚拟文件放进本机剪贴板。在资源管理器里 Ctrl+V 或右键粘贴时才传，
+    /// 进度用资源管理器自己的复制窗口。同一批只放一次；展开期间本机又复制了别的就不放
+    /// </summary>
+    public void PlaceRemoteFiles(string[] remotePaths)
     {
         if (Peer == null || remotePaths.Length == 0 || ClipFiles.SameFiles(remotePaths, LastRemoteFiles)) return;
-        if (FileClip is { State: FileClipState.Running } running)
-        {
-            // 正在把本机文件推给对方：对方剪贴板马上会被换掉，这次不拉
-            if (running.Direction == FileClipDirection.Push) return;
-            CancelFileClip();
-        }
+        // 老被控端正在接收本机推过去的文件：对方剪贴板马上会被换掉，这次不放
+        if (FileClip is { State: FileClipState.Running, Direction: FileClipDirection.Push }) return;
         LastRemoteFiles = remotePaths;
         var names = remotePaths.Select(ClipFiles.BaseName).ToArray();
         if (!FileClipSupported)
@@ -882,18 +1004,77 @@ internal sealed partial class RemoteTab : TabModel
             ShowFileClipResult(new FileClip(FileClipDirection.Pull, names) { State = FileClipState.Failed, Error = L.T("remote.files.noPermission") });
             return;
         }
-        CancelFileClip();
-        var listener = MakeClipListener(clipGen);
-        FileClip = new FileClip(FileClipDirection.Pull, names);
-        clipListener = listener;
-        try { clipTransfer = Peer.Session.ClipboardPullFiles(remotePaths, ClipFiles.NewPullDir(), listener); }
-        catch (Exception e)
+        var p = Peer;
+        var gen = ++pasteGen;
+        var seq = ClipFiles.Sequence();
+        Ui.Run(async () =>
         {
-            clipListener = null;
-            ShowFileClipResult(new FileClip(FileClipDirection.Pull, names) { State = FileClipState.Failed, Error = Fmt.Error(e) });
-            return;
-        }
-        ClipChanged.Notify();
+            ICoreRemoteClipOffer offer;
+            try { offer = await p.Session.ClipboardRemoteOffer(remotePaths); }
+            catch (Exception e)
+            {
+                if (gen == pasteGen && !closed) ShowFileClipResult(new FileClip(FileClipDirection.Pull, names) { State = FileClipState.Failed, Error = Fmt.Error(e) });
+                return;
+            }
+            if (gen != pasteGen || closed || !ReferenceEquals(Peer, p))
+            {
+                offer.Dispose();
+                return;
+            }
+            // 展开期间本机剪贴板变了（又复制了别的）：不盖掉；下次鼠标移回画面时再看对方剪贴板
+            if (!App.SelfTest && ClipFiles.Sequence() != seq)
+            {
+                offer.Dispose();
+                LastRemoteFiles = null;
+                return;
+            }
+            RemoteFileData data;
+            try { data = new RemoteFileData(offer); }
+            catch (Exception e)
+            {
+                offer.Dispose();
+                Log.Error("生成剪贴板文件描述失败：" + e);
+                ShowFileClipResult(new FileClip(FileClipDirection.Pull, names) { State = FileClipState.Failed, Error = L.T("remote.files.localFailed") });
+                return;
+            }
+            if (data.Count == 0)
+            {
+                data.Cancel();
+                return;
+            }
+            PasteData?.Detach();
+            PasteData = data;
+            if (App.SelfTest) return;
+            if (!await VirtualClipboard.Set(data))
+            {
+                if (ReferenceEquals(PasteData, data)) PasteData = null;
+                data.Cancel();
+                if (gen == pasteGen && !closed)
+                    ShowFileClipResult(new FileClip(FileClipDirection.Pull, names) { State = FileClipState.Failed, Error = L.T("remote.files.localFailed") });
+                return;
+            }
+            lastClipSeq = ClipFiles.Sequence();
+        });
+    }
+
+    /// <summary>本机剪贴板已被换掉：之前放的对方文件不再归这个标签管（正在粘贴的照常读完，闲下来后作废）</summary>
+    private void ReleaseStalePaste()
+    {
+        if (PasteData is not { Placed: true } d || VirtualClipboard.Holds(d)) return;
+        PasteData = null;
+        d.Detach();
+    }
+
+    /// <summary>会话断了或关标签：放进本机剪贴板的对方文件作废（还在剪贴板上就清掉），之后重新放</summary>
+    private void CancelPaste()
+    {
+        pasteGen++;
+        LastRemoteFiles = null;
+        var d = PasteData;
+        PasteData = null;
+        if (d == null) return;
+        VirtualClipboard.Clear(d);
+        d.Cancel();
     }
 
     /// <summary>取消正在传的文件并收起进度条（取消时内核报的「已取消」随之丢弃）</summary>
@@ -939,36 +1120,9 @@ internal sealed partial class RemoteTab : TabModel
             ShowFileClipResult(c);
             return;
         }
-        string[] paths;
-        try { paths = transfer?.Paths() ?? Array.Empty<string>(); }
-        catch { paths = Array.Empty<string>(); }
-        if (c.Direction == FileClipDirection.Push)
-        {
-            // 对方剪贴板现在是暂存区里的这些文件：之后拉取看到同一列表不再下载回来
-            LastRemoteFiles = paths;
-        }
-        else
-        {
-            // 下载期间本机又复制了别的：不盖掉
-            if (paths.Length == 0 || !App.SelfTest && lastClipSeq != 0 && ClipFiles.Sequence() != lastClipSeq)
-            {
-                FileClip = null;
-                ClipChanged.Notify();
-                return;
-            }
-            LocalClipboardFiles = paths;
-            if (!App.SelfTest)
-            {
-                if (!ClipFiles.SetFiles(paths))
-                {
-                    c.State = FileClipState.Failed;
-                    c.Error = L.T("remote.files.localFailed");
-                    ShowFileClipResult(c);
-                    return;
-                }
-                lastClipSeq = ClipFiles.Sequence();
-            }
-        }
+        // 对方剪贴板现在是暂存区里的这些文件：之后拉取看到同一列表不再放回本机
+        try { LastRemoteFiles = transfer?.Paths() ?? Array.Empty<string>(); }
+        catch { LastRemoteFiles = Array.Empty<string>(); }
         c.State = FileClipState.Done;
         if (c.Total > 0) c.Done = c.Total;
         ShowFileClipResult(c);
@@ -1036,11 +1190,27 @@ internal sealed partial class RemoteTab : TabModel
         h.ContextMenuOpening += (_, e) => e.Handled = true;
         h.PreviewKeyDown += (_, e) =>
         {
+            // 输入法要处理的键交给输入法（不发 HID），组好的文字从 TextInput 来
             if (e.Key == Key.ImeProcessed) { imeComposing = true; e.Handled = false; return; }
+            // 正在组字时来了输入法不处理的键（如韩文输入时按空格、标点结束组字）：输入法随后才交出文字，
+            // 这个键和之后的输入先暂存，文字到了（最多等 80 毫秒）插到它前面再一起发
+            if (imeComposing)
+            {
+                imeComposing = false;
+                imeWait = new TaskCompletionSource<bool>();
+                HoldInput(imeWait.Task, 80, ime: true);
+            }
             if (HidKeyMap.Hid(e) is { } hid)
             {
+                if (!e.IsRepeat && IsPasteKey(e)) SyncBeforePaste();
                 pressed.Add(hid);
                 Send(new InputEvent.Key(hid, true));
+            }
+            // 触摸键盘、按 Unicode 打字的工具送来的是 VK_PACKET（Key.None，没有对应的 HID 键）：不拦，字符从 TextInput 按 Text 发
+            else if (e.Key == Key.None)
+            {
+                e.Handled = false;
+                return;
             }
             // 不让 Tab、方向键、Alt 等触发本地的焦点切换与菜单
             e.Handled = true;
@@ -1055,12 +1225,13 @@ internal sealed partial class RemoteTab : TabModel
             }
             e.Handled = true;
         };
-        // 输入法提交的文字按 Text 发送（物理键已按 HID 发过，不重复）
+        // 输入法提交的文字按 Text 发送。普通键在 PreviewKeyDown 里已按 HID 发过并标记已处理，系统不会再为它们产生字符，
+        // 所以这里来的都是输入法给的：中文、日文一次提交可能拆成几次 TextInput（逐字），韩文每组完一个音节交一次，全都要发
         h.TextInput += (_, e) =>
         {
-            if (!imeComposing || string.IsNullOrEmpty(e.Text)) return;
+            if (string.IsNullOrEmpty(e.Text)) return;
             imeComposing = false;
-            Send(new InputEvent.Text(e.Text));
+            SendImeText(e.Text);
             e.Handled = true;
         };
         // 失去焦点时把按住的键都抬起来，避免远端卡住修饰键
@@ -1126,6 +1297,7 @@ internal sealed partial class RemoteTab : TabModel
         stats?.Stop();
         clipTimer?.Stop();
         CancelFileClip();
+        CancelPaste();
         VirtualUi?.Close();
         // 同一会话可能还被终端、文件标签用着：删掉本标签加的虚拟屏（会话随后断开的话被控端也会删）
         var vp = Peer;

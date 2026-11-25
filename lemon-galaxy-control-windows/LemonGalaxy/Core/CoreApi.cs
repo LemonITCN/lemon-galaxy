@@ -100,18 +100,42 @@ internal interface ICorePeer
     Task<DisplayInfo> AddVirtualDisplay(uint width, uint height, uint refresh);
     /// <summary>删掉本会话加的虚拟屏（别的会话加的、被控端自动加的无头兜底屏都删不了）</summary>
     Task RemoveVirtualDisplay(uint displayId);
-    /// <summary>复制粘贴文件（本机 → 远端）：本机文件 / 文件夹传到被控端暂存区，再把被控端剪贴板设成它们。超过 4 GB 或 1 万个文件时报错；需要剪贴板与文件权限</summary>
+    /// <summary>复制粘贴文件，本机复制 → 远端粘贴（protocol.md 8.4.1）：只把本机文件 / 文件夹的清单放到被控端剪贴板，
+    /// 对方粘贴时才经反向流来读（内核自己应答）。能力列表要有 "clipboard_offer"；需要剪贴板与文件权限</summary>
+    Task<ClipOfferInfo> ClipboardOfferFiles(string[] localPaths);
+    /// <summary>复制粘贴文件，远端复制 → 本机粘贴：把远端剪贴板里的文件（ClipboardGet 的 Files）展开成清单，不下载内容；
+    /// 本机粘贴时按项 Open 读。老被控端也行；需要文件权限</summary>
+    Task<ICoreRemoteClipOffer> ClipboardRemoteOffer(string[] remotePaths);
+    /// <summary>复制粘贴文件（本机 → 没有 "clipboard_offer" 的老被控端）：本机文件 / 文件夹整批传到被控端暂存区，再把被控端剪贴板设成它们。
+    /// 超过 4 GB 或 1 万个文件时报错；需要剪贴板与文件权限</summary>
     ICoreClipboardTransfer ClipboardPushFiles(string[] localPaths, TransferListener listener);
-    /// <summary>复制粘贴文件（远端 → 本机）：把远端剪贴板里的文件下载到 localDir，完成后 Paths() 是本机上的顶层路径</summary>
-    ICoreClipboardTransfer ClipboardPullFiles(string[] remotePaths, string localDir, TransferListener listener);
 }
 
-/// <summary>一次复制粘贴文件的传输</summary>
+/// <summary>一次复制粘贴文件的传输（老被控端的整批上传）</summary>
 internal interface ICoreClipboardTransfer
 {
     void Cancel();
-    /// <summary>完成后的路径：推送时是被控端上的路径，拉取时是本机路径</summary>
+    /// <summary>完成后被控端暂存区里的顶层路径</summary>
     string[] Paths();
+}
+
+/// <summary>远端剪贴板里文件的清单（粘贴时才读内容）。Dispose 后不能再 Open，已打开的读取器不受影响</summary>
+internal interface ICoreRemoteClipOffer : IDisposable
+{
+    ClipOfferInfo Info();
+    /// <summary>打开第 index 项（文件）从 offset 读到末尾。会阻塞到对方应答（最多约 20 秒）：只在后台线程调用</summary>
+    ICoreClipReader Open(uint index, ulong offset);
+}
+
+/// <summary>剪贴板文件的读取器：Read 会阻塞，只在后台线程调用</summary>
+internal interface ICoreClipReader
+{
+    /// <summary>文件现在的大小（复制后文件又变了时与清单里的不同）</summary>
+    ulong Size();
+    /// <summary>读最多 max 字节；返回空表示读完了。断线、对方取消时抛错</summary>
+    byte[] Read(uint max);
+    /// <summary>不读了：取消并释放（可重复调用）</summary>
+    void Close();
 }
 
 /// <summary>正在播放的远端声音</summary>

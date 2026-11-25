@@ -593,8 +593,32 @@ internal sealed class MockPeer : ICorePeer
         RemoteClipboard = data;
     }
 
+    /// <summary>selftest 核对：最近一次「复制时只发清单」放到对方剪贴板的清单</summary>
+    public ClipOfferInfo? LastOffer { get; private set; }
+
+    /// <summary>与内核一样把本机文件展开成清单（文件夹在内容前面、同名顶层项加「 2」）；之后对方剪贴板就是这份清单，ClipboardGet 不返回它</summary>
+    public async Task<ClipOfferInfo> ClipboardOfferFiles(string[] localPaths)
+    {
+        await client.Delay(60);
+        var zh = client.Zh;
+        if (!MockData.PermissionsFor(device).Clipboard || !MockData.PermissionsFor(device).Files)
+            throw new GalaxyException.Permission(zh ? "对方没有给你剪贴板或文件权限" : "The remote owner has not granted clipboard and file access");
+        var info = MockClipOffer.FromLocal(localPaths, zh);
+        LastOffer = info;
+        RemoteClipboard = null;
+        return info;
+    }
+
+    public async Task<ICoreRemoteClipOffer> ClipboardRemoteOffer(string[] remotePaths)
+    {
+        await client.Delay(120);
+        if (!MockData.PermissionsFor(device).Files)
+            throw new GalaxyException.Permission(client.Zh ? "对方没有给你文件权限" : "The remote owner has not granted file access");
+        if (remotePaths.Length == 0) throw new GalaxyException.Other(client.Zh ? "远端剪贴板里没有文件" : "No files in the remote clipboard");
+        return new MockRemoteClipOffer(remotePaths);
+    }
+
     public ICoreClipboardTransfer ClipboardPushFiles(string[] localPaths, TransferListener listener) => MockClipboardTransfer.Push(this, localPaths, listener);
-    public ICoreClipboardTransfer ClipboardPullFiles(string[] remotePaths, string localDir, TransferListener listener) => MockClipboardTransfer.Pull(this, remotePaths, localDir, listener);
 
     public async Task<ICorePortForward> ForwardPort(ushort localPort, string remoteHost, ushort remotePort)
     {
@@ -661,7 +685,7 @@ internal sealed class MockPeer : ICorePeer
 }
 
 /// <summary>
-/// 模拟复制粘贴文件：按大小推进进度，传完再改对方剪贴板（推送）或在本机目录写真实的小文件（拉取，界面放进剪贴板的路径是真的）。
+/// 模拟老被控端的复制粘贴文件（整批上传）：按大小推进进度，传完再改对方剪贴板。
 /// 名字里带 fail 的在 60% 处失败；带 hold 的停在 45% 等取消（selftest 截进度条用）。超过 4 GB 或 1 万个文件时与内核一样报错。
 /// </summary>
 internal sealed class MockClipboardTransfer : ICoreClipboardTransfer
@@ -806,34 +830,6 @@ internal sealed class MockClipboardTransfer : ICoreClipboardTransfer
         });
     }
 
-    /// <summary>对方剪贴板里的文件 → 本机目录：文件写一份小文本，文件夹（名字没有扩展名）里放两份</summary>
-    public static MockClipboardTransfer Pull(MockPeer peer, string[] remotePaths, string localDir, TransferListener listener)
-    {
-        var zh = peer.Client.Zh;
-        var names = remotePaths.Select(BaseName).ToArray();
-        var error = remotePaths.Length == 0 ? (zh ? "远端剪贴板里没有文件" : "No files in the remote clipboard") : null;
-        // 每项按 1.8 MB 算进度
-        return new MockClipboardTransfer((ulong)remotePaths.Length * 1_800_000, names, zh, peer.Client.Options.LatencyScale, listener, error, () =>
-        {
-            Directory.CreateDirectory(localDir);
-            var outPaths = new List<string>();
-            for (var i = 0; i < remotePaths.Length; i++)
-            {
-                var dest = IOPath.Combine(localDir, names[i]);
-                var note = "LemonGalaxy mock\r\n" + remotePaths[i] + "\r\n";
-                if (IOPath.GetExtension(names[i]).Length == 0)
-                {
-                    Directory.CreateDirectory(dest);
-                    File.WriteAllText(IOPath.Combine(dest, "README.md"), "# " + names[i] + "\r\n\r\n" + note);
-                    File.WriteAllText(IOPath.Combine(dest, "deploy.ps1"), "Write-Host \"deploy\"\r\n# " + note);
-                }
-                else File.WriteAllText(dest, note);
-                outPaths.Add(dest);
-            }
-            return outPaths.ToArray();
-        });
-    }
-
     /// <summary>模拟设备剪贴板里一开始的两项（协议格式路径）</summary>
     public static string[] RemoteSampleFiles(DeviceInfo d, bool zh)
     {
@@ -842,6 +838,162 @@ internal sealed class MockClipboardTransfer : ICoreClipboardTransfer
             ? new[] { home + "/Documents/会议纪要 2026-11-20.txt", home + "/Desktop/部署脚本" }
             : new[] { home + "/Documents/Meeting notes 2026-11-20.txt", home + "/Desktop/Deploy scripts" };
     }
+}
+
+/// <summary>模拟「复制时只交换清单」（protocol.md 8.4.1）的清单展开</summary>
+internal static class MockClipOffer
+{
+    private const int MaxEntries = 10_000;
+    private static readonly Random Rand = new();
+
+    public static ulong NewId()
+    {
+        var b = new byte[8];
+        lock (Rand) Rand.NextBytes(b);
+        return BitConverter.ToUInt64(b, 0);
+    }
+
+    /// <summary>本机文件 / 文件夹 → 清单：路径用 / 分隔，文件夹排在内容前面，同名顶层项从第二个起加「 2」「 3」</summary>
+    public static ClipOfferInfo FromLocal(string[] localPaths, bool zh)
+    {
+        if (localPaths.Length == 0) throw new GalaxyException.Other(zh ? "没有要复制的文件" : "Nothing to copy");
+        var entries = new List<ClipOfferEntry>();
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        static long Mtime(FileSystemInfo f) => new DateTimeOffset(f.LastWriteTimeUtc).ToUnixTimeSeconds();
+        void Add(ClipOfferEntry e)
+        {
+            entries.Add(e);
+            if (entries.Count > MaxEntries)
+                throw new GalaxyException.Other(zh ? "要复制的文件太多（超过 1 万个），请用文件管理传输" : "Too many files to copy (over 10,000). Use file transfer instead.");
+        }
+        void Walk(DirectoryInfo dir, string rel)
+        {
+            foreach (var d in dir.GetDirectories().OrderBy(x => x.Name, StringComparer.Ordinal))
+            {
+                Add(new ClipOfferEntry(rel + "/" + d.Name, true, 0, Mtime(d)));
+                Walk(d, rel + "/" + d.Name);
+            }
+            foreach (var f in dir.GetFiles().OrderBy(x => x.Name, StringComparer.Ordinal))
+                Add(new ClipOfferEntry(rel + "/" + f.Name, false, (ulong)f.Length, Mtime(f)));
+        }
+        foreach (var p in localPaths)
+        {
+            var path = p.TrimEnd('\\', '/');
+            var name = IOPath.GetFileName(path);
+            var unique = name;
+            for (var i = 2; !used.Add(unique); i++) unique = IOPath.GetFileNameWithoutExtension(name) + " " + i + IOPath.GetExtension(name);
+            if (Directory.Exists(path))
+            {
+                var d = new DirectoryInfo(path);
+                Add(new ClipOfferEntry(unique, true, 0, Mtime(d)));
+                Walk(d, unique);
+            }
+            else if (File.Exists(path))
+            {
+                var f = new FileInfo(path);
+                Add(new ClipOfferEntry(unique, false, (ulong)f.Length, Mtime(f)));
+            }
+            else throw new GalaxyException.NotFound(zh ? $"读不了 {p}：文件不存在" : $"Cannot read {p}: no such file");
+        }
+        ulong total = 0;
+        foreach (var e in entries) total += e.Size;
+        return new ClipOfferInfo(NewId(), entries.ToArray(), total);
+    }
+}
+
+/// <summary>
+/// 模拟远端剪贴板里文件的清单：名字有扩展名的是文件，没有的是文件夹（里面放 README.md 与 deploy.ps1）。
+/// 文件内容是确定的文本（第一项约 300 KB，测分块读）；读取器每次最多给 64 KB。selftest 用 Opened 核对复制时没有读内容
+/// </summary>
+internal sealed class MockRemoteClipOffer : ICoreRemoteClipOffer
+{
+    private readonly ClipOfferInfo info;
+    private readonly byte[][] contents;
+    private int opened;
+    private bool disposed;
+
+    public MockRemoteClipOffer(string[] remotePaths)
+    {
+        var entries = new List<ClipOfferEntry>();
+        var data = new List<byte[]>();
+        const long mtime = 1_795_225_692;
+        foreach (var path in remotePaths)
+        {
+            var name = MockClipboardTransfer.BaseName(path);
+            if (IOPath.GetExtension(name).Length == 0)
+            {
+                entries.Add(new ClipOfferEntry(name, true, 0, mtime));
+                data.Add(Array.Empty<byte>());
+                foreach (var (child, text) in new[] { ("README.md", "# " + name + "\r\n\r\nLemonGalaxy mock\r\n" + path + "\r\n"), ("deploy.ps1", "Write-Host \"deploy\"\r\n# " + path + "\r\n") })
+                {
+                    var b = Encoding.UTF8.GetBytes(text);
+                    entries.Add(new ClipOfferEntry(name + "/" + child, false, (ulong)b.Length, mtime));
+                    data.Add(b);
+                }
+            }
+            else
+            {
+                var sb = new StringBuilder("LemonGalaxy mock\r\n" + path + "\r\n");
+                if (entries.Count == 0)
+                    for (var i = 0; sb.Length < 300_000; i++) sb.Append("line ").Append(i).Append("\r\n");
+                var b = Encoding.UTF8.GetBytes(sb.ToString());
+                entries.Add(new ClipOfferEntry(name, false, (ulong)b.Length, mtime));
+                data.Add(b);
+            }
+        }
+        contents = data.ToArray();
+        ulong total = 0;
+        foreach (var e in entries) total += e.Size;
+        info = new ClipOfferInfo(MockClipOffer.NewId(), entries.ToArray(), total);
+    }
+
+    /// <summary>打开过几次（复制时应为 0：粘贴时才读）</summary>
+    public int Opened => Volatile.Read(ref opened);
+    public bool Disposed => Volatile.Read(ref disposed);
+    /// <summary>第 index 项的内容（selftest 核对读出来的数据）</summary>
+    public byte[] Content(int index) => contents[index];
+
+    public ClipOfferInfo Info() => info;
+
+    public ICoreClipReader Open(uint index, ulong offset)
+    {
+        if (Disposed) throw new GalaxyException.Other("offer disposed");
+        if (index >= contents.Length || info.Entries[index].IsDir) throw new GalaxyException.NotFound("no such file in the clipboard offer");
+        Interlocked.Increment(ref opened);
+        return new MockClipReader(contents[index], offset);
+    }
+
+    public void Dispose() => Volatile.Write(ref disposed, true);
+}
+
+internal sealed class MockClipReader : ICoreClipReader
+{
+    private readonly byte[] data;
+    private long pos;
+    private bool closed;
+
+    public MockClipReader(byte[] data, ulong offset)
+    {
+        this.data = data;
+        pos = (long)Math.Min(offset, (ulong)data.Length);
+    }
+
+    public ulong Size() => (ulong)data.Length;
+
+    public byte[] Read(uint max)
+    {
+        lock (this)
+        {
+            if (closed) return Array.Empty<byte>();
+            var n = (int)Math.Min(Math.Min(max, 65_536u), (ulong)(data.Length - pos));
+            var b = new byte[n];
+            Buffer.BlockCopy(data, (int)pos, b, 0, n);
+            pos += n;
+            return b;
+        }
+    }
+
+    public void Close() { lock (this) closed = true; }
 }
 
 /// <summary>模拟远端声音：不出声，只记下音量、静音与是否在播</summary>

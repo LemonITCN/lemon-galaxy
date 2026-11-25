@@ -91,8 +91,35 @@ internal sealed class RealPeer : ICorePeer
     public uint VirtualDisplayMax() => s.VirtualDisplayMax();
     public Task<DisplayInfo> AddVirtualDisplay(uint width, uint height, uint refresh) => s.AddVirtualDisplay(width, height, refresh);
     public Task RemoveVirtualDisplay(uint displayId) => s.RemoveVirtualDisplay(displayId);
+    public Task<ClipOfferInfo> ClipboardOfferFiles(string[] localPaths) => s.ClipboardOfferFiles(localPaths);
+    public async Task<ICoreRemoteClipOffer> ClipboardRemoteOffer(string[] remotePaths) => new RealRemoteClipOffer(await s.ClipboardRemoteOffer(remotePaths));
     public ICoreClipboardTransfer ClipboardPushFiles(string[] localPaths, TransferListener listener) => new RealClipboardTransfer(s.ClipboardPushFiles(localPaths, listener));
-    public ICoreClipboardTransfer ClipboardPullFiles(string[] remotePaths, string localDir, TransferListener listener) => new RealClipboardTransfer(s.ClipboardPullFiles(remotePaths, localDir, listener));
+}
+
+internal sealed class RealRemoteClipOffer : ICoreRemoteClipOffer
+{
+    private readonly RemoteClipOffer o;
+    public RealRemoteClipOffer(RemoteClipOffer offer) { o = offer; }
+    public ClipOfferInfo Info() => o.Info();
+    public ICoreClipReader Open(uint index, ulong offset) => new RealClipReader(o.Open(index, offset));
+    public void Dispose() => o.Dispose();
+}
+
+/// <summary>Close 同时释放内核对象（不等终结器）；之后 Read 返回空</summary>
+internal sealed class RealClipReader : ICoreClipReader
+{
+    private readonly ClipReader r;
+    private int closed;
+    public RealClipReader(ClipReader reader) { r = reader; }
+    public ulong Size() => r.Size();
+    public byte[] Read(uint max) => Volatile.Read(ref closed) != 0 ? Array.Empty<byte>() : r.Read(max);
+
+    public void Close()
+    {
+        if (Interlocked.Exchange(ref closed, 1) != 0) return;
+        try { r.Close(); }
+        finally { r.Dispose(); }
+    }
 }
 
 internal sealed class RealClipboardTransfer : ICoreClipboardTransfer

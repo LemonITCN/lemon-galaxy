@@ -28,7 +28,7 @@ internal static class Program
         Log.FilePath = IOPath.Combine(AppInfo.DataDir, "ui.log");
         AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Error("未处理的异常：" + e.ExceptionObject);
         Region.RequireAttached = true;
-        // 远程桌面复制粘贴文件的下载缓存：一天前的在后台删掉
+        // 旧版本远程桌面复制粘贴文件的下载缓存（现在粘贴时才传，不再写入）：一天前的在后台删掉
         ThreadPool.QueueUserWorkItem(_ => ClipFiles.CleanStale(AppInfo.ClipboardDir));
         var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
         app.DispatcherUnhandledException += (_, e) =>
@@ -48,6 +48,9 @@ internal static class Program
             MessageBox.Show(L.T("about.mock.fallback", model.CoreFallbackReason), "LemonGalaxy", MessageBoxButton.OK, MessageBoxImage.Warning);
         var window = new MainWindow(model);
         app.MainWindow = window;
-        return app.Run(window);
+        var code = app.Run(window);
+        // 剪贴板里放着的对方文件随本进程失效，退出前清掉
+        VirtualClipboard.Shutdown();
+        return code;
     }
 }

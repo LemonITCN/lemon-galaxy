@@ -1,4 +1,3 @@
-using System.Collections.Specialized;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -7,26 +6,18 @@ using LemonGalaxy.Core;
 
 namespace LemonGalaxy.UI;
 
-// 远程桌面里的复制粘贴文件（protocol.md 8.4.1）：本机剪贴板里的文件经内核传到对方暂存区并设成对方剪贴板；
-// 对方剪贴板里的文件下载到本机缓存目录再放进本机剪贴板。这里是剪贴板读写、缓存目录、进度回调与进度条视图。
+// 远程桌面里的复制粘贴文件（protocol.md 8.4.1）：复制时只交换清单，粘贴时才传。本机复制的文件经 clipboard_offer 只发清单
+// （老被控端整批上传到对方暂存区，这里有它的进度条）；对方复制的文件做成虚拟文件放进本机剪贴板（RemoteClipPaste.cs）。
+// 这里是本机剪贴板里的文件、旧版下载缓存的清理、老被控端上传的进度回调与进度条视图。
 
-/// <summary>本机剪贴板里的文件与下载缓存目录</summary>
+/// <summary>本机剪贴板里的文件；旧版本把对方文件下载到的缓存目录（现在粘贴时才传，不再写这里，只清理）</summary>
 internal static class ClipFiles
 {
     /// <summary>selftest 换成临时目录，不碰 %LOCALAPPDATA%</summary>
     public static string? RootOverride;
     public static string Root => RootOverride ?? AppInfo.ClipboardDir;
-    private static readonly Random Rand = new();
 
-    /// <summary>每次拉取一个新目录（&lt;毫秒时间戳&gt;-&lt;随机数&gt;），同名文件不会互相覆盖</summary>
-    public static string NewPullDir()
-    {
-        int r;
-        lock (Rand) r = Rand.Next(1_000_000);
-        return IOPath.Combine(Root, $"{Clock.NowMs}-{r}");
-    }
-
-    /// <summary>删掉一天前的拉取目录（应用启动时在后台调用），返回删掉的个数</summary>
+    /// <summary>删掉一天前的下载目录（应用启动时在后台调用），返回删掉的个数</summary>
     public static int CleanStale(string root, TimeSpan? age = null)
     {
         var limit = age ?? TimeSpan.FromDays(1);
@@ -92,33 +83,9 @@ internal static class ClipFiles
         }
         return null;
     }
-
-    /// <summary>把文件放进剪贴板（CF_HDROP + Preferred DropEffect = 复制），资源管理器里粘贴即复制</summary>
-    public static bool SetFiles(string[] paths)
-    {
-        var list = new StringCollection();
-        list.AddRange(paths);
-        for (var i = 0; i < 5; i++)
-        {
-            try
-            {
-                var data = new DataObject();
-                data.SetFileDropList(list);
-                data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(1)));
-                Clipboard.SetDataObject(data, true);
-                return true;
-            }
-            catch (COMException) { Thread.Sleep(30); }
-            catch (Exception e)
-            {
-                Log.Error("写剪贴板失败：" + e.Message);
-                return false;
-            }
-        }
-        return false;
-    }
 }
 
+/// <summary>Push：本机 → 对方（老被控端整批上传有进度，发清单只在失败时提示）；Pull：对方 → 本机（只在放进本机剪贴板失败时提示）</summary>
 internal enum FileClipDirection { Push, Pull }
 internal enum FileClipState { Running, Done, Failed }
 
@@ -142,7 +109,7 @@ internal sealed class FileClip
     public int Percent => (int)Math.Floor(Fraction * 100);
 }
 
-/// <summary>内核的进度回调（内核线程）→ 界面线程；进度合并成每次消息处理最多一次刷新</summary>
+/// <summary>老被控端整批上传的进度回调（内核线程）→ 界面线程；进度合并成每次消息处理最多一次刷新</summary>
 internal sealed class ClipTransferListener : TransferListener
 {
     private readonly Action<ulong, ulong> progress;
@@ -171,22 +138,19 @@ internal sealed class ClipTransferListener : TransferListener
 
 internal static class FileClipView
 {
-    /// <summary>远程画面上方的进度条：正在复制（百分比 + 取消）→ 完成提示 / 失败原因</summary>
+    /// <summary>远程画面上方的提示：老被控端上传中（百分比 + 取消）→ 完成提示；复制粘贴文件失败的原因</summary>
     public static FrameworkElement? Pill(RemoteTab tab)
     {
         var c = tab.FileClip;
         if (c == null) return null;
+        // 只有老被控端的整批上传有进行中状态
         var running = c.State == FileClipState.Running;
         string title;
-        if (running)
-        {
-            var key = c.Direction == FileClipDirection.Push ? "remote.files.pushing" : "remote.files.pulling";
-            title = c.Names.Length == 1 ? L.T(key + "One", c.Names[0]) : L.T(key + "Many", c.Names.Length);
-        }
-        else if (c.State == FileClipState.Done) title = L.T(c.Direction == FileClipDirection.Push ? "remote.files.pushed" : "remote.files.pulled");
+        if (running) title = c.Names.Length == 1 ? L.T("remote.files.pushingOne", c.Names[0]) : L.T("remote.files.pushingMany", c.Names.Length);
+        else if (c.State == FileClipState.Done) title = L.T("remote.files.pushed");
         else title = L.T("remote.files.failed", c.Error ?? "");
 
-        var icon = running ? K.Icon(c.Direction == FileClipDirection.Push ? "upload" : "download", 16, Th.Accent)
+        var icon = running ? K.Icon("upload", 16, Th.Accent)
             : c.State == FileClipState.Done ? K.Icon("checkCircle", 16, Th.Success) : K.Icon("warning", 16, Th.Danger);
         var text = K.Text(title, 13, Th.Text, running ? null : FontWeights.Medium, wrap: !running);
         if (running) text.TextTrimming = TextTrimming.CharacterEllipsis;

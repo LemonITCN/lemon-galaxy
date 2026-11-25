@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -8,6 +9,7 @@ using System.Windows.Media.Imaging;
 using LemonGalaxy.Core;
 using LemonGalaxy.Core.Mock;
 using LemonGalaxy.UI;
+using ComTypes = System.Runtime.InteropServices.ComTypes;
 
 namespace LemonGalaxy;
 
@@ -158,8 +160,9 @@ internal static class SelfTest
     }
 
     /// <summary>
-    /// 远程桌面复制粘贴文件：本机文件 → 对方（进度条、取消、完成提示）；对方复制 → 下载到缓存目录（同一批不重复下载，推过去的暂存文件不再拉回来）；
-    /// 失败显示原因。selftest 不碰系统剪贴板，直接调推送与拉取。
+    /// 远程桌面复制粘贴文件（protocol.md 8.4.1，复制时只交换清单，粘贴时才传）：
+    /// 本机复制 → 只发清单（文件夹展开、不显示进度条）；对方复制 → 虚拟文件数据对象（复制时不读内容，核对描述表、按项读、Seek、各格式）；
+    /// 老被控端整批上传的进度条、取消、完成与失败提示，推过去的暂存文件不再放回本机。selftest 不碰系统剪贴板，直接调。
     /// </summary>
     private static void CheckFileClip(RemoteTab r, FrameworkElement root, string prefix)
     {
@@ -169,6 +172,7 @@ internal static class SelfTest
             return;
         }
         if (!r.FileClipSupported) Problems.Add("复制粘贴文件：模拟的 Windows 设备应支持");
+        if (!r.ClipOfferSupported) Problems.Add("复制粘贴文件：模拟的 Windows 设备应支持只发清单（clipboard_offer）");
         var home = fakeHomeDir;
         var report = IOPath.Combine(home, "report-2026Q3.pdf");
         var notes = IOPath.Combine(home, "deploy-notes.md");
@@ -176,9 +180,44 @@ internal static class SelfTest
         var failing = IOPath.Combine(home, "Desktop", "upload-fail.bin");
         File.WriteAllBytes(held, new byte[2_000_000]);
         File.WriteAllBytes(failing, new byte[300_000]);
+        // 要发清单的文件夹放在假主目录外面，不影响文件列表截图
+        var folder = IOPath.Combine(IOPath.GetDirectoryName(home)!, "offer", "handoff");
+        Directory.CreateDirectory(IOPath.Combine(folder, "assets"));
+        File.WriteAllText(IOPath.Combine(folder, "readme.txt"), "handoff");
+        File.WriteAllBytes(IOPath.Combine(folder, "assets", "logo.png"), new byte[4096]);
         bool Failed() => r.FileClip?.State == FileClipState.Failed;
 
-        // 1. 进度条：其中一项名字带 hold，模拟传输停在 45%
+        // 1. 本机复制 → 只发清单：不传内容、不显示进度条，对方剪贴板换成清单（拉取时不会再放回本机）
+        r.SendLocalFiles(new[] { report, notes, folder });
+        Wait("复制文件只发清单", () => session.LastOffer != null || Failed());
+        if (session.LastOffer is { } offered)
+        {
+            var paths = offered.Entries.Select(e => e.Path).ToArray();
+            var want = new[] { "report-2026Q3.pdf", "deploy-notes.md", "handoff", "handoff/assets", "handoff/assets/logo.png", "handoff/readme.txt" };
+            if (!paths.SequenceEqual(want) || !offered.Entries[2].IsDir || offered.Entries[4].Size != 4096)
+                Problems.Add("复制粘贴文件：发出去的清单不对 " + string.Join(", ", paths));
+        }
+        else Problems.Add("复制粘贴文件：本机复制后没有发清单（" + r.FileClip?.Error + "）");
+        if (r.FileClip != null || r.ClipTransfer != null) Problems.Add("复制粘贴文件：只发清单时不应上传或显示进度条");
+        if (session.RemoteClipboard != null) Problems.Add("复制粘贴文件：发清单后对方剪贴板应是这份清单");
+        r.PullRemoteClipboard();
+        Ui.Pump(150);
+        if (r.PasteData != null) Problems.Add("复制粘贴文件：对方剪贴板是自己发的清单时不应放回本机");
+
+        // 2. 对方复制 → 虚拟文件放进本机剪贴板，复制时不读内容；同一批不重复放
+        var remote = MockClipboardTransfer.RemoteSampleFiles(session.Device, session.Client.Zh);
+        session.RemoteClipboard = new ClipboardData.Files(remote);
+        r.PullRemoteClipboard();
+        Wait("对方文件放进本机剪贴板", () => r.PasteData != null || Failed());
+        var placed = r.PasteData;
+        if (placed == null) Problems.Add("复制粘贴文件：对方复制的文件没有放进本机剪贴板（" + r.FileClip?.Error + "）");
+        else CheckPasteData(placed, remote);
+        if (r.FileClip != null) Problems.Add("复制粘贴文件：对方文件放进本机剪贴板时不应显示进度条");
+        r.PullRemoteClipboard();
+        Ui.Pump(150);
+        if (!ReferenceEquals(r.PasteData, placed)) Problems.Add("复制粘贴文件：同一批对方文件又放了一遍");
+
+        // 3. 老被控端整批上传：进度条（其中一项名字带 hold，模拟传输停在 45%）、取消
         r.PushFiles(new[] { report, IOPath.Combine(home, "screenshot.png"), held });
         Wait("复制文件进度到 45%", () => r.FileClip?.Percent == 45);
         var heldTransfer = r.ClipTransfer as MockClipboardTransfer;
@@ -188,7 +227,7 @@ internal static class SelfTest
         Ui.Pump(30);
         if (r.FileClip != null || heldTransfer?.Cancelled != true) Problems.Add("复制粘贴文件：取消后进度条没收起或传输没停");
 
-        // 2. 完成提示：对方剪贴板变成暂存区里的这两项
+        // 4. 完成提示：对方剪贴板变成暂存区里的这两项；推过去的暂存文件不再放回本机
         r.PushFiles(new[] { report, notes });
         Wait("复制文件到对方", () => r.FileClip?.State == FileClipState.Done || Failed());
         if (session.RemoteClipboard is ClipboardData.Files staged)
@@ -199,37 +238,134 @@ internal static class SelfTest
         }
         else Problems.Add("复制粘贴文件：推送完成后对方剪贴板不是文件");
         Capture($"{prefix}-45-remote-files-pushed", root);
-        // 推过去的暂存文件不再拉回来
         var pushed = r.FileClip;
         r.PullRemoteClipboard();
         Ui.Pump(150);
-        if (!ReferenceEquals(r.FileClip, pushed)) Problems.Add("复制粘贴文件：推过去的文件又被拉回本机");
+        if (!ReferenceEquals(r.FileClip, pushed) || !ReferenceEquals(r.PasteData, placed)) Problems.Add("复制粘贴文件：推过去的文件又被放回本机");
         r.DismissFileClip();
 
-        // 3. 对方复制了文件 → 下载到缓存目录
-        var remote = MockClipboardTransfer.RemoteSampleFiles(session.Device, session.Client.Zh);
-        session.RemoteClipboard = new ClipboardData.Files(remote);
-        r.PullRemoteClipboard();
-        Wait("从对方复制文件", () => r.FileClip is { State: FileClipState.Done, Direction: FileClipDirection.Pull } || Failed());
-        var local = r.LocalClipboardFiles ?? Array.Empty<string>();
-        var cacheRoot = IOPath.GetFullPath(ClipFiles.Root) + IOPath.DirectorySeparatorChar;
-        if (!local.Select(IOPath.GetFileName).SequenceEqual(remote.Select(ClipFiles.BaseName))
-            || !local.All(x => (File.Exists(x) || Directory.Exists(x)) && IOPath.GetFullPath(x).StartsWith(cacheRoot, StringComparison.OrdinalIgnoreCase))
-            || !File.Exists(IOPath.Combine(local.LastOrDefault() ?? "", "README.md")))
-            Problems.Add("复制粘贴文件：下载到本机的文件不对 " + string.Join(", ", local));
-        Capture($"{prefix}-46-remote-files-pulled", root);
-        var pulled = r.FileClip;
-        r.PullRemoteClipboard();
-        Ui.Pump(150);
-        if (!ReferenceEquals(r.FileClip, pulled)) Problems.Add("复制粘贴文件：同一批文件又下载了一遍");
-        r.DismissFileClip();
-
-        // 4. 失败：名字带 fail 的在 60% 处失败，显示原因
+        // 5. 失败：名字带 fail 的在 60% 处失败，显示原因
         r.PushFiles(new[] { failing });
         Wait("复制文件失败", Failed);
         Capture($"{prefix}-47-remote-files-failed", root);
         r.DismissFileClip();
         if (r.FileClip != null) Problems.Add("复制粘贴文件：失败提示收不起来");
+    }
+
+    /// <summary>虚拟文件数据对象：复制时没读内容；描述表（FILEGROUPDESCRIPTORW）路径、属性、大小、标志；按项读出的内容、Seek、Stat；其余格式</summary>
+    private static void CheckPasteData(RemoteFileData d, string[] remote)
+    {
+        void Expect(bool ok, string what) { if (!ok) Problems.Add("复制粘贴文件（对方 → 本机）：" + what); }
+        if (d.Offer is not MockRemoteClipOffer mock)
+        {
+            Problems.Add("复制粘贴文件（对方 → 本机）：没有模拟清单");
+            return;
+        }
+        Expect(mock.Opened == 0, "复制时就读了文件内容");
+        var info = mock.Info();
+        var top = remote.Select(ClipFiles.BaseName).ToArray();
+        var want = new[] { top[0], top[1], top[1] + "\\README.md", top[1] + "\\deploy.ps1" };
+        Expect(d.Names.SequenceEqual(want), "描述表路径不对 " + string.Join(", ", d.Names));
+
+        ComTypes.FORMATETC Etc(short cf, ComTypes.TYMED tymed, int lindex = -1) => new() { cfFormat = cf, dwAspect = ComTypes.DVASPECT.DVASPECT_CONTENT, lindex = lindex, tymed = tymed };
+        // 描述表
+        var f = Etc(RemoteFileData.CfDescriptor, ComTypes.TYMED.TYMED_HGLOBAL);
+        if (d.GetData(ref f, out var m) == 0 && m.tymed == ComTypes.TYMED.TYMED_HGLOBAL)
+        {
+            var p = NativeClip.GlobalLock(m.unionmember);
+            var n = Marshal.ReadInt32(p);
+            Expect(n == want.Length && (ulong)NativeClip.GlobalSize(m.unionmember) >= (ulong)(4 + RemoteFileData.DescriptorSize * n), $"描述表项数或大小不对（{n}）");
+            for (var i = 0; i < Math.Min(n, info.Entries.Length); i++)
+            {
+                var at = p + 4 + i * RemoteFileData.DescriptorSize;
+                var flags = (uint)Marshal.ReadInt32(at);
+                var attrs = (uint)Marshal.ReadInt32(at + 36);
+                var write = Marshal.ReadInt64(at + 56);
+                var sizeHigh = (uint)Marshal.ReadInt32(at + 64);
+                var sizeLow = (uint)Marshal.ReadInt32(at + 68);
+                var name = Marshal.PtrToStringUni(at + 72);
+                var e = info.Entries[i];
+                var okFlags = (flags & RemoteFileData.FdProgressUi) != 0 && (flags & RemoteFileData.FdAttributes) != 0 && (flags & RemoteFileData.FdWriteTime) != 0
+                    && ((flags & RemoteFileData.FdFileSize) != 0) == !e.IsDir;
+                Expect(okFlags, $"第 {i} 项标志不对 0x{flags:X}");
+                Expect(attrs == (e.IsDir ? RemoteFileData.AttrDirectory : RemoteFileData.AttrNormal), $"第 {i} 项属性不对 0x{attrs:X}");
+                Expect(e.IsDir || ((ulong)sizeHigh << 32 | sizeLow) == e.Size, $"第 {i} 项大小不对");
+                Expect(write == RemoteFileData.FileTime(e.Mtime), $"第 {i} 项修改时间不对");
+                Expect(name == want[i], $"第 {i} 项名字不对 {name}");
+            }
+            NativeClip.GlobalUnlock(m.unionmember);
+            NativeClip.ReleaseStgMedium(ref m);
+        }
+        else Problems.Add("复制粘贴文件（对方 → 本机）：取不到描述表");
+
+        // 其余格式：首选复制、我们的标记；没有 CF_HDROP、文件夹没有内容
+        f = Etc(RemoteFileData.CfDropEffect, ComTypes.TYMED.TYMED_HGLOBAL);
+        if (d.GetData(ref f, out m) == 0)
+        {
+            Expect(Marshal.ReadInt32(NativeClip.GlobalLock(m.unionmember)) == 1, "Preferred DropEffect 不是复制");
+            NativeClip.GlobalUnlock(m.unionmember);
+            NativeClip.ReleaseStgMedium(ref m);
+        }
+        else Problems.Add("复制粘贴文件（对方 → 本机）：取不到 Preferred DropEffect");
+        f = Etc(RemoteFileData.CfMarker, ComTypes.TYMED.TYMED_HGLOBAL);
+        Expect(d.QueryGetData(ref f) == 0, "没有私有标记格式");
+        f = Etc(15 /* CF_HDROP */, ComTypes.TYMED.TYMED_HGLOBAL);
+        Expect(d.QueryGetData(ref f) != 0, "不应提供 CF_HDROP");
+        f = Etc(RemoteFileData.CfContents, ComTypes.TYMED.TYMED_ISTREAM, 1);
+        Expect(d.GetData(ref f, out _) == Hr.Lindex, "文件夹不应给内容");
+        f = Etc(RemoteFileData.CfContents, ComTypes.TYMED.TYMED_ISTREAM);
+        Expect(d.QueryGetData(ref f) == 0, "没有 FileContents");
+        Expect(d.EnumFormatEtc(ComTypes.DATADIR.DATADIR_GET, out var en) == 0 && en != null, "列不出格式");
+        if (en != null)
+        {
+            var got = new ComTypes.FORMATETC[8];
+            var fetched = new int[1];
+            en.Next(8, got, fetched);
+            Expect(fetched[0] == 4, $"格式个数不对（{fetched[0]}）");
+        }
+
+        // 按项读：第 0 项约 300 KB，读取器每次最多给 64 KB，流要读满再返回
+        f = Etc(RemoteFileData.CfContents, ComTypes.TYMED.TYMED_ISTREAM, 0);
+        if (d.GetData(ref f, out m) != 0 || m.tymed != ComTypes.TYMED.TYMED_ISTREAM)
+        {
+            Problems.Add("复制粘贴文件（对方 → 本机）：取不到第 0 项内容");
+            return;
+        }
+        Expect(mock.Opened == 0, "取到内容流时就向对方打开了（应等第一次读）");
+        var stream = (IOleStream)Marshal.GetObjectForIUnknown(m.unionmember);
+        var expect = mock.Content(0);
+        var buf = Marshal.AllocHGlobal(100_000);
+        var cnt = Marshal.AllocHGlobal(8);
+        try
+        {
+            var all = new List<byte>();
+            var shortRead = false;
+            while (true)
+            {
+                if (stream.Read(buf, 100_000, cnt) != 0) { Problems.Add("复制粘贴文件（对方 → 本机）：读内容出错"); break; }
+                var n = Marshal.ReadInt32(cnt);
+                if (n == 0) break;
+                var chunk = new byte[n];
+                Marshal.Copy(buf, chunk, 0, n);
+                all.AddRange(chunk);
+                if (n < 100_000 && all.Count < expect.Length) shortRead = true;
+            }
+            Expect(all.SequenceEqual(expect), $"读出来的内容不对（{all.Count} / {expect.Length} 字节）");
+            Expect(!shortRead, "没到末尾就少给了数据");
+            Expect(stream.Stat(out var st, 1) == 0 && st.cbSize == expect.Length, "Stat 大小不对");
+            // Seek 回去从中间读
+            Expect(stream.Seek(10, 0, IntPtr.Zero) == 0 && stream.Read(buf, 5, cnt) == 0 && Marshal.ReadInt32(cnt) == 5, "Seek 后读不对");
+            var mid = new byte[5];
+            Marshal.Copy(buf, mid, 0, 5);
+            Expect(mid.SequenceEqual(expect.Skip(10).Take(5)), "Seek 后读出的内容不对");
+            Expect(mock.Opened == 2, $"打开次数不对（{mock.Opened}，应为第一次读与 Seek 后各一次）");
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buf);
+            Marshal.FreeHGlobal(cnt);
+            NativeClip.ReleaseStgMedium(ref m);
+        }
     }
 
     /// <summary>
