@@ -164,10 +164,14 @@ struct LoginFormView: View {
                 Text(stepTitle).font(.system(size: 16, weight: .semibold))
                 Spacer()
             }
-            switch form.step {
-            case .credentials: credentials
-            case .totp: totpStep
-            case .changePassword: changeStep
+            if form.switchPending {
+                switchConfirm
+            } else {
+                switch form.step {
+                case .credentials: credentials
+                case .totp: totpStep
+                case .changePassword: changeStep
+                }
             }
             if let e = form.error {
                 HStack(alignment: .top, spacing: 6) {
@@ -178,11 +182,22 @@ struct LoginFormView: View {
             HStack {
                 if form.busy { ProgressView().controlSize(.small) }
                 Spacer()
-                Button(loc("common.cancel")) { model.loginForm = nil }
-                    .buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
-                Button(submitTitle) { model.submitLogin(form) }
-                    .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
-                    .disabled(!form.canSubmit || form.busy)
+                Button(loc("common.cancel")) {
+                    if form.switchPending { form.switchPending = false } else { model.loginForm = nil }
+                }
+                .buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+                if form.switchPending {
+                    Button(loc("login.switch.confirm")) {
+                        form.switchConfirmed = true
+                        form.switchPending = false
+                        model.submitLogin(form)
+                    }
+                    .buttonStyle(PrimaryButtonStyle(destructive: true)).keyboardShortcut(.defaultAction)
+                } else {
+                    Button(submitTitle) { model.submitLogin(form) }
+                        .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
+                        .disabled(!form.canSubmit || form.busy)
+                }
             }
         }
         .padding(22)
@@ -223,7 +238,14 @@ struct LoginFormView: View {
     private var credentials: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
-                label(loc("login.server"), info: loc(form.serverLocked ? "login.server.locked" : form.serverInUseOnly ? "login.server.inUse" : "login.server.info"))
+                HStack(spacing: 4) {
+                    label(loc("login.server"), info: loc(form.serverLocked ? "login.server.locked" : form.serverInUseOnly ? "login.server.inUse" : "login.server.info"))
+                    Spacer()
+                    if form.serverLocked {
+                        Button(loc("login.server.change")) { form.serverLocked = false }
+                            .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(p.accent)
+                    }
+                }
                 TextField("host:7443#sha256-…", text: $form.server)
                     .font(.system(size: 12, design: .monospaced))
                     .fieldStyle(invalid: !form.server.isEmpty && !LoginForm.looksLikeServer(form.server.trimmingCharacters(in: .whitespacesAndNewlines)))
@@ -244,6 +266,22 @@ struct LoginFormView: View {
                 InfoButton(text: loc("perm.systemUser.info"))
             }
         }
+    }
+
+    /// 换服务器确认：会先退出本机已登录的账号
+    private var switchConfirm: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "arrow.left.arrow.right.circle").font(.system(size: 18)).foregroundStyle(p.warning)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(loc("login.switch.title")).font(.system(size: 13.5, weight: .semibold))
+                Text(loc("login.switch.body", String(model.accounts.count), form.originalServer.map(serverHost) ?? "—"))
+                    .font(.system(size: 12.5)).foregroundStyle(p.secondaryText).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func serverHost(_ s: String) -> String {
+        s.firstIndex(of: "#").map { String(s[..<$0]) } ?? s
     }
 
     private var totpStep: some View {

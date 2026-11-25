@@ -216,6 +216,29 @@ enum SelfTest {
             if fresh.service == nil { problems.append("登录后没有接上被控服务") }
             fresh.notice = nil
         }
+        // 换服务器（与 Linux 被控端一致）：已有账号时地址锁着，点「更换服务器」改了再提交先确认；确认后退出旧服务器上的账号、在新服务器登录
+        if !LoginForm.sameServer(" Galaxy.Example.com:7443#sha256-AbC", "galaxy.example.com:7443#sha256-AbC") || LoginForm.sameServer("h:7443#sha256-AbC", "h:7443#sha256-abc") {
+            problems.append("判断是不是同一台服务器的规则不对")
+        }
+        fresh.openLogin()
+        if let f = fresh.loginForm {
+            if !f.serverLocked { problems.append("已有账号时登录表单应先锁定服务器地址") }
+            f.serverLocked = false
+            let other = "other.example.com:7443#sha256-" + String(repeating: "Q", count: 43)
+            f.server = other
+            f.username = "carol"
+            f.password = "password"
+            fresh.submitLogin(f)
+            if !f.switchPending || f.busy { problems.append("换服务器没有先确认") }
+            shot("\(prefix)-06b-login-switch-server", window: window, host: freshHost)
+            f.switchConfirmed = true
+            f.switchPending = false
+            fresh.submitLogin(f)
+            wait("换服务器后登录") { fresh.loginForm == nil }
+            if fresh.serverAddress != other { problems.append("换服务器后服务器地址没变") }
+            if fresh.accounts.map(\.username) != ["carol"] { problems.append("换服务器后应只剩新服务器上的账号：\(fresh.accounts.map(\.username))") }
+            fresh.notice = nil
+        }
         window.contentView = nil
 
         // 没有账号：填服务器地址 → set_server → 开临时协助

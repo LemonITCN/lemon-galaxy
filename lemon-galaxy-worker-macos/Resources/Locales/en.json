@@ -109,7 +109,7 @@
   "login.title": "Sign in",
   "login.server": "Server address",
   "login.server.info": "Copy the full address from the admin console's Server page: host:port#sha256-fingerprint. The fingerprint is pinned, so a replaced certificate is refused.",
-  "login.server.locked": "Accounts are already signed in on this server, and all accounts must share one server. Sign them all out to switch.",
+  "login.server.locked": "Accounts are signed in on this server, and all accounts must use the same server. To switch, click Change Server; those accounts are signed out when you sign in.",
   "login.server.invalid": "Expected host:port#sha256-fingerprint",
   "login.username": "Username",
   "login.password": "Password",
@@ -324,6 +324,12 @@
   "paste.error.write": "Could not write “{0}”: {1}",
   "paste.error.read": "Could not read “{0}”: {1}",
   "paste.daemonGone": "Lost connection to the background service",
-  "paste.loginWindow": "Files cannot be pasted at the login window"
+  "paste.loginWindow": "Files cannot be pasted at the login window",
+  "login.server.change": "Change Server",
+  "login.switch.title": "Switch servers?",
+  "login.switch.body": "{0} account(s) on server {1} are signed in on this Mac. Switching signs them out first, then signs in on the new server.",
+  "login.switch.confirm": "Switch and Sign In",
+  "notify.action.disconnect": "Disconnect",
+  "notify.action.show": "Show"
  }
 }

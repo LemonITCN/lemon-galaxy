@@ -340,8 +340,10 @@ final class WorkerModel: ObservableObject {
         let f = LoginForm()
         if let server = serverAddress {
             f.server = server
-            // 已有账号时所有账号必须在同一台服务器上；只有临时协助在用时可以换（会结束协助、按新服务器重启被控服务）
+            // 已有账号时所有账号必须在同一台服务器上：地址先锁着，点「更换服务器」才能改，提交时确认后先退出这些账号（与 Linux 被控端一致）；
+            // 只有临时协助在用时可以直接换（会结束协助、按新服务器重启被控服务）
             f.serverLocked = hasAccounts
+            f.originalServer = hasAccounts ? server : nil
             f.serverInUseOnly = !hasAccounts && service != nil
         } else {
             f.server = settings.lastServer
@@ -364,6 +366,12 @@ final class WorkerModel: ObservableObject {
             guard f.newPassword.count >= 8 else { f.error = L("login.change.tooShort"); return }
             guard f.newPassword == f.confirmPassword else { f.error = L("login.change.mismatch"); return }
         }
+        // 换服务器：先在表单里确认（会退出本机已登录的账号）
+        let switching = f.originalServer.map { !LoginForm.sameServer($0, server) } ?? false
+        if switching && !f.switchConfirmed {
+            f.switchPending = true
+            return
+        }
         f.busy = true
         let user = f.username.trimmingCharacters(in: .whitespaces)
         let totp = f.totp.isEmpty ? nil : f.totp
@@ -371,6 +379,12 @@ final class WorkerModel: ObservableObject {
         Task {
             defer { f.busy = false }
             do {
+                if switching && hasAccounts {
+                    // 所有账号必须在同一台服务器上：先退出旧服务器上的账号，内核才会换到新服务器
+                    for a in accounts { try await worker.logout(userId: a.userId) }
+                    f.originalServer = nil
+                    refresh()
+                }
                 let r = try await worker.login(server: server, username: user, password: f.password, totp: totp, newPassword: newPassword, systemUser: nil)
                 switch r {
                 case .success(_, let name):
@@ -453,11 +467,13 @@ final class WorkerModel: ObservableObject {
         refresh()
         guard !selfTest, settings.systemNotifications else { return }
         if account(for: info)?.policy.notify ?? true {
-            Notifier.post(title: L("notify.connected.title"), body: L("notify.connected.body", info.fromUser, Self.shortDevice(info.fromDevice)))
+            Notifier.post(title: L("notify.connected.title"), body: L("notify.connected.body", info.fromUser, Self.shortDevice(info.fromDevice)),
+                          id: "session-" + info.id, category: Notifier.sessionCategory, session: info.id)
         }
     }
 
     func sessionEnded(_ id: String) {
+        if !selfTest { Notifier.remove(id: "session-" + id) }
         aiActivity[id] = nil
         refresh()
     }
@@ -499,6 +515,21 @@ final class LoginForm: ObservableObject, Identifiable {
     @Published var confirmPassword = ""
     @Published var busy = false
     @Published var error: String?
+    /// 已有账号所在的服务器（换成别的要确认）
+    var originalServer: String?
+    /// 显示「更换服务器？」确认
+    @Published var switchPending = false
+    var switchConfirmed = false
+
+    /// 是不是同一台服务器：主机不分大小写，端口与指纹要一样
+    static func sameServer(_ a: String, _ b: String) -> Bool {
+        func norm(_ s: String) -> String {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let hash = t.firstIndex(of: "#") else { return t.lowercased() }
+            return t[..<hash].lowercased() + t[hash...]
+        }
+        return norm(a) == norm(b)
+    }
 
     /// 粗查格式：主机:端口#sha256-指纹（详细校验由内核做，错误文字由内核给）
     static func looksLikeServer(_ s: String) -> Bool {

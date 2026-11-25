@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Localization.shared.apply(setting: settings.language)
         settings.applyAppearance()
         model = WorkerModel(settings: settings, selfTest: false)
+        Notifier.install(model)
         buildMainMenu()
         StatusMenu.shared.install(model: model)
         model.boot()
@@ -45,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             WorkerCore.setLocale(strings.pack.coreLocale, isMock: self.model.core.isMock)
             (self.model.worker as? RemoteWorkerHost)?.setLocale(strings.pack.coreLocale)
             self.buildMainMenu()
+            Notifier.install(self.model)
             StatusMenu.shared.update(self.model)
             self.window?.title = "LemonGalaxyWorker"
         }.store(in: &cancellables)

@@ -109,7 +109,7 @@
   "login.title": "登录账号",
   "login.server": "服务器地址",
   "login.server.info": "在管理后台「服务器信息」页复制完整地址，格式为 主机:端口#sha256-指纹。客户端会固定这个指纹，服务器证书被替换时拒绝连接，防止中间人。",
-  "login.server.locked": "已有账号登录在这台服务器上，所有账号必须在同一台服务器。要换服务器先退出全部账号。",
+  "login.server.locked": "已有账号登录在这台服务器上，所有账号必须在同一台服务器。要换服务器点「更换服务器」，登录时会先退出这些账号。",
   "login.server.invalid": "格式应为 主机:端口#sha256-指纹",
   "login.username": "用户名",
   "login.password": "密码",
@@ -324,6 +324,12 @@
   "paste.error.write": "无法写入“{0}”：{1}",
   "paste.error.read": "读取“{0}”失败：{1}",
   "paste.daemonGone": "与后台服务的连接已断开",
-  "paste.loginWindow": "登录界面不能粘贴文件"
+  "paste.loginWindow": "登录界面不能粘贴文件",
+  "login.server.change": "更换服务器",
+  "login.switch.title": "更换服务器？",
+  "login.switch.body": "这台 Mac 上已经登录了 {0} 个账号，它们在服务器 {1} 上。换到新服务器会先退出这些账号，再用新服务器登录。",
+  "login.switch.confirm": "更换并登录",
+  "notify.action.disconnect": "断开",
+  "notify.action.show": "查看"
  }
 }
