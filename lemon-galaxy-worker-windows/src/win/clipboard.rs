@@ -1,4 +1,5 @@
-//! 剪贴板：文字读写；文件列表读写（复制粘贴文件时主控端先把文件传到暂存区，再把这里设成那些文件）。
+//! 剪贴板：文字读写；文件列表读写（老主控端复制粘贴文件时先把文件传到暂存区，再把这里设成那些文件；
+//! 新主控端只发清单，见 clipole.rs）。
 
 use galaxy_proto::peer::ClipboardData;
 use windows::Win32::Foundation::{HANDLE, HGLOBAL};
@@ -34,6 +35,10 @@ impl Drop for Opened {
 pub fn get() -> Option<ClipboardData> {
     let _g = Opened::open()?;
     unsafe {
+        // 剪贴板里是我们放的主控端文件清单（clipole.rs）：不当成本机复制了东西，免得来回传
+        if IsClipboardFormatAvailable(super::clipole::private_format()).is_ok() {
+            return None;
+        }
         if IsClipboardFormatAvailable(CF_HDROP).is_ok() {
             if let Ok(h) = GetClipboardData(CF_HDROP) {
                 let drop = HDROP(h.0);

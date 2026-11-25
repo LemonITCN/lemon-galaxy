@@ -2,6 +2,7 @@ mod agent;
 mod audio;
 mod capture;
 mod clipboard;
+mod clipole;
 mod compat;
 mod driver;
 mod encode;
@@ -132,6 +133,7 @@ impl WorkerOs for WindowsOs {
         match cmd {
             "service" => Some(service::run_dispatcher(dir)),
             "__lg-session-agent" => Some(agent::main()),
+            "__lg-clip-helper" => Some(clipole::helper_main()),
             "selftest-capture" => Some(agent::selftest(_rest)),
             "install-display-driver" => Some(driver::install_cmd(_rest)),
             "uninstall-display-driver" => Some(driver::uninstall_cmd()),

@@ -64,6 +64,15 @@ pub unsafe fn co_task_mem_free(p: *const core::ffi::c_void) {
     }
 }
 
+/// 分配 COM 内存（交给调用方用 CoTaskMemFree 释放）。同上，从 ole32.dll 导入而不是 combase.dll。
+pub unsafe fn co_task_mem_alloc(n: usize) -> *mut core::ffi::c_void {
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoTaskMemAlloc(cb: usize) -> *mut core::ffi::c_void;
+    }
+    unsafe { CoTaskMemAlloc(n) }
+}
+
 /// Windows 7 起才有的显示配置（虚拟屏用）与设备卸载接口，运行时加载：静态导入的话 Vista / XP 上程序起不来。
 /// 签名与 windows 库的同名函数一致，老系统上返回「不支持」（虚拟屏本来就要 Windows 10 起）。
 #[allow(non_snake_case)]

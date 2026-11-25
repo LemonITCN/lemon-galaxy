@@ -235,6 +235,7 @@ InputEvent =
 
 **各平台的粘贴方做法**（粘贴方是被控端或主控端都一样）：
 - Windows：OLE 数据对象 `CFSTR_FILEDESCRIPTORW` + `CFSTR_FILECONTENTS`（按项给 IStream，读时才取数据），带 `FD_PROGRESSUI`；
+  被控端由服务以控制台会话登录用户的身份起一个剪贴板助手进程（`__lg-clip-helper`，同系统的 rdpclip.exe 做法）放这个对象，资源管理器与它同账号同完整性级别；数据经服务与助手之间单独的管道，不挤键鼠事件；
   资源管理器按 Ctrl+V、右键粘贴都显示它自己的「正在复制」进度框。
 - Linux：FUSE 虚拟目录 `$XDG_RUNTIME_DIR/lemon-galaxy/clip/<清单 id>/…`，剪贴板给 `text/uri-list` 与 `x-special/gnome-copied-files`（copy）指向它，
   文件管理器复制时才读，显示它自己的进度；没有 FUSE（没有 /dev/fuse 或 fusermount3）时，粘贴请求到来时先下载到暂存目录（自己发进度通知）再给路径。

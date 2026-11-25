@@ -221,6 +221,8 @@ pub fn main() -> i32 {
             ToAgent::ClipboardSet { data } => {
                 let _ = ui_tx.send(UiJob::ClipboardSet(data));
             }
+            // 复制粘贴文件在剪贴板助手进程里（clipole.rs），不经画面代理
+            ToAgent::ClipOffer { .. } | ToAgent::ClipOpened { .. } | ToAgent::ClipData { .. } => {}
             ToAgent::ComputerUse { id, request } => {
                 let out = out_tx.clone();
                 std::thread::spawn(move || {

@@ -1,6 +1,7 @@
-//! 服务与画面代理之间的消息（标准输入输出上的长度前缀帧）。
+//! 服务与画面代理、剪贴板助手之间的消息（标准输入输出上的长度前缀帧）。
+//! 剪贴板助手（clipole.rs）只用 Clip* 这几种，服务也只认它发来的这几种。
 
-use galaxy_proto::peer::{ClipboardData, DisplayInfo, ImageData, InputEvent};
+use galaxy_proto::peer::{ClipOffer, ClipboardData, DisplayInfo, ImageData, InputEvent};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
@@ -29,6 +30,12 @@ pub enum ToAgent {
     CursorInVideo { display: u32, show: bool },
     /// AI 应用操作（docs/computer-use.md）：请求 JSON，在用户会话里由 galaxy_host::win_cu 执行
     ComputerUse { id: u64, request: String },
+    /// 复制粘贴文件（docs/protocol.md 8.4.1，发给剪贴板助手）：主控端复制的文件清单，延迟放进剪贴板
+    ClipOffer { id: u64, offer: ClipOffer },
+    /// 打开清单某项的结果：文件现在的大小
+    ClipOpened { stream: u64, result: Result<u64, String> },
+    /// 一块数据（应答 ClipRead；空表示到了末尾）
+    ClipData { stream: u64, result: Result<Vec<u8>, String> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,12 +61,20 @@ pub enum FromAgent {
     Cursor { display: u32, x: i32, y: i32, visible: bool },
     /// 应用操作的结果：给模型的文字 + 可选窗口截图
     ComputerUse { id: u64, text: String, image: Option<ImageData> },
+    /// 文件清单放进剪贴板的结果
+    ClipOfferSet { id: u64, result: Result<(), String> },
+    /// （剪贴板助手）有人粘贴：打开清单 `offer` 的第 `index` 项，从 `offset` 读起（`stream` 由助手编号）
+    ClipOpen { stream: u64, offer: u64, index: u32, offset: u64 },
+    /// 要下一块（最多 `max` 字节）。一条流同时只有一个请求，数据不会堆在管道里挤住键鼠事件
+    ClipRead { stream: u64, max: u32 },
+    /// 不读了
+    ClipClose { stream: u64 },
 }
 
 impl FromAgent {
     pub fn reply_id(&self) -> Option<u64> {
         match self {
-            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::PrivacyResult { id, .. } | Self::AudioStarted { id, .. } | Self::VirtualAdded { id, .. } | Self::VirtualRemoved { id, .. } | Self::VirtualState { id, .. } | Self::ComputerUse { id, .. } => Some(*id),
+            Self::Displays { id, .. } | Self::Started { id, .. } | Self::Screenshot { id, .. } | Self::Clipboard { id, .. } | Self::Pong { id } | Self::PrivacyResult { id, .. } | Self::AudioStarted { id, .. } | Self::VirtualAdded { id, .. } | Self::VirtualRemoved { id, .. } | Self::VirtualState { id, .. } | Self::ComputerUse { id, .. } | Self::ClipOfferSet { id, .. } => Some(*id),
             _ => None,
         }
     }
