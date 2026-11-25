@@ -38,6 +38,8 @@ internal static class SelfTest
             if (L.Packs.Count < 2) Problems.Add("语言包少于两个：" + string.Join(", ", L.Packs.Select(p => p.Code)));
             Protocol();
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            // 每张图都是新建的一棵界面；前面几张留下的区域不能再跟着状态重建（否则会把弹层卡片挪到旧的那棵里去）
+            Region.RequireAttached = true;
             Styles.Install(app);
             if (Styles.LoadError != null) Problems.Add("控件模板解析失败：" + Styles.LoadError);
             foreach (var lang in new[] { "zh-Hans", "en" })

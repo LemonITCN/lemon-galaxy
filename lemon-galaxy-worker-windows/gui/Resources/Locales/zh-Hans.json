@@ -265,6 +265,7 @@
   "tray.stillRunning.title": "LemonGalaxy 还在托盘里",
   "tray.stillRunning.body": "关掉窗口不影响远程控制。要退出界面，在托盘图标的右键菜单里选「退出界面」。",
   "notify.connected.title": "有人连入了这台电脑",
-  "notify.connected.body": "{0} 从设备 {1} 连入。"
+  "notify.connected.body": "{0} 从设备 {1} 连入。",
+  "about.runsAs.value": "{0}（{1}）"
  }
 }

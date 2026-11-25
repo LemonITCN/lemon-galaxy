@@ -68,7 +68,8 @@ internal static partial class Pages
         var col = K.Col(16, items);
         col.HorizontalAlignment = HorizontalAlignment.Center;
         col.VerticalAlignment = VerticalAlignment.Center;
-        col.MaxWidth = 520;
+        // 安装卡片 540 宽，这里要放得下
+        col.MaxWidth = 580;
         return new Grid { Background = Th.Content, Children = { col } };
     }
 

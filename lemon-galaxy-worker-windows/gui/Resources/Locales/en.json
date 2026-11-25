@@ -25,7 +25,7 @@
   "state.notRunning": "Service not running",
   "state.connecting": "Connecting to the service…",
   "state.disabled": "Remote access disabled",
-  "state.ai": "AI is operating this computer",
+  "state.ai": "AI is operating",
   "state.controlled": "Being controlled remotely",
   "state.noAccount": "Running, no account signed in",
   "state.online": "Online, waiting for connections",
@@ -265,6 +265,7 @@
   "tray.stillRunning.title": "LemonGalaxy is still in the tray",
   "tray.stillRunning.body": "Closing the window does not affect remote control. To exit the app, right-click the tray icon and choose Exit App.",
   "notify.connected.title": "Someone connected to this computer",
-  "notify.connected.body": "{0} connected from device {1}."
+  "notify.connected.body": "{0} connected from device {1}.",
+  "about.runsAs.value": "{0} ({1})"
  }
 }

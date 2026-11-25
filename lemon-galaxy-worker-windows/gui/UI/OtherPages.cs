@@ -186,7 +186,7 @@ internal static partial class Pages
             var rows = W.Rows(
                 W.Row(L.T("about.appVersion"), W.Value(AppInfo.Version)),
                 W.Row(L.T("about.serviceVersion"), W.Value(s?.Version ?? "—")),
-                W.Row(L.T("about.runsAs"), W.Value(s == null ? "—" : $"{mode}（{s.Service.User}）")),
+                W.Row(L.T("about.runsAs"), W.Value(s == null ? "—" : L.T("about.runsAs.value", mode, s.Service.User))),
                 W.Row(L.T("about.dataDir"), W.Value(s?.DataDir ?? "—")),
                 W.Row(L.T("about.pipe"), W.Value(app.Client?.PipeName is { } p ? @"\\.\pipe\" + p : "—", mono: true)),
                 W.Row(L.T("about.installDir"), W.Value(AppInfo.BaseDir.TrimEnd('\\'))),
