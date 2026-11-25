@@ -111,7 +111,22 @@ pub trait Workspace: Send + Sync {
     fn fetch(&self, _url: &str, _max_bytes: usize) -> BoxFut<'_, anyhow::Result<(String, String, Vec<u8>)>> {
         Box::pin(async { anyhow::bail!("这个客户端不支持抓取网页") })
     }
+    /// 远程开机：经同一网络里在线的设备给目标发唤醒包，返回说明文字。
+    fn wake(&self, _target: &str) -> BoxFut<'_, anyhow::Result<String>> {
+        Box::pin(async { anyhow::bail!("这个客户端不支持远程开机") })
+    }
 }
+
+/// 外部智能体（MCP 客户端）调用一个工具的结果。
+#[derive(Clone, Debug)]
+pub struct ExternalResult {
+    pub text: String,
+    pub image: Option<ImageData>,
+    pub is_error: bool,
+}
+
+/// 本机与目标之间传文件的上限（整个读进内存）
+pub const TRANSFER_MAX: u64 = 256 * 1024 * 1024;
 
 /// 用户消息里引用的资源（界面显示用）。
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -241,6 +256,8 @@ struct State {
     allowed_apps: HashSet<String>,
     /// 本轮用过应用操作的目标（结束时收起 AI 光标）
     cu_used: HashSet<String>,
+    /// 正在进行的外部调用（MCP）数
+    external_calls: u32,
 }
 
 #[derive(Clone)]
@@ -260,6 +277,29 @@ pub struct Agent {
     ui: Arc<dyn AgentUi>,
     st: Mutex<State>,
     stop_tx: watch::Sender<bool>,
+}
+
+/// 外部调用的收尾：正常结束只减计数；中途被丢弃（客户端断开）时先撤销挂着的确认。
+struct ExternalGuard {
+    agent: Arc<Agent>,
+    id: String,
+    done: bool,
+}
+
+impl Drop for ExternalGuard {
+    fn drop(&mut self) {
+        if !self.done {
+            self.agent.cancel_external(&self.id);
+        }
+        let last = {
+            let mut s = self.agent.st.lock();
+            s.external_calls = s.external_calls.saturating_sub(1);
+            s.external_calls == 0
+        };
+        if last {
+            self.agent.ui.event(AgentEvent::Status { running: false, step: 0 });
+        }
+    }
 }
 
 fn new_id() -> String {
@@ -310,6 +350,7 @@ impl Agent {
                 catalog: vec![],
                 allowed_apps: HashSet::new(),
                 cu_used: HashSet::new(),
+                external_calls: 0,
             }),
             stop_tx,
         })
@@ -625,6 +666,75 @@ impl Agent {
             }), &[]));
         }
         v
+    }
+
+    /// 外部智能体（MCP 客户端）直接调用一个工具：与模型调用走同一套目标确认、风险判定、档位与确认卡片，
+    /// 只是没有模型循环。可以并发；调用方丢弃这个 future（客户端断开）即取消，挂着的确认随之撤销。
+    pub async fn call_external(self: &Arc<Self>, name: &str, args: Value) -> ExternalResult {
+        let id = new_id();
+        let first = {
+            let mut s = self.st.lock();
+            s.external_calls += 1;
+            s.external_calls == 1
+        };
+        if first {
+            // 界面点过「停止」后，新的调用照常进行
+            let _ = self.stop_tx.send(false);
+            self.ui.event(AgentEvent::Status { running: true, step: 0 });
+        }
+        let mut guard = ExternalGuard { agent: self.clone(), id: id.clone(), done: false };
+        let args = if args.is_object() { args } else { json!({}) };
+        let (text, image) = self.handle_tool(&id, name, &args.to_string()).await;
+        guard.done = true;
+        drop(guard);
+        let is_error = match self.result_ok(&id) {
+            Some(ok) => !ok,
+            None => name != "wait",
+        };
+        self.trim_history(500);
+        let (red, n) = redact(&text);
+        let mut text = truncate(&red, 64 * 1024);
+        if n > 0 {
+            text.push_str(&format!("\n[已遮蔽 {n} 处敏感信息]"));
+        }
+        ExternalResult { text, image, is_error }
+    }
+
+    fn result_ok(&self, id: &str) -> Option<bool> {
+        self.st.lock().history.iter().rev().find_map(|m| match m {
+            AgentMessage::Tool { call, result } if call.call_id == id => Some(result.as_ref().map(|r| r.ok).unwrap_or(false)),
+            _ => None,
+        })
+    }
+
+    /// 外部调用没有模型上下文要保留：界面记录只留最近若干条
+    fn trim_history(&self, keep: usize) {
+        let mut s = self.st.lock();
+        let n = s.history.len();
+        if n > keep {
+            s.history.drain(..n - keep);
+        }
+    }
+
+    /// 外部调用被取消（客户端断开）：撤销这一步挂着的确认，界面上的卡片标成已取消。
+    fn cancel_external(&self, id: &str) {
+        let pending: Vec<String> = {
+            let mut s = self.st.lock();
+            let keys: Vec<String> = s.approvals.keys().filter(|k| k.as_str() == id || k.starts_with(&format!("{id}-"))).cloned().collect();
+            for k in &keys {
+                s.approvals.remove(k);
+            }
+            s.history
+                .iter()
+                .filter_map(|m| match m {
+                    AgentMessage::Tool { call, result: None } if call.call_id == id || call.call_id.starts_with(&format!("{id}-")) => Some(call.call_id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        for cid in pending {
+            self.finish_tool(&cid, ToolResultView { ok: false, summary: "调用方已取消".into(), output: String::new(), image: None, denied: true });
+        }
     }
 
     /// 用户发来一条消息，运行直到模型停止调用工具。
@@ -1031,6 +1141,7 @@ impl Agent {
                 return (self.account_tool(id, name, &args).await, None);
             }
             "update_plan" => return (self.update_plan(id, &args), None),
+            "wake_device" if self.ws.is_some() => return (self.wake_tool(id, &args).await, None),
             "web_fetch" if self.ws.is_some() => return (self.web_fetch(id, &args, &model_reason).await, None),
             _ => {}
         }
@@ -1101,6 +1212,23 @@ impl Agent {
                 (risk::assess_file(risk::FileAction::Write { exists }, &p), format!("{} {p}", if name == "edit_file" { "修改" } else { "写入" }), det)
             }
             "terminal_open" => (risk::Assessment { level: Risk::Normal, reasons: vec![], commands: vec![] }, "打开交互式终端".into(), String::new()),
+            "list_displays" => (risk::Assessment { level: Risk::Read, reasons: vec![], commands: vec![] }, "查看屏幕列表".into(), String::new()),
+            "upload_file" => {
+                let p = args["path"].as_str().unwrap_or("").to_string();
+                let local = args["local_path"].as_str().unwrap_or("").to_string();
+                let exists = self.exec.exists(&target.id, &p).await.unwrap_or(false);
+                (risk::assess_file(risk::FileAction::Write { exists }, &p), format!("上传本机 {local} → {p}"), local)
+            }
+            "download_file" => {
+                let p = args["path"].as_str().unwrap_or("").to_string();
+                let local = args["local_path"].as_str().unwrap_or("").to_string();
+                let mut a = risk::assess_file(risk::FileAction::Read, &p);
+                if a.level < Risk::Forbidden && expand_local(&local).map(|x| x.exists()).unwrap_or(false) {
+                    a.level = a.level.max(Risk::Dangerous);
+                    a.reasons.push("会覆盖本机上已有的文件".into());
+                }
+                (a, format!("下载 {p} → 本机 {local}"), p)
+            }
             "terminal_send" => {
                 let k = args["keys"].as_str().unwrap_or("").to_string();
                 // 发到交互终端的文字按命令判定
@@ -1217,6 +1345,32 @@ impl Agent {
                 let r = ToolResultView { ok: false, summary: msg.clone(), output: String::new(), image: None, denied: msg.contains("禁止") || msg.contains("只读") };
                 self.finish_tool(id, r);
                 (format!("执行失败：{msg}"), None)
+            }
+        }
+    }
+
+    /// 远程开机：只读档拒绝，其余档直接发（唤醒包不改变任何数据）。
+    async fn wake_tool(&self, id: &str, args: &Value) -> String {
+        let tid = args["target"].as_str().unwrap_or("").to_string();
+        let name = self.st.lock().catalog.iter().find(|c| c.id == tid || c.name == tid).map(|c| c.name.clone()).unwrap_or_else(|| tid.clone());
+        let view = ToolCallView { call_id: id.to_string(), tool: "wake_device".into(), target_id: tid.clone(), target_name: name.clone(), summary: format!("远程开机 {name}"), detail: String::new(), risk: Risk::Normal, risk_reasons: vec![], model_reason: args["reason"].as_str().unwrap_or("").to_string(), image: None };
+        self.st.lock().history.push(AgentMessage::Tool { call: view.clone(), result: None });
+        self.ui.event(AgentEvent::ToolProposed { call: view, needs_approval: false });
+        if matches!(self.current_mode(), AiMode::Off | AiMode::ReadOnly) {
+            self.finish_tool(id, ToolResultView { ok: false, summary: "已拒绝：当前为只读模式".into(), output: String::new(), image: None, denied: true });
+            return "被拒绝：当前为只读模式".into();
+        }
+        self.ui.event(AgentEvent::ToolStarted { call_id: id.to_string() });
+        let Some(ws) = self.ws.clone() else { return "不支持".into() };
+        match ws.wake(&tid).await {
+            Ok(t) => {
+                self.finish_tool(id, ToolResultView { ok: true, summary: "已发送唤醒包".into(), output: t.clone(), image: None, denied: false });
+                t
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                self.finish_tool(id, ToolResultView { ok: false, summary: msg.clone(), output: String::new(), image: None, denied: false });
+                format!("远程开机失败：{msg}")
             }
         }
     }
@@ -1528,6 +1682,37 @@ impl Agent {
                 let summary = text.lines().next().unwrap_or("").chars().take(80).collect::<String>();
                 let img = if self.model.lock().vision { img } else { None };
                 Ok((text, img, summary))
+            }
+            "list_displays" => {
+                let ds = self.exec.displays(&t.id).await?;
+                let mut out = String::new();
+                for d in &ds {
+                    out.push_str(&format!("display={}\t{}\t{}x{}\t缩放 {}{}{}\n", d.id, d.name, d.width, d.height, d.scale, if d.primary { "\t主屏" } else { "" }, if d.is_virtual { "\t虚拟屏" } else { "" }));
+                }
+                let n = ds.len();
+                Ok((if out.is_empty() { "没有可用的屏幕（可能没有图形界面）".into() } else { out }, None, format!("{n} 块屏幕")))
+            }
+            "upload_file" => {
+                let local = expand_local(&s("local_path")).ok_or_else(|| anyhow::anyhow!("local_path 要写本机的绝对路径"))?;
+                let meta = tokio::fs::metadata(&local).await.map_err(|e| anyhow::anyhow!("读不到本机文件 {}：{e}", local.display()))?;
+                anyhow::ensure!(meta.is_file(), "{} 不是文件", local.display());
+                anyhow::ensure!(meta.len() <= TRANSFER_MAX, "文件 {} 字节，超过单次上限 {} MB", meta.len(), TRANSFER_MAX >> 20);
+                let data = tokio::fs::read(&local).await?;
+                let n = data.len();
+                let backup = self.exec.write_file(&t.id, &s("path"), data, None, origin).await?;
+                let note = backup.map(|b| format!("（原文件已备份到 {b}）")).unwrap_or_default();
+                Ok((format!("已上传 {n} 字节到 {}{note}", s("path")), None, format!("{n} 字节")))
+            }
+            "download_file" => {
+                let local = expand_local(&s("local_path")).ok_or_else(|| anyhow::anyhow!("local_path 要写本机的绝对路径"))?;
+                let data = self.exec.read_file(&t.id, &s("path"), TRANSFER_MAX + 1).await?;
+                anyhow::ensure!((data.len() as u64) <= TRANSFER_MAX, "文件超过单次上限 {} MB", TRANSFER_MAX >> 20);
+                if let Some(dir) = local.parent() {
+                    tokio::fs::create_dir_all(dir).await?;
+                }
+                let n = data.len();
+                tokio::fs::write(&local, data).await.map_err(|e| anyhow::anyhow!("写不了本机文件 {}：{e}", local.display()))?;
+                Ok((format!("已下载 {n} 字节到本机 {}", local.display()), None, format!("{n} 字节")))
             }
             "system_info" => {
                 let (script, shell) = if t.platform == Platform::Windows { (SYSINFO_WIN, Some("powershell.exe".to_string())) } else { (SYSINFO_POSIX, None) };
@@ -1906,6 +2091,17 @@ fn galaxy_sha256(data: &[u8]) -> [u8; 32] {
         out[i * 4..i * 4 + 4].copy_from_slice(&h[i].to_be_bytes());
     }
     out
+}
+
+/// 本机路径：只接受绝对路径或 ~ 开头（相对路径不知道相对谁，不猜）。
+pub fn expand_local(p: &str) -> Option<std::path::PathBuf> {
+    let p = p.trim();
+    if let Some(rest) = p.strip_prefix("~/").or(if p == "~" { Some("") } else { None }) {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        return Some(std::path::PathBuf::from(home).join(rest));
+    }
+    let pb = std::path::PathBuf::from(p);
+    if pb.is_absolute() { Some(pb) } else { None }
 }
 
 pub fn truncate(s: &str, max: usize) -> String {

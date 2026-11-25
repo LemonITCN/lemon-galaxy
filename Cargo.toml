@@ -7,6 +7,7 @@ members = [
     "lemon-galaxy-common-rust/galaxy-client",
     "lemon-galaxy-common-rust/galaxy-host",
     "lemon-galaxy-common-rust/galaxy-agent",
+    "lemon-galaxy-common-rust/galaxy-mcp",
     "lemon-galaxy-common-rust/galaxy-ffi",
     "lemon-galaxy-common-rust/galaxy-dev",
     "lemon-galaxy-common-rust/galaxy-worker",
@@ -32,6 +33,7 @@ galaxy-client = { path = "lemon-galaxy-common-rust/galaxy-client" }
 galaxy-worker = { path = "lemon-galaxy-common-rust/galaxy-worker" }
 galaxy-host = { path = "lemon-galaxy-common-rust/galaxy-host" }
 galaxy-agent = { path = "lemon-galaxy-common-rust/galaxy-agent" }
+galaxy-mcp = { path = "lemon-galaxy-common-rust/galaxy-mcp" }
 
 anyhow = "1"
 thiserror = "2"

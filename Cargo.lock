@@ -1899,6 +1899,7 @@ version = "0.1.0"
 dependencies = [
  "android_logger",
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "futures",
@@ -1906,6 +1907,7 @@ dependencies = [
  "galaxy-client",
  "galaxy-crypto",
  "galaxy-host",
+ "galaxy-mcp",
  "galaxy-net",
  "galaxy-proto",
  "jni-sys 0.3.1",
@@ -1955,6 +1957,27 @@ dependencies = [
  "vt100 0.15.2",
  "windows",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "galaxy-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "galaxy-agent",
+ "galaxy-proto",
+ "parking_lot 0.12.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -1,0 +1,25 @@
+[package]
+name = "galaxy-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LemonGalaxy 本机 MCP 服务：把 AI 智能体的工具（经同一套权限判定与确认）开放给本机的外部智能体"
+
+[dependencies]
+galaxy-proto.workspace = true
+galaxy-agent.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+base64.workspace = true
+subtle.workspace = true
+reqwest.workspace = true
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+
+[dev-dependencies]
+bytes.workspace = true

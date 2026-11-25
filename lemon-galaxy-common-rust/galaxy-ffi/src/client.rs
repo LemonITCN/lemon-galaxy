@@ -60,7 +60,7 @@ struct Online {
     stop: watch::Sender<bool>,
 }
 
-struct Inner {
+pub(crate) struct Inner {
     store: Arc<dyn SecureStore>,
     listener: Arc<dyn ClientListener>,
     identity: Identity,
@@ -84,7 +84,7 @@ struct Inner {
 
 #[derive(uniffi::Object)]
 pub struct GalaxyClient {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
 fn meta_from_config() -> DeviceMeta {
@@ -112,7 +112,7 @@ impl Inner {
         }
     }
 
-    fn api(&self) -> Result<Api> {
+    pub(crate) fn api(&self) -> Result<Api> {
         self.api.lock().clone().ok_or_else(|| GalaxyError::Auth { code: "unauthorized".into(), detail: "未登录".into() })
     }
 
@@ -340,6 +340,8 @@ impl Inner {
     }
 
     fn local_logout(&self) {
+        // 外部智能体（MCP）用的会话随账号一起作废
+        crate::mcp::reset_clients();
         if let Some(o) = self.online.lock().take() {
             let _ = o.stop.send(true);
             o.signal.stop();
@@ -1122,6 +1124,12 @@ pub(crate) struct ChatWorkspace {
 }
 
 impl ChatWorkspace {
+    /// MCP 用（手机上没有 MCP 服务）
+    #[cfg_attr(any(target_os = "ios", target_os = "android"), allow(dead_code))]
+    pub(crate) fn new(inner: &Arc<Inner>, exec: Arc<galaxy_client::ai::SessionExecutor>) -> Arc<Self> {
+        Arc::new(Self { inner: Arc::downgrade(inner), exec })
+    }
+
     fn inner(&self) -> anyhow::Result<Arc<Inner>> {
         self.inner.upgrade().ok_or_else(|| anyhow::anyhow!("已退出登录"))
     }
@@ -1302,6 +1310,25 @@ impl ag_core::Workspace for ChatWorkspace {
             let name = if info.label.is_empty() { format!("{}@{}", info.username, info.host) } else { info.label.clone() };
             self.exec.add_ssh(target, s, name).await;
             Ok(())
+        })
+    }
+
+    fn wake(&self, target: &str) -> ag_core::BoxFut<'_, anyhow::Result<String>> {
+        let target = target.to_string();
+        Box::pin(async move {
+            let inner = self.inner()?;
+            let d = match DeviceId::from_hex(&target) {
+                Some(d) => d,
+                None => {
+                    let id = self.catalog_now()?.into_iter().find(|c| c.name == target || c.name.eq_ignore_ascii_case(&target)).map(|c| c.id).unwrap_or_default();
+                    DeviceId::from_hex(&id).ok_or_else(|| anyhow::anyhow!("找不到设备「{target}」：只能唤醒账号里的设备，先用 list_devices 查 id"))?
+                }
+            };
+            let c = inner.online.lock().as_ref().map(|o| o.connector.clone()).ok_or_else(|| anyhow::anyhow!("尚未连上服务器"))?;
+            let list = inner.devices.lock().clone();
+            let via = galaxy_client::wake::wake(&c, &list, inner.identity.device_id, d).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            let via: Vec<String> = via.into_iter().map(|v| if v.is_empty() { "本机".to_string() } else { v }).collect();
+            Ok(format!("已经由 {} 发出唤醒包；设备开机并连上服务器一般要几十秒到几分钟，之后用 list_devices 看是否在线", via.join("、")))
         })
     }
 

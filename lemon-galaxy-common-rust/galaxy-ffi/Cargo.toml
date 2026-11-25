@@ -41,10 +41,15 @@ bytes.workspace = true
 uuid.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uniffi = { version = "=0.32.0" }
+base64.workspace = true
 
 # H.264 软解（Windows 主控端用，打开 decoder 特性才编进去；其他端用系统硬件解码）。
 # Swift / Kotlin 绑定不开这个特性生成，各平台的库与绑定保持一致。
 openh264 = { version = "0.9", optional = true }
+
+# 本机 MCP 服务只在桌面端编进去（手机上同名接口返回「不支持」，各端绑定一致）
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+galaxy-mcp.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
