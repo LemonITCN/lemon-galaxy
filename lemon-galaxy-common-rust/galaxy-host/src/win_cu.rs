@@ -141,6 +141,44 @@ pub(crate) fn wide(s: &str) -> Vec<u16> {
 struct Win {
     hwnd: HWND,
     title: String,
+    kind: WinKind,
+}
+
+/// 窗口类别：默认窗口取主窗口，不取 Z 序最上面的（浏览器最上面常是地址栏下拉、气泡、对话框）
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum WinKind {
+    Main,
+    Dialog,
+    Popup,
+}
+
+impl WinKind {
+    fn word(self) -> &'static str {
+        match self {
+            WinKind::Main => "",
+            WinKind::Dialog => " 对话框",
+            WinKind::Popup => " 弹出",
+        }
+    }
+}
+
+fn win_kind(h: HWND) -> WinKind {
+    unsafe {
+        let style = GetWindowLongW(h, GWL_STYLE) as u32;
+        let caption = style & WS_CAPTION.0 == WS_CAPTION.0;
+        let owned = GetWindow(h, GW_OWNER).map(|o| !o.is_invalid()).unwrap_or(false);
+        if class_name(h) == "#32770" {
+            return WinKind::Dialog;
+        }
+        if owned {
+            return if caption { WinKind::Dialog } else { WinKind::Popup };
+        }
+        if style & WS_POPUP.0 != 0 && !caption && style & WS_THICKFRAME.0 == 0 && style & WS_MAXIMIZE.0 == 0 {
+            // 没有标题栏、不能拉伸的无主弹出窗口（Chromium 的浏览器主窗口有 WS_CAPTION / WS_THICKFRAME）
+            return WinKind::Popup;
+        }
+        WinKind::Main
+    }
 }
 
 struct App {
@@ -386,8 +424,9 @@ impl State {
                 continue;
             }
             let title = window_text(h);
+            let kind = win_kind(h);
             if let Some(a) = list.iter_mut().find(|a| a.pid == pid) {
-                a.wins.push(Win { hwnd: h, title });
+                a.wins.push(Win { hwnd: h, title, kind });
                 continue;
             }
             let path = exe_path(pid).unwrap_or_default();
@@ -399,7 +438,14 @@ impl State {
                 self.desc.entry(path.clone()).or_insert_with(|| file_description(&path).unwrap_or_default()).clone()
             };
             let name = if name.is_empty() { if stem.is_empty() { title.clone() } else { stem } } else { name };
-            list.push(App { pid, exe, name, wins: vec![Win { hwnd: h, title }], front: pid == fg_pid });
+            list.push(App { pid, exe, name, wins: vec![Win { hwnd: h, title, kind }], front: pid == fg_pid });
+        }
+        // 窗口顺序：主窗口 > 前台窗口 > 面积大的（同类里稳定，编号尽量不变）
+        for a in &mut list {
+            a.wins.sort_by_key(|w| {
+                let r = frame_rect(w.hwnd);
+                (w.kind, w.hwnd != fg, -((r.right - r.left) as i64 * (r.bottom - r.top) as i64))
+            });
         }
         list
     }
@@ -491,15 +537,41 @@ impl State {
             None => Geo { left: fr.left, top: fr.top, scale: 1.0 },
         };
         let uia = self.uia()?;
-        let mut tree = Tree { uia: &uia, req: cache_request(&uia)?, walker: unsafe { uia.ControlViewWalker() }.map_err(|e| err(&format!("UI Automation：{e}")))?, geo, win: fr, max: max_nodes, deadline: Instant::now() + Duration::from_secs(8), out: String::new(), elems: Vec::new(), labels: Vec::new(), truncated: false };
-        let root = unsafe { uia.ElementFromHandleBuildCache(hwnd, &tree.req) }.map_err(|e| err(&format!("读取窗口控件失败：{e}")))?;
-        tree.walk(&root, 0, true);
+        let req = cache_request(&uia)?;
+        let walker = unsafe { uia.ControlViewWalker() }.map_err(|e| err(&format!("UI Automation：{e}")))?;
+        // Chromium（Chrome / Edge / Electron）第一次被读取时才打开辅助功能，控件树要过一会儿才填满：等一等再读
+        // （只在本进程第一次读这个窗口时等；之后空的网页就是真的空，比如 about:blank）
+        let chromium = class_name(hwnd).starts_with("Chrome_WidgetWin") && !self.snaps.get(&app.pid).map(|s| s.hwnd == hwnd).unwrap_or(false);
+        let first_try = Instant::now();
+        let mut tree = loop {
+            let mut tree = Tree { uia: &uia, req: req.clone(), walker: walker.clone(), geo, win: fr, max: max_nodes, deadline: Instant::now() + Duration::from_secs(8), out: String::new(), elems: Vec::new(), labels: Vec::new(), depths: Vec::new(), roles: Vec::new(), truncated: false };
+            let root = unsafe { uia.ElementFromHandleBuildCache(hwnd, &tree.req) }.map_err(|e| err(&format!("读取窗口控件失败：{e}")))?;
+            tree.walk(&root, 0, true);
+            if !chromium || tree.truncated || !tree.looks_unloaded() || first_try.elapsed() > Duration::from_millis(3000) {
+                break tree;
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        };
+        tree.depths.clear();
         let (w, h) = (fr.right - fr.left, fr.bottom - fr.top);
         let mut text = format!("应用 {}（{}，pid {}），窗口 {}/{}「{}」 位置 ({},{}) 大小 {}×{}", app.name, app.exe, app.pid, wi, app.wins.len(), trunc(&app.wins[wi].title, 100), fr.left, fr.top, w, h);
         match &shot {
             Some((img, _)) => text += &format!("，截图 {}×{}\n", img.width, img.height),
             None if iconic => text += "，窗口已最小化（没有截图；perform_action 对 [0] 执行 Restore 可以恢复，会显示窗口）\n",
             None => text += "，截图失败\n",
+        }
+        let others: Vec<String> = app
+            .wins
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != wi)
+            .map(|(j, w)| {
+                let r = frame_rect(w.hwnd);
+                format!("[{j}]「{}」{}×{}{}", trunc(&w.title, 50), r.right - r.left, r.bottom - r.top, w.kind.word())
+            })
+            .collect();
+        if !others.is_empty() {
+            text += &format!("其他窗口（用 window 参数指定）：{}\n", others.join("；"));
         }
         text += &tree.out;
         if tree.truncated {
@@ -647,45 +719,72 @@ impl State {
     fn type_text(&mut self, v: &Value) -> Result<Reply, String> {
         let (app, hwnd) = self.target(v)?;
         let text = v["text"].as_str().ok_or_else(|| err("type_text 需要 text"))?.to_string();
+        let replace = v["replace"].as_bool();
         if let Some((i, e, label)) = self.element(app.pid, v)? {
             if let Some((cx, cy)) = elem_center(&e) {
                 cursor::move_to(hwnd, cx, cy);
                 std::thread::sleep(CURSOR_MOVE);
             }
             let h = unsafe { e.CurrentNativeWindowHandle() }.ok().filter(|h| !h.is_invalid());
+            // 单行输入框（地址栏、搜索框）默认先清空再输入，不然重复输入会接在旧内容后面
+            let replace = replace.unwrap_or_else(|| single_line(&e, h));
             let how = match h {
                 Some(h) if is_edit_class(h) => {
+                    if replace {
+                        send_timeout(h, EM_SETSEL, WPARAM(0), LPARAM(-1));
+                    }
                     edit_insert(h, &text)?;
-                    "插入到光标处".to_string()
+                    if replace { "替换原有内容" } else { "插入到光标处" }.to_string()
                 }
                 _ => {
-                    // 没有自己窗口句柄的控件（WPF / WinUI / 网页）：在原值后面追加，避免 SetFocus 把窗口拉到前台
-                    match value_pattern(&e) {
-                        Some(p) if !unsafe { p.CurrentIsReadOnly() }.map(|b| b.as_bool()).unwrap_or(true) => {
-                            let old = unsafe { p.CurrentValue() }.map(|b| b.to_string()).unwrap_or_default();
-                            unsafe { p.SetValue(&BSTR::from(format!("{old}{text}"))) }.map_err(|e| err(&format!("写入失败：{e}")))?;
-                            "追加到原有内容末尾".to_string()
+                    // 没有自己窗口句柄的控件（网页、Chromium 地址栏、WPF / WinUI）：先让它获得焦点，再发键盘消息逐字输入。
+                    // 不用 ValuePattern 直接写值：Chromium 的输入处理不知道（地址栏回车不跳转，网页收不到 input 事件）
+                    let target = h.unwrap_or_else(|| focus_hwnd(hwnd));
+                    if focus_element(&e) {
+                        let mut how = String::from("键盘消息逐字输入");
+                        if replace {
+                            how = format!("{}后{how}", select_all(&e, target));
                         }
-                        _ => {
-                            let target = h.unwrap_or_else(|| focus_hwnd(hwnd));
-                            post_chars(target, &text);
-                            "窗口消息逐字输入".to_string()
+                        post_chars(target, &text);
+                        how
+                    } else {
+                        match value_pattern(&e) {
+                            Some(p) if !unsafe { p.CurrentIsReadOnly() }.map(|b| b.as_bool()).unwrap_or(true) => {
+                                let old = if replace { String::new() } else { unsafe { p.CurrentValue() }.map(|b| b.to_string()).unwrap_or_default() };
+                                unsafe { p.SetValue(&BSTR::from(format!("{old}{text}"))) }.map_err(|e| err(&format!("写入失败：{e}")))?;
+                                format!("没能让它获得焦点，改用 ValuePattern {}；网页 / 浏览器可能不认，没效果时先 click 它再 type_text", if replace { "整体替换" } else { "追加到末尾" })
+                            }
+                            _ => {
+                                post_chars(target, &text);
+                                "没能让它获得焦点，键盘消息发给了窗口当前焦点".to_string()
+                            }
                         }
                     }
                 }
             };
-            return self.after(app.pid, hwnd, format!("已在 [{i}] {label} 输入「{}」（{how}）", trunc(&text, 80)));
+            let now = settle_value(&e, &text);
+            return self.after(app.pid, hwnd, format!("已在 [{i}] {label} 输入「{}」（{how}）{now}", trunc(&text, 80)));
         }
         let f = focus_hwnd(hwnd);
         let (cx, cy) = caret_pos(hwnd, f);
         cursor::move_to(hwnd, cx, cy);
         std::thread::sleep(CURSOR_MOVE);
+        let replace = replace.unwrap_or(false);
         let how = if is_edit_class(f) {
+            if replace {
+                send_timeout(f, EM_SETSEL, WPARAM(0), LPARAM(-1));
+            }
             edit_insert(f, &text)?;
-            "插入到焦点输入框的光标处"
+            if replace { "替换焦点输入框的内容" } else { "插入到焦点输入框的光标处" }.to_string()
         } else {
+            let mut how = String::from("键盘消息逐字输入到焦点控件");
+            if replace {
+                let a = keys::parse("ctrl+a").map_err(|e| err(&e))?;
+                keys::send(f, &a).map_err(|e| err(&e))?;
+                how = format!("ctrl+a 全选后{how}");
+            }
             post_chars(f, &text);
-            "窗口消息逐字输入到焦点控件"
+            how
         };
         self.after(app.pid, hwnd, format!("已输入「{}」（{how}）", trunc(&text, 80)))
     }
@@ -982,6 +1081,65 @@ fn value_pattern(e: &IUIAutomationElement) -> Option<IUIAutomationValuePattern> 
     unsafe { e.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }.ok()
 }
 
+/// 单行输入框：标准编辑框没有 ES_MULTILINE；其余要是 Edit 类型，且网页的 aria 属性里没有 multiline=true
+fn single_line(e: &IUIAutomationElement, h: Option<HWND>) -> bool {
+    if let Some(h) = h.filter(|h| is_edit_class(*h)) {
+        return unsafe { GetWindowLongW(h, GWL_STYLE) } as u32 & ES_MULTILINE_STYLE == 0;
+    }
+    if unsafe { e.CurrentControlType() }.map(|c| c.0).unwrap_or(0) != 50004 {
+        return false;
+    }
+    let aria = unsafe { e.CurrentAriaProperties() }.map(|b| b.to_string().to_lowercase()).unwrap_or_default();
+    !aria.contains("multiline=true")
+}
+
+/// 让控件获得键盘焦点（UIA SetFocus）；已经有焦点就不动。Chromium 的控件在后台窗口里也能拿到焦点，不会激活窗口
+fn focus_element(e: &IUIAutomationElement) -> bool {
+    unsafe {
+        if e.CurrentHasKeyboardFocus().map(|b| b.as_bool()).unwrap_or(false) {
+            return true;
+        }
+        if e.SetFocus().is_err() {
+            return false;
+        }
+    }
+    std::thread::sleep(Duration::from_millis(60));
+    true
+}
+
+/// 全选控件里的文字（随后输入的字会替换掉它）：TextPattern 选中全文，不行再发 ctrl+a
+fn select_all(e: &IUIAutomationElement, target: HWND) -> &'static str {
+    unsafe {
+        if let Ok(tp) = e.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
+            if tp.DocumentRange().and_then(|r| r.Select()).is_ok() {
+                return "全选原有内容";
+            }
+        }
+    }
+    if let Ok(a) = keys::parse("ctrl+a") {
+        let _ = keys::send(target, &a);
+    }
+    "ctrl+a 全选"
+}
+
+/// 等投递的键盘消息处理完，读回控件的值给模型核对（密码框、读不到值时不说）
+fn settle_value(e: &IUIAutomationElement, text: &str) -> String {
+    let p = match value_pattern(e) {
+        Some(p) if !unsafe { e.CurrentIsPassword() }.map(|b| b.as_bool()).unwrap_or(false) => p,
+        _ => return String::new(),
+    };
+    let deadline = Instant::now() + Duration::from_millis(200 + 4 * text.chars().count().min(500) as u64);
+    let mut last = String::new();
+    loop {
+        std::thread::sleep(Duration::from_millis(80));
+        let v = unsafe { p.CurrentValue() }.map(|b| b.to_string()).unwrap_or_default();
+        if v.contains(text.trim_end_matches(['\n', '\r'])) || (Instant::now() > deadline && v == last) || Instant::now() > deadline + Duration::from_millis(600) {
+            return format!("，现在的内容「{}」", trunc(&v, 120));
+        }
+        last = v;
+    }
+}
+
 fn elem_center(e: &IUIAutomationElement) -> Option<(i32, i32)> {
     let r = unsafe { e.CurrentBoundingRectangle() }.ok()?;
     (r.right > r.left && r.bottom > r.top).then(|| ((r.left + r.right) / 2, (r.top + r.bottom) / 2))
@@ -1070,6 +1228,7 @@ fn set_element_value(e: &IUIAutomationElement, value: &str) -> Result<&'static s
 // ---------------------------------------------------------------- 控件树
 
 const ES_READONLY_STYLE: u32 = 0x0800;
+const ES_MULTILINE_STYLE: u32 = 0x0004;
 const BM_CLICK_MSG: u32 = 0x00F5;
 const EM_SETSEL: u32 = 0x00B1;
 const EM_REPLACESEL: u32 = 0x00C2;
@@ -1087,6 +1246,9 @@ struct Tree<'a> {
     out: String,
     elems: Vec<IUIAutomationElement>,
     labels: Vec<String>,
+    /// 每个编号的缩进层级与控件类型（判断网页是否还没加载出控件）
+    depths: Vec<usize>,
+    roles: Vec<i32>,
     truncated: bool,
 }
 
@@ -1209,6 +1371,14 @@ fn quote(s: &str, n: usize) -> String {
 }
 
 impl Tree<'_> {
+    /// Chromium 的辅助功能还没填满：控件很少，或者有空的网页文档
+    fn looks_unloaded(&self) -> bool {
+        if self.elems.len() < 8 {
+            return true;
+        }
+        (0..self.roles.len()).any(|i| self.roles[i] == 50030 && self.depths.get(i + 1).map(|d| *d <= self.depths[i]).unwrap_or(true))
+    }
+
     fn walk(&mut self, e: &IUIAutomationElement, depth: usize, root: bool) {
         if self.elems.len() >= self.max || Instant::now() > self.deadline {
             self.truncated = true;
@@ -1349,6 +1519,8 @@ impl Tree<'_> {
         self.out += &s;
         self.elems.push(e.clone());
         self.labels.push(label);
+        self.depths.push(depth);
+        self.roles.push(ct);
         true
     }
 }
