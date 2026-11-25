@@ -7,7 +7,7 @@
 #   3. 打包 dist/LemonGalaxyWorker-<版本>-windows-<架构>.zip（压缩包里是同名文件夹）
 #   --worker      被控服务程序（默认 target/<Rust 目标>/release/lemon-galaxy-worker.exe）
 #   --skip-build  不重新编界面（打第二个架构的包时用）
-#   --selftest    界面自测：协议、离屏渲染各页面到 lemon-galaxy-worker-windows/gui/selftest/<架构>/、语言包
+#   --selftest    界面自测：协议、离屏渲染各页面到 lemon-galaxy-worker-windows/gui/selftest-output/<架构>/、语言包
 #   --live        自测时再起一个真的被控服务（前台 run，临时数据目录与临时管道），界面连上去走一遍
 # 环境变量：LEMONGALAXY_VERSION（默认取仓库根 Cargo.toml 的版本）、LEMONGALAXY_BUILD（构建号，默认 dev）
 set -euo pipefail
@@ -60,7 +60,7 @@ echo "已生成 $GUI/dist/$NAME.zip"
 if command -v sha256sum >/dev/null 2>&1; then (cd "$GUI/dist" && sha256sum "$NAME.zip"); fi
 
 [ "$SELFTEST" = 1 ] || exit 0
-SDIR="$GUI/selftest/$ARCH"
+SDIR="$GUI/selftest-output/$ARCH"
 rm -rf "$SDIR"
 mkdir -p "$SDIR"
 LIVE_ARGS=()

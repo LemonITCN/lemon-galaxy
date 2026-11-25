@@ -37,4 +37,5 @@ lemon-galaxy-control-windows/selftest/
 lemon-galaxy-worker-windows/gui/bin/
 lemon-galaxy-worker-windows/gui/obj/
 lemon-galaxy-worker-windows/gui/dist/
-lemon-galaxy-worker-windows/gui/selftest/
+# 自测输出（不能叫 selftest/：macOS 不分大小写，会把源码目录 SelfTest/ 一起忽略）
+lemon-galaxy-worker-windows/gui/selftest-output/
