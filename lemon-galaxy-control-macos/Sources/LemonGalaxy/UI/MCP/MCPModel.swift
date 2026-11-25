@@ -543,9 +543,17 @@ final class MCPModel: ObservableObject {
                     step = 0
                     continue
                 }
-                // 不认识的记录：排在同一客户端前一条已知记录之后
-                step += 0.001
-                let c = MCPCall(clientKey: client.key, call: call, needsApproval: false, at: prevAt, order: prevOrder + step)
+                // 不认识的记录：已结束的排在同一客户端前一条已知记录之后；还没结束的（事件还在路上就先被补齐收进来）
+                // 是正在进行的，按最新排，不然新客户端的第一条待批准会因为前面没有已知记录而排到最早
+                let order: Double
+                if result == nil {
+                    order = nextOrder
+                    nextOrder += 1
+                } else {
+                    step += 0.001
+                    order = prevOrder + step
+                }
+                let c = MCPCall(clientKey: client.key, call: call, needsApproval: false, at: result == nil ? Clock.nowMs : prevAt, order: order)
                 if let result {
                     c.apply(result: result)
                     if result.denied { c.decision = .denied(nil) }

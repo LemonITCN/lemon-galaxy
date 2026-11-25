@@ -54,7 +54,7 @@ extension SelfTest {
         wait("MCP 其余待批准") { mcp.pendingCalls.count == 3 && mcp.secrets.count == 1 }
         if mcp.pendingCount != 4 { problems.append("MCP 角标应为 4：\(mcp.pendingCount)") }
         if mcp.secrets.first?.callId == nil { problems.append("要密码没有对上它的 request_secret 调用") }
-        if mcp.pendingCalls.first?.call.tool != "run_command" { problems.append("待批准应先来的在上") }
+        if mcp.pendingCalls.first?.call.tool != "run_command" { problems.append("待批准应先来的在上：\(mcp.pendingCalls.map { "\($0.call.tool)#\($0.order)" }) 全部 \(mcp.calls.map { "\($0.call.tool)#\($0.order)" })") }
         if mcp.status.clients.count != 2 { problems.append("MCP 应有两个客户端：\(mcp.status.clients.map(\.key))") }
         page("\(prefix)-59c-mcp-page-pending")
 
@@ -151,7 +151,8 @@ extension SelfTest {
         mcp.navSelection = .records
         mcp.scrollTarget = .records
         shot("\(prefix)-59f-mcp-records", app, window: window, host: host, settle: 0.5)
-        if mcp.scrollTarget != nil { problems.append("中间列点分区后页面没有滚动") }
+        // CI 用 --only 只出部分截图，没截这张时 shot 直接返回不泵运行循环：这里自己等界面处理滚动
+        wait("中间列点分区后页面滚动") { mcp.scrollTarget == nil }
         mcp.navSelection = .service
         mcp.tokenShown = false
         mcp.configKind = .claudeCode
