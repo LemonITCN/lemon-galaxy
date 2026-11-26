@@ -275,7 +275,9 @@ impl PortalController {
     }
 
     fn key(&self, evdev: u32, down: bool) {
+        super::super::ibus::before_key();
         self.call("NotifyKeyboardKeycode", &(&self.ready.session, Self::empty(), evdev as i32, down as u32));
+        super::super::ibus::after_key();
     }
 
     fn chord(&self, keys: &[u32]) {
@@ -321,8 +323,10 @@ impl Controller for PortalController {
                                 '\t' => self.chord(&[hidmap::KEY_TAB]),
                                 _ => {
                                     let sym = super::super::x11::keysym_for(c) as i32;
+                                    super::super::ibus::before_key();
                                     self.call("NotifyKeyboardKeysym", &(&self.ready.session, Self::empty(), sym, 1u32));
                                     self.call("NotifyKeyboardKeysym", &(&self.ready.session, Self::empty(), sym, 0u32));
+                                    super::super::ibus::after_key();
                                 }
                             }
                         }

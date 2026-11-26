@@ -18,8 +18,8 @@ use super::encode::dl::Lib;
 use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CStr, CString};
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// 我们的引擎名
@@ -326,6 +326,8 @@ struct Live {
     bus: P,
     slot: *mut Slot,
     guard: Option<std::fs::File>,
+    /// 这套连接已经不能用了（守护进程重启后连接断开、我们注册的引擎没了）：下次提交时整套重建
+    dead: Arc<AtomicBool>,
 }
 
 impl Live {
@@ -370,6 +372,7 @@ impl Engines for Live {
 
     fn set(&mut self, name: &str) -> bool {
         if unsafe { (self.f.i.ibus_bus_is_connected)(self.bus) } == 0 {
+            self.dead.store(true, Ordering::SeqCst);
             return false;
         }
         // 切到我们的：等工厂建出新引擎；切走：旧引擎守护进程会销毁
@@ -380,7 +383,12 @@ impl Engines for Live {
         unsafe { (self.f.i.ibus_bus_set_global_engine_async)(self.bus, n.as_ptr(), 800, std::ptr::null_mut(), on_set_done as P, data) };
         // 异步调用自己 800 毫秒超时会回调；多等一点
         self.pump_until(Duration::from_millis(1200), || done.load(Ordering::SeqCst) >= 0);
-        done.load(Ordering::SeqCst) == 1
+        let ok = done.load(Ordering::SeqCst) == 1;
+        // 切不到我们的引擎：守护进程重启过（重连后我们注册的组件就没了）或连接已坏
+        if !ok && name == OURS {
+            self.dead.store(true, Ordering::SeqCst);
+        }
+        ok
     }
 
     fn commit(&mut self, text: &str) -> bool {
@@ -429,6 +437,7 @@ enum Cmd {
 pub struct Ibus {
     tx: mpsc::Sender<Cmd>,
     ctx: usize,
+    dead: Arc<AtomicBool>,
 }
 
 /// 起看门进程：它从标准输入读我们的状态，我们（不管怎么）退出后它看到管道关闭，必要时把引擎切回
@@ -461,6 +470,8 @@ fn start() -> Result<Ibus, String> {
     let f = fns()?;
     let (tx, rx) = mpsc::channel::<Cmd>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<usize, String>>();
+    let dead = Arc::new(AtomicBool::new(false));
+    let dead2 = dead.clone();
     std::thread::Builder::new()
         .name("ibus".into())
         .spawn(move || unsafe {
@@ -488,7 +499,7 @@ fn start() -> Result<Ibus, String> {
                 let _ = ready_tx.send(Err("向 IBus 注册引擎失败".into()));
                 return;
             }
-            let mut live = Live { f, ctx, bus, slot, guard: spawn_guard() };
+            let mut live = Live { f, ctx, bus, slot, guard: spawn_guard(), dead: dead2 };
             // 告诉看门进程现在的真实引擎：我们退出后守护进程会清空全局引擎，它要设回这个
             let seen = global_engine(f, bus).filter(|e| real(e)).or_else(gnome_engine).unwrap_or_else(|| DEFAULT_ENGINE.into());
             if let Some(g) = live.guard.as_mut() {
@@ -499,7 +510,7 @@ fn start() -> Result<Ibus, String> {
         })
         .map_err(|e| e.to_string())?;
     match ready_rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(ctx)) => Ok(Ibus { tx, ctx }),
+        Ok(Ok(ctx)) => Ok(Ibus { tx, ctx, dead }),
         Ok(Err(e)) => Err(e),
         Err(_) => Err("连 IBus 超时".into()),
     }
@@ -553,20 +564,86 @@ impl Ibus {
     }
 }
 
-static IBUS: OnceLock<Option<Ibus>> = OnceLock::new();
+/// 当前这套 IBus 连接。守护进程重启（用户改输入法设置、IBus 崩溃重启）后旧连接作废，下次提交时重建：
+/// 以前用 OnceLock 只连一次，守护进程一重启，之后中文一直打不进去，直到远程重新连接
+struct IbusState {
+    cur: Option<Arc<Ibus>>,
+    /// 上次连不上的时间：10 秒内不再试（没装 IBus 的系统每打一个字都去连太浪费）
+    failed_at: Option<Instant>,
+    /// 已经在日志里说过 IBus 可用 / 不可用
+    announced: bool,
+}
 
-fn get() -> Option<&'static Ibus> {
-    IBUS.get_or_init(|| match start() {
+static IBUS: Mutex<IbusState> = Mutex::new(IbusState { cur: None, failed_at: None, announced: false });
+
+fn get() -> Option<Arc<Ibus>> {
+    let mut st = IBUS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = st.cur.as_ref() {
+        if !i.dead.load(Ordering::SeqCst) {
+            return Some(i.clone());
+        }
+        // 放掉旧的：叫它切回原引擎后退出（线程阻塞在 GLib 主循环里，光关通道它察觉不到），它的看门进程随之收尾
+        eprintln!("输入文字：IBus 连接已失效（守护进程可能重启过），重新连接");
+        let (tx, _rx) = mpsc::channel();
+        i.send(Cmd::Shutdown(tx));
+        st.cur = None;
+    }
+    if st.failed_at.map(|t| t.elapsed() < Duration::from_secs(10)).unwrap_or(false) {
+        return None;
+    }
+    match start() {
         Ok(i) => {
-            eprintln!("输入文字：经 IBus 输入法引擎提交（布局外的字符、中日韩都能输入）");
+            if !st.announced {
+                eprintln!("输入文字：经 IBus 输入法引擎提交（布局外的字符、中日韩都能输入）");
+                st.announced = true;
+            }
+            st.failed_at = None;
+            let i = Arc::new(i);
+            st.cur = Some(i.clone());
             Some(i)
         }
         Err(e) => {
-            eprintln!("输入文字：IBus 不可用（{e}），改为按键输入（键盘布局里没有的字符会丢失）");
+            if !st.announced {
+                eprintln!("输入文字：IBus 不可用（{e}），改为按键输入（键盘布局里没有的字符会丢失）");
+                st.announced = true;
+            }
+            st.failed_at = Some(Instant::now());
             None
         }
-    })
-    .as_ref()
+    }
+}
+
+// ---- 按键与 IBus 提交的先后 ----
+// 按键经 Mutter → GNOME → IBus（原引擎）处理一圈才落到程序里，紧跟着的 IBus 提交会插到它们前面：
+// 「你好abc世界」成了「你好世界abc」，退格后马上接中文会删错字。所以刚发过按键时先等它们处理完再提交；
+// 刚提交过文字时稍等再发按键。只在中英文、按键与文字紧挨着时多等这一下，平时打字不受影响。
+const KEYS_SETTLE: Duration = Duration::from_millis(80);
+const COMMIT_SETTLE: Duration = Duration::from_millis(40);
+static LAST_KEY: Mutex<Option<Instant>> = Mutex::new(None);
+static LAST_COMMIT: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn settle(last: &Mutex<Option<Instant>>, d: Duration) {
+    let t = *last.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(t) = t {
+        let e = t.elapsed();
+        if e < d {
+            std::thread::sleep(d - e);
+        }
+    }
+}
+
+fn mark(last: &Mutex<Option<Instant>>) {
+    *last.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+}
+
+/// 发一个按键（或 keysym）之前调用：刚提交过文字就稍等
+pub fn before_key() {
+    settle(&LAST_COMMIT, COMMIT_SETTLE);
+}
+
+/// 发完一个按键（或 keysym）之后调用
+pub fn after_key() {
+    mark(&LAST_KEY);
 }
 
 /// 主控端发来的一段文字按「怎么送」切成几段：`true` 段按按键发，`false` 段经 IBus 提交。
@@ -592,24 +669,43 @@ pub fn commit(text: &str) -> bool {
     if text.is_empty() {
         return true;
     }
-    let Some(i) = get() else { return false };
-    let (tx, rx) = mpsc::channel();
-    if !i.send(Cmd::Commit(text.to_string(), tx)) {
-        return false;
-    }
-    match rx.recv_timeout(Duration::from_millis(1500)) {
-        Ok(ok) => ok,
-        // 超时：IBus 可能已经提交了，不再按键（免得输入两遍）
-        Err(_) => {
-            eprintln!("IBus 提交文字超时");
-            true
+    // 第一次失败时若是连接作废了，重建后再试一次
+    for attempt in 0..2 {
+        let Some(i) = get() else { return false };
+        settle(&LAST_KEY, KEYS_SETTLE);
+        let (tx, rx) = mpsc::channel();
+        if !i.send(Cmd::Commit(text.to_string(), tx)) {
+            i.dead.store(true, Ordering::SeqCst);
+            if attempt == 0 {
+                continue;
+            }
+            return false;
+        }
+        match rx.recv_timeout(Duration::from_millis(1500)) {
+            Ok(true) => {
+                mark(&LAST_COMMIT);
+                return true;
+            }
+            Ok(false) => {
+                if attempt == 0 && i.dead.load(Ordering::SeqCst) {
+                    continue;
+                }
+                return false;
+            }
+            // 超时：IBus 可能已经提交了，不再按键（免得输入两遍）
+            Err(_) => {
+                eprintln!("IBus 提交文字超时");
+                mark(&LAST_COMMIT);
+                return true;
+            }
         }
     }
+    false
 }
 
 /// 退出前调用：还在我们的引擎上就同步切回（最多约 1 秒）。没用过 IBus 时什么也不做。
 pub fn shutdown() {
-    let Some(Some(i)) = IBUS.get() else { return };
+    let Some(i) = IBUS.lock().unwrap_or_else(|e| e.into_inner()).cur.take() else { return };
     let (tx, rx) = mpsc::channel();
     if i.send(Cmd::Shutdown(tx)) {
         let _ = rx.recv_timeout(Duration::from_millis(1200));

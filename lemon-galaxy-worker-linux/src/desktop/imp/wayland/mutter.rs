@@ -426,7 +426,9 @@ impl MutterController {
     }
 
     fn key(&self, evdev: u32, down: bool) {
+        super::super::ibus::before_key();
         self.call("NotifyKeyboardKeycode", &(evdev, down));
+        super::super::ibus::after_key();
     }
 
     fn chord(&self, keys: &[u32]) {
@@ -473,8 +475,10 @@ impl Controller for MutterController {
                                 '\t' => self.chord(&[hidmap::KEY_TAB]),
                                 _ => {
                                     let sym = super::super::x11::keysym_for(c);
+                                    super::super::ibus::before_key();
                                     self.call("NotifyKeyboardKeysym", &(sym, true));
                                     self.call("NotifyKeyboardKeysym", &(sym, false));
+                                    super::super::ibus::after_key();
                                 }
                             }
                         }
