@@ -189,6 +189,9 @@ fn spawn(req: &ExecRequest, user: &SysUser, shell: &str) -> std::io::Result<Spaw
         let args = win::powershell_args(&req.command);
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         win::cmdline(shell, &refs)
+    } else if (base == "cmd" || base == "cmd.exe") && win::cmd_lacks_utf8() {
+        // XP 的 cmd 切不到 UTF-8：不切，输出按控制台代码页转（见下面 oem_output）
+        format!("{} /D /S /C \"{}\"", win::quote_arg(shell), req.command)
     } else if base == "cmd" || base == "cmd.exe" {
         // /S：去掉最外层引号后原样执行；先切到 UTF-8 代码页
         format!("{} /D /S /C \"chcp 65001>nul & {}\"", win::quote_arg(shell), req.command)
@@ -210,7 +213,8 @@ fn spawn(req: &ExecRequest, user: &SysUser, shell: &str) -> std::io::Result<Spaw
         }
     }
     let cwd = crate::files::wire_to_native(&expand_cwd(req, user)).map(|p| p.to_string_lossy().to_string());
-    let (child, i, o, e) = win::spawn_piped(cmdline, cwd, token.as_deref(), &extra)?;
+    let oem_output = (base == "cmd" || base == "cmd.exe") && win::cmd_lacks_utf8();
+    let (child, i, o, e) = win::spawn_piped_ex(cmdline, cwd, token.as_deref(), &extra, oem_output)?;
     let c2 = child.clone();
     let waiter: Waiter = Box::pin(async move {
         let code = c2.wait().await;

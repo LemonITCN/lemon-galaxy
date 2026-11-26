@@ -52,3 +52,9 @@ playback = ["dep:cpal"]
 [target.'cfg(all(windows, target_arch = "aarch64", target_env = "gnu"))'.dependencies]
 # 只影响本机交叉检查用的 MinGW ARM64（正式包用 MSVC）：libopus 在这里没有 ARM CPU 检测方法，关掉 SIMD
 opusic-sys = { version = "0.7", features = ["no-simd"] }
+
+[target.'cfg(all(windows, target_vendor = "win7"))'.dependencies]
+# Windows 老系统兼容版（*-win7-windows-msvc）：libopus 判断能不能用 AVX2 只看 CPUID，不看系统支不支持 AVX（XSAVE）。
+# XP / Vista / 没打 SP1 的 Win7 不支持，新 CPU 上一编码有声音的数据就是非法指令、整个进程崩掉（XP 虚拟机实测）。
+# 关掉运行时检测，只用编译时就确定的 SSE / SSE2（32 位目标是 pentium4）
+opusic-sys = { version = "0.7", features = ["no-runtime-feature-detection"] }

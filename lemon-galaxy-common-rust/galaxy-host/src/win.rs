@@ -653,6 +653,54 @@ pub fn async_reader(h: Handle) -> tokio::io::DuplexStream {
     a
 }
 
+/// 同 async_reader，读到的控制台代码页文字（中文系统是 GBK）转成 UTF-8；双字节字符被拆开时留到下次。
+pub fn async_reader_oem(h: Handle) -> tokio::io::DuplexStream {
+    use tokio::io::AsyncWriteExt;
+    let (a, mut b) = tokio::io::duplex(128 * 1024);
+    let rt = tokio::runtime::Handle::current();
+    std::thread::spawn(move || {
+        let cp = unsafe { GetOEMCP() };
+        let mut f = h.into_file();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    pending.extend_from_slice(&buf[..n]);
+                    let chunk = take_complete_dbcs(cp, &mut pending);
+                    if !chunk.is_empty() && rt.block_on(b.write_all(&oem_to_utf8(cp, &chunk))).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        if !pending.is_empty() {
+            let _ = rt.block_on(b.write_all(&oem_to_utf8(cp, &pending)));
+        }
+        let _ = rt.block_on(b.shutdown());
+    });
+    a
+}
+
+/// 取出 pending 里完整的字符（末尾只有前导字节的双字节字符留下）
+fn take_complete_dbcs(cp: u32, pending: &mut Vec<u8>) -> Vec<u8> {
+    let mut i = 0;
+    let mut cut = pending.len();
+    while i < pending.len() {
+        if pending[i] >= 0x80 && cp != 65001 && unsafe { IsDBCSLeadByteEx(cp, pending[i]) } != 0 {
+            if i + 1 >= pending.len() {
+                cut = i;
+                break;
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    pending.drain(..cut).collect()
+}
+
 /// 把阻塞的写句柄变成异步写；丢掉返回值即关闭管道。
 pub fn async_writer(h: Handle) -> tokio::io::DuplexStream {
     use tokio::io::AsyncReadExt;
@@ -856,6 +904,16 @@ pub fn spawn(s: Spawn) -> io::Result<Child> {
 
 /// 以管道方式启动（命令执行、文件子进程）。返回子进程与异步的标准输入 / 输出 / 错误。
 pub fn spawn_piped(cmdline: String, cwd: Option<String>, token: Option<&UserToken>, extra_env: &[(String, String)]) -> io::Result<(Arc<Child>, tokio::io::DuplexStream, tokio::io::DuplexStream, tokio::io::DuplexStream)> {
+    spawn_piped_ex(cmdline, cwd, token, extra_env, false)
+}
+
+/// XP 的 cmd 切不到 UTF-8 代码页（`chcp 65001` 不起作用，输出仍是 GBK 等控制台代码页）
+pub fn cmd_lacks_utf8() -> bool {
+    os_version().0 < 6
+}
+
+/// 同 spawn_piped；`oem_output` 为真时把标准输出、错误按控制台代码页转成 UTF-8（XP 上的 cmd）。
+pub fn spawn_piped_ex(cmdline: String, cwd: Option<String>, token: Option<&UserToken>, extra_env: &[(String, String)], oem_output: bool) -> io::Result<(Arc<Child>, tokio::io::DuplexStream, tokio::io::DuplexStream, tokio::io::DuplexStream)> {
     let (in_r, in_w) = pipe(true)?;
     let (out_r, out_w) = pipe(false)?;
     let (err_r, err_w) = pipe(false)?;
@@ -874,7 +932,8 @@ pub fn spawn_piped(cmdline: String, cwd: Option<String>, token: Option<&UserToke
     drop(in_r);
     drop(out_w);
     drop(err_w);
-    Ok((Arc::new(child), async_writer(in_w), async_reader(out_r), async_reader(err_r)))
+    let reader = if oem_output { async_reader_oem } else { async_reader };
+    Ok((Arc::new(child), async_writer(in_w), reader(out_r), reader(err_r)))
 }
 
 // ---------------- 伪终端 ----------------
@@ -1101,20 +1160,7 @@ fn spawn_output_reader_oem(h: Handle, tx: std::sync::mpsc::Sender<Vec<u8>>) {
                 Ok(n) => {
                     pending.extend_from_slice(&buf[..n]);
                     // 末尾不完整的双字节字符留到下次
-                    let mut i = 0;
-                    let mut cut = pending.len();
-                    while i < pending.len() {
-                        if pending[i] >= 0x80 && cp != 65001 && unsafe { IsDBCSLeadByteEx(cp, pending[i]) } != 0 {
-                            if i + 1 >= pending.len() {
-                                cut = i;
-                                break;
-                            }
-                            i += 2;
-                        } else {
-                            i += 1;
-                        }
-                    }
-                    let chunk: Vec<u8> = pending.drain(..cut).collect();
+                    let chunk = take_complete_dbcs(cp, &mut pending);
                     if !chunk.is_empty() && tx.send(oem_to_utf8(cp, &chunk)).is_err() {
                         break;
                     }
