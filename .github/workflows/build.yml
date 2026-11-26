@@ -447,6 +447,8 @@ jobs:
           dist/lemon-galaxy-worker.exe version
           dist/lemon-galaxy-worker.exe selftest-capture || true
       - uses: actions/upload-artifact@v7
+        # 界面没编过时也把已经编好的被控端传上去
+        if: always()
         with:
           name: ${{ matrix.artifact }}
           path: |

@@ -57,3 +57,15 @@ pub fn is_wow64() -> bool {
         f(GetCurrentProcess(), &mut r) != 0 && r != 0
     }
 }
+
+// 32 位老系统版要链 YY-Thunks，它的替代实现里引用了 CoTaskMemAlloc / CoTaskMemFree。windows 0.62 把这两个函数指向
+// Windows 8 才有的 combase.dll，链接器要是拿那个去满足引用，XP / Vista 上程序根本起不来（CI 导入表核对会拦下）。
+// 这里声明从各版本都有的 ole32.dll 导入并留住引用，链接器就用系统的 ole32.lib（被控端同样做法，见 src/win/compat.rs）。
+#[link(name = "ole32")]
+extern "system" {
+    fn CoTaskMemAlloc(cb: usize) -> *mut core::ffi::c_void;
+    fn CoTaskMemFree(pv: *const core::ffi::c_void);
+}
+
+#[used]
+static KEEP_OLE32_COTASKMEM: (unsafe extern "system" fn(usize) -> *mut core::ffi::c_void, unsafe extern "system" fn(*const core::ffi::c_void)) = (CoTaskMemAlloc, CoTaskMemFree);
