@@ -126,3 +126,72 @@
          if status == STATUS_SUCCESS || status == STATUS_NOT_FOUND {
              return Ok(());
          }
+--- a/src/sys/windows/iocp.rs
++++ b/src/sys/windows/iocp.rs
+@@ -105,6 +105,9 @@
+         );
+         let mut removed = 0;
+         let timeout = duration_millis(timeout);
++        if !xp_iocp::has_get_many() {
++            return unsafe { xp_iocp::get_many(self.handle.raw(), list, timeout) };
++        }
+         let len = cmp::min(list.len(), u32::MAX as usize) as u32;
+         let ret = unsafe {
+             GetQueuedCompletionStatusEx(
+@@ -231,6 +234,56 @@
+     }
+ }
+ 
++/// LemonGalaxy 的 Windows XP 兼容版补丁（scripts/xp-mio.patch，另见 afd.rs 的 xp_affinity）。
++///
++/// XP 没有 GetQueuedCompletionStatusEx；YY-Thunks 1.2.3 的替代实现在 GetQueuedCompletionStatus 返回失败时
++/// 直接返回失败或跳出循环，把这时已经取出来的完成包（失败的 I/O，比如被取消的 AFD 轮询，状态 STATUS_CANCELLED）丢掉，
++/// mio 就永远等不到它，这个套接字卡在「取消中」。这里自己用 GetQueuedCompletionStatus 取，失败的包也照样交给 mio。
++mod xp_iocp {
++    use super::CompletionStatus;
++    use std::ffi::c_void;
++    use std::io;
++    use std::ptr::null_mut;
++    use std::sync::OnceLock;
++    use windows_sys::Win32::Foundation::HANDLE;
++    use windows_sys::Win32::System::IO::OVERLAPPED;
++
++    #[link(name = "kernel32")]
++    extern "system" {
++        fn GetModuleHandleA(name: *const u8) -> *mut c_void;
++        fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
++        fn GetQueuedCompletionStatus(port: HANDLE, bytes: *mut u32, key: *mut usize, overlapped: *mut *mut OVERLAPPED, ms: u32) -> i32;
++    }
++
++    /// 系统自带 GetQueuedCompletionStatusEx（Vista 起）
++    pub fn has_get_many() -> bool {
++        static HAS: OnceLock<bool> = OnceLock::new();
++        *HAS.get_or_init(|| unsafe {
++            let k = GetModuleHandleA(b"kernel32.dll\0".as_ptr());
++            !k.is_null() && !GetProcAddress(k, b"GetQueuedCompletionStatusEx\0".as_ptr()).is_null()
++        })
++    }
++
++    pub unsafe fn get_many<'a>(port: HANDLE, list: &'a mut [CompletionStatus], timeout: u32) -> io::Result<&'a mut [CompletionStatus]> {
++        let mut n = 0;
++        while n < list.len() {
++            let (mut bytes, mut key, mut overlapped) = (0u32, 0usize, null_mut::<OVERLAPPED>());
++            let ok = GetQueuedCompletionStatus(port, &mut bytes, &mut key, &mut overlapped, if n == 0 { timeout } else { 0 });
++            if ok == 0 && overlapped.is_null() {
++                // 没取到包：第一次就是超时或出错，之后是取完了
++                if n == 0 {
++                    return Err(io::Error::last_os_error());
++                }
++                break;
++            }
++            // 返回失败但带着 overlapped：那次 I/O 失败了（结果在各自的状态块里），包照样交出去
++            list[n] = CompletionStatus::new(bytes, key, overlapped.cast());
++            n += 1;
++        }
++        Ok(&mut list[..n])
++    }
++}
++
+ #[inline]
+ fn duration_millis(dur: Option<Duration>) -> u32 {
+     if let Some(dur) = dur {
