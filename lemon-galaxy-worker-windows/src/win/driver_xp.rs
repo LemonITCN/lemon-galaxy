@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use windows::core::{GUID, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiCallClassInstaller, SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceRegistryPropertyW, SetupDiGetINFClassW,
-    SetupDiSetDeviceRegistryPropertyW, SetupUninstallOEMInfW, UpdateDriverForPlugAndPlayDevicesW, DICD_GENERATE_ID, DIF_REGISTERDEVICE, DIF_REMOVE, DIGCF_ALLCLASSES, HDEVINFO, INSTALLFLAG_FORCE, SPDRP_HARDWAREID, SP_DEVINFO_DATA,
-    SUOI_FORCEDELETE,
+    SetupDiGetDeviceInstallParamsW, SetupDiSetDeviceRegistryPropertyW, SetupUninstallOEMInfW, UpdateDriverForPlugAndPlayDevicesW, DICD_GENERATE_ID, DIF_REGISTERDEVICE, DIF_REMOVE, DIGCF_ALLCLASSES, DI_NEEDREBOOT, DI_NEEDRESTART, HDEVINFO,
+    INSTALLFLAG_FORCE, SPDRP_HARDWAREID, SP_DEVINFO_DATA, SP_DEVINSTALL_PARAMS_W, SUOI_FORCEDELETE,
 };
 
 use super::vdisplay_xp::HARDWARE_ID;
@@ -151,12 +151,18 @@ pub fn install() -> Result<String, String> {
     }
 }
 
-fn remove_devices() -> Result<usize, String> {
-    let Some((set, devs)) = our_devices() else { return Ok(0) };
+/// 删设备，返回 (删了几个, 要不要重启)。显示驱动卸不下来，设备要重启后才彻底没了。
+fn remove_devices() -> Result<(usize, bool), String> {
+    let Some((set, devs)) = our_devices() else { return Ok((0, false)) };
+    let mut reboot = false;
     for d in &devs {
         unsafe { SetupDiCallClassInstaller(DIF_REMOVE, set.0, Some(d)) }.map_err(|e| format!("删设备失败：{e}"))?;
+        let mut p = SP_DEVINSTALL_PARAMS_W { cbSize: std::mem::size_of::<SP_DEVINSTALL_PARAMS_W>() as u32, ..Default::default() };
+        if unsafe { SetupDiGetDeviceInstallParamsW(set.0, Some(d), &mut p) }.is_ok() && p.Flags.0 & (DI_NEEDREBOOT.0 | DI_NEEDRESTART.0) != 0 {
+            reboot = true;
+        }
     }
-    Ok(devs.len())
+    Ok((devs.len(), reboot))
 }
 
 /// 卸载：先断开接着的虚拟屏，再删设备、删驱动包。
@@ -168,9 +174,12 @@ pub fn uninstall() -> Result<String, String> {
     for d in super::vdisplay_xp::devices().into_iter().filter(|d| d.attached) {
         let _ = super::vdisplay_xp::detach(&d.name);
     }
-    let n = remove_devices()?;
+    let (n, reboot) = remove_devices()?;
     if n > 0 {
         notes.push(format!("{} {n}", t!("已删设备", "Removed devices:")));
+    }
+    if reboot || !super::vdisplay_xp::devices().is_empty() {
+        notes.push(t!("重启后虚拟屏才会从系统里彻底消失", "Restart to remove the virtual displays completely").into());
     }
     for inf in our_oem_infs() {
         if unsafe { SetupUninstallOEMInfW(PCWSTR(wide(&inf).as_ptr()), SUOI_FORCEDELETE, None) }.as_bool() {

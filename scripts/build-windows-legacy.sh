@@ -11,7 +11,8 @@
 # - 32 位链接 YY-Thunks（Vista 版 / XP 版）：Vista、XP 没有的系统接口由它补（运行时有真的用真的）；
 # - XP 再链 VC-LTL5 的 XP 库（C 运行库改用系统自带的 msvcrt.dll），子系统版本设 5.01（XP 只认 5.x），
 #   加 --cfg lemon_galaxy_xp：自动更新平台名 windowsxp，补上 YY-Thunks 没有的 WSASendMsg（lemon-galaxy-worker-windows/src/win/xp.rs）；
-#   设了 LEMON_GALAXY_XP_DRIVER_DIR（driver/xp/build.sh 的输出目录）时把 XP 虚拟屏驱动嵌进 exe。
+#   设了 LEMON_GALAXY_XP_DRIVER_DIR（driver/xp/build.sh 的输出目录）时把 XP 虚拟屏驱动嵌进 exe；
+#   给 mio 打 scripts/xp-mio.patch（XP 的 NtCancelIoFile 只取消本线程的 I/O，不打的话套接字收不到事件，网络不通）。
 set -euo pipefail
 FLAVOR="${1:?用法：$0 win7-x64|win7-x86|xp}"
 NIGHTLY="${LEGACY_NIGHTLY:-nightly}"
@@ -81,7 +82,20 @@ echo "目标 $TARGET，RUSTFLAGS：$RF"
 export CARGO_TARGET_DIR="$ROOT/target/legacy-$FLAVOR"
 export RUSTFLAGS="$RF"
 cd "$ROOT"
-cargo "+$NIGHTLY" build -Z build-std=std,panic_abort --release --target "$TARGET" -p lemon-galaxy-worker-windows
+PATCH=()
+if [ "$FLAVOR" = xp ]; then
+  # mio 的 XP 补丁：XP 的 NtCancelIoFile 只取消本线程发出的 I/O，AFD 轮询的发出与取消要在同一个线程（scripts/xp-mio.patch）
+  cargo "+$NIGHTLY" fetch >/dev/null
+  MIO_VER="$(grep -A1 '^name = "mio"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)"
+  MIO_SRC="$(ls -d "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/"mio-$MIO_VER" 2>/dev/null | head -1)"
+  [ -n "$MIO_SRC" ] || { echo "找不到 mio $MIO_VER 的源码" >&2; exit 1; }
+  MIO_XP="$TOOLS/mio-$MIO_VER-xp"
+  rm -rf "$MIO_XP" && mkdir -p "$MIO_XP" && cp -R "$MIO_SRC"/. "$MIO_XP"/
+  (cd "$MIO_XP" && git apply -p1 "$ROOT/scripts/xp-mio.patch") || { echo "mio $MIO_VER 打不上 XP 补丁（mio 升级后要重做 scripts/xp-mio.patch）" >&2; exit 1; }
+  PATCH=(--config "patch.crates-io.mio.path='$(winpath "$MIO_XP" | sed 's#\\#/#g')'")
+  echo "mio $MIO_VER 已打 XP 补丁：$MIO_XP"
+fi
+cargo "+$NIGHTLY" build "${PATCH[@]}" -Z build-std=std,panic_abort --release --target "$TARGET" -p lemon-galaxy-worker-windows
 OUT="$CARGO_TARGET_DIR/$TARGET/release"
 cp "$OUT/lemon-galaxy-worker.exe" "$DIST/"
 if [ "$FLAVOR" = xp ]; then
