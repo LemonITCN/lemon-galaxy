@@ -1,16 +1,18 @@
 --- a/src/sys/windows/afd.rs
 +++ b/src/sys/windows/afd.rs
-@@ -14,6 +14,67 @@
+@@ -13,7 +13,88 @@
+ use windows_sys::Win32::System::IO::{IO_STATUS_BLOCK, IO_STATUS_BLOCK_0};
  
  const IOCTL_AFD_POLL: u32 = 0x00012024;
- 
++
 +/// LemonGalaxy 的 Windows XP 兼容版补丁（scripts/xp-mio.patch，只在 XP 版构建时打）。
 +///
-+/// XP / Server 2003 没有 NtCancelIoFileEx（YY-Thunks 换成 NtCancelIoFile），而 NtCancelIoFile 只取消
-+/// 调用线程自己发出的 I/O。mio 会在任意线程上取消别的线程发出的 AFD 轮询，XP 上取消不掉，这个套接字
-+/// 从此等不到要的事件（XP 实测：TLS 握手完成后请求发出去了，响应一直收不到）。所以没有 NtCancelIoFileEx 时，
-+/// AFD 轮询的发出与取消都交给同一个专用线程：取消会连带取消同一个 AFD 句柄上别的套接字的轮询，
-+/// 它们完成后 mio 照常重新发出，只多一点开销。
++/// XP / Server 2003 没有 NtCancelIoFileEx。YY-Thunks 1.2.3 的替代实现遇到「取消指定的那次 I/O」（mio 每次
++/// 都是）直接返回 STATUS_NOT_FOUND、什么也不取消，mio 把它当成「已经完成」，从此等一个永远不来的完成包，
++/// 套接字再也收不到事件（XP 实测：TLS 握手完成、请求发出、响应到了也不读）。XP 只有 NtCancelIoFile，
++/// 它取消调用线程自己发出的、这个句柄上的全部 I/O（别的线程调用取消不掉，XP 上实测）。所以没有
++/// NtCancelIoFileEx 时，AFD 轮询的发出与取消都交给同一个专用线程，取消直接调 NtCancelIoFile：会连带取消
++/// 同一个 AFD 句柄上别的套接字的轮询，它们完成后 mio 照常重新发出，只多一点开销。
 +mod xp_affinity {
 +    use std::ffi::c_void;
 +    use std::sync::mpsc;
@@ -54,6 +56,25 @@
 +        })
 +    }
 +
++    /// XP 自带的 NtCancelIoFile（运行时找，不进导入表）
++    pub fn nt_cancel_io_file(handle: super::HANDLE, iosb: *mut super::IO_STATUS_BLOCK) -> super::NTSTATUS {
++        type F = unsafe extern "system" fn(super::HANDLE, *mut super::IO_STATUS_BLOCK) -> super::NTSTATUS;
++        static F_ADDR: OnceLock<usize> = OnceLock::new();
++        let f = *F_ADDR.get_or_init(|| unsafe {
++            let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr());
++            if ntdll.is_null() {
++                0
++            } else {
++                GetProcAddress(ntdll, b"NtCancelIoFile\0".as_ptr()) as usize
++            }
++        });
++        if f == 0 {
++            // STATUS_NOT_SUPPORTED
++            return 0xC00000BBu32 as super::NTSTATUS;
++        }
++        unsafe { std::mem::transmute::<usize, F>(f)(handle, iosb) }
++    }
+ 
 +    /// 在专用线程上执行并等结果
 +    pub fn run<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
 +        let (tx, rx) = mpsc::sync_channel(1);
@@ -68,7 +89,7 @@
  /// Winsock2 AFD driver instance.
  ///
  /// All operations are unsafe due to IO_STATUS_BLOCK parameter are being used by Afd driver during STATUS_PENDING before I/O Completion Port returns its result.
-@@ -64,18 +125,27 @@
+@@ -64,18 +145,27 @@
      ) -> io::Result<bool> {
          let info_ptr = info as *mut _ as *mut c_void;
          (*iosb).Anonymous.Status = STATUS_PENDING;
@@ -108,7 +129,7 @@
          match status {
              STATUS_SUCCESS => Ok(true),
              STATUS_PENDING => Ok(false),
-@@ -103,7 +173,16 @@
+@@ -103,7 +193,17 @@
              Anonymous: IO_STATUS_BLOCK_0 { Status: 0 },
              Information: 0,
          };
@@ -116,9 +137,10 @@
 +        let handle = self.fd.as_raw_handle() as HANDLE;
 +        let status = if xp_affinity::needed() {
 +            let ptrs = xp_affinity::Ptrs(handle, iosb, &mut cancel_iosb as *mut IO_STATUS_BLOCK, ());
-+            xp_affinity::run(move || unsafe {
++            // 取消这个句柄上专用线程发出的全部轮询（包括要取消的这一个）
++            xp_affinity::run(move || {
 +                let p = ptrs;
-+                NtCancelIoFileEx(p.0, p.1, p.2)
++                xp_affinity::nt_cancel_io_file(p.0, p.2)
 +            })
 +        } else {
 +            NtCancelIoFileEx(handle, iosb, &mut cancel_iosb)
