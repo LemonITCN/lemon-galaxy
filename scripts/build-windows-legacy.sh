@@ -91,7 +91,9 @@ if [ "$FLAVOR" = xp ]; then
   [ -n "$MIO_SRC" ] || { echo "找不到 mio $MIO_VER 的源码" >&2; exit 1; }
   MIO_XP="$TOOLS/mio-$MIO_VER-xp"
   rm -rf "$MIO_XP" && mkdir -p "$MIO_XP" && cp -R "$MIO_SRC"/. "$MIO_XP"/
-  (cd "$MIO_XP" && git apply -p1 "$ROOT/scripts/xp-mio.patch") || { echo "mio $MIO_VER 打不上 XP 补丁（mio 升级后要重做 scripts/xp-mio.patch）" >&2; exit 1; }
+  # Windows 上检出时补丁文件可能被转成 CRLF，mio 源码是 LF：先去掉 CR
+  tr -d '\r' <"$ROOT/scripts/xp-mio.patch" >"$TOOLS/xp-mio.patch"
+  (cd "$MIO_XP" && git apply -p1 "$TOOLS/xp-mio.patch") || { echo "mio $MIO_VER 打不上 XP 补丁（mio 升级后要重做 scripts/xp-mio.patch）" >&2; exit 1; }
   PATCH=(--config "patch.crates-io.mio.path='$(winpath "$MIO_XP" | sed 's#\\#/#g')'")
   echo "mio $MIO_VER 已打 XP 补丁：$MIO_XP"
 fi
