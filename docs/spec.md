@@ -125,7 +125,7 @@ UAC 授权（相当于 polkit 的 `auth_admin_keep`）：服务对要授权的�
 
 **老系统兼容版桌面端**（2026-11-25 加）：`LemonGalaxyWorker-<版本>-windows7-x64.zip`（Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2 x64）、`-windows7-x86.zip`（Vista SP2 / 7 / 8 / 8.1 / 10 32 位、Server 2008）、`-windowsxp-x86.zip`（XP SP3 / Server 2003 SP2 32 位，实验），里面的被控服务是对应的兼容版 CLI。
 
-- 界面同一份源码另按 .NET Framework 4.0 编（`TargetFrameworks` 为 `net48;net40`）：4.5 起不支持 XP，4.6 起不支持 Vista，4.8 要 Windows 7 SP1；4.0 在 XP SP3 到 Windows 11 都能装（Windows 8 起自带 4.5 以上，XP / Vista / 7 要先装，没装时系统会提示下载）。Windows 10 起的包仍是 4.8（Windows 10 1903 起自带）。
+- 老系统兼容版（windows7-x64 / windows7-x86 / windowsxp-x86）的桌面端是原生界面（`lemon-galaxy-worker-windows/gui-native`，Rust + Win32，与兼容版被控端一起用 win7 目标编，XP 版子系统 5.01），不需要 .NET：XP / Vista / 7 默认都没有 .NET 4.0，用户不该先去装运行库。功能与参数对齐 WPF 版（概览、账号与登录、临时协助、设置、事件日志、关于与卸载、托盘、单实例、安装），没有浅色 / 深色切换（跟随系统配色）和离屏自测。Windows 10 起的包仍是 WPF（.NET Framework 4.8，Windows 10 1903 起自带）。
 - 4.0 的类库没有 async/await 要的类型和值元组：`gui/App/Net40.cs` 只在 `NET40` 时补最小实现（await 有界面线程的同步上下文就回界面线程、失败时抛出里面的那个异常，与 4.5 起一致）；`Task.Run`、`Task.FromResult`、Unix 时间换算、`Array.Empty`、`StreamReader` 的 `leaveOpen` 等 4.5 / 4.6 起的接口改成两份都有的写法（`Bg`、`Clock`）。只装了 4.0 的系统上没人看的失败任务会让进程退出，启动时登记 `UnobservedTaskException` 记日志。
 - 清单用 `app.legacy.manifest`：多报 Vista，DPI 只按系统缩放（WPF 4.0 不会按显示器换 DPI）。共用控件里的 `WindowChrome`（4.5 起）在 4.0 版本是什么都不做的占位。链接进来的主控端源码（配色、图标、控件、语言包底座）也按 4.0 编，改那几个文件时别用 4.5 起才有的接口。
 - 被控服务（XP 兼容版也一样）带本机控制接口：管道拒绝远程客户端靠访问控制、取对方进程号运行时找、XP 的控制台会话 0 算坐在屏幕前（见上）。导入表照旧由 `scripts/check-legacy-imports.py` 核对。

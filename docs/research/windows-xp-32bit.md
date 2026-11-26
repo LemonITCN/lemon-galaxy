@@ -14,7 +14,7 @@
    - `lemon-galaxy-worker-<版本>-windowsxp-x86.exe`（实验）：XP SP3 / Server 2003 SP2 的 32 位系统，也能在更新的 32 位、64 位系统上跑。同一目标 + YY-Thunks 的 XP 版 + VC-LTL5 的 XP 运行库 + 子系统版本 5.01 + 自己补一个 YY-Thunks 没有的 `WSASendMsg`。
 2. **QUIC 在 XP 上可行，不需要退到「只走服务器 TCP 中转」**：LemonGalaxy 的 QUIC 跑在自己的 UDP 套接字（MagicSock，tokio 的 UdpSocket）上，不用 quinn-udp 的收发；tokio 在 XP 上缺的接口 YY-Thunks 都有补，连 mio 必需的 `SIO_BASE_HANDLE` 它也专门处理了。万一 XP 上 UDP 有问题，现有的「强制 TCP 中转」照样可用（同一份代码）。【已核实（源码、YY-Thunks 说明）；能否跑通待验证】
 3. **顺带发现现有 Windows 7 兼容版很可能在 Win7 上根本启动不了**：`windows` 0.62 把 `CoTaskMemFree` 指到 Windows 8 才有的 `combase.dll`，被控端的声音、硬件编码代码用了它。已改成从 `ole32.dll` 导入，CI 改成按 Win7 导出表核对。主控端兼容版压缩包里的 `galaxy_ffi.dll` 也导入了 Win8 才有的 `api-ms-win-core-winrt-error-l1-1-0.dll`、`mmdevapi.dll` 里的函数，同样可能起不来，CI 会列出来但不挡发布（主控端不在这次范围）。【导入表已核实；起不来是按系统 DLL 导出表推断，待 Win7 实机确认】
-4. XP / Vista 上缺的功能：声音（WASAPI 是 Vista 起，XP 没有）、隐私屏（要 Win10 2004）、虚拟屏（要 Win10）、显卡编码（XP 没有 Media Foundation，32 位不带 NVENC）、伪终端（ConPTY 要 Win10 1809，老系统一直是简化终端）、远程发 Ctrl+Alt+Del（`SendSAS` 是 Win7 起）、AI 的「应用操作」（UI Automation 在 XP 上要另装）。远程桌面（GDI 截屏 + openh264）、键鼠、剪贴板、终端、文件、命令、端口映射、自动更新都在。
+4. XP / Vista 上缺的功能：显卡编码（XP 没有 Media Foundation，32 位不带 NVENC）、伪终端（ConPTY 要 Win10 1809，老系统一直是简化终端）、远程发 Ctrl+Alt+Del（`SendSAS` 是 Win7 起）、AI 的「应用操作」（UI Automation 在 XP 上要另装）。远程桌面（GDI 截屏 + openh264）、键鼠、剪贴板、终端、文件、命令、端口映射、自动更新都在。声音、隐私屏、虚拟屏 2026-11-26 补齐（第 9 节）：XP 录声卡的「立体声混音」，隐私屏用分层黑窗 + GDI 截屏不带 CAPTUREBLT（Vista / 7 也能用），虚拟屏用自写的 XPDM 驱动。
 5. 需要拍板的见第 8 节：给 ISO 实测；简化终端要不要换成 winpty；CPU 要求 SSE2。
 6. 2026-11-25 起三个兼容版也发桌面端（窗口 + 托盘，自带安装；界面同一份源码按 .NET Framework 4.0 编，XP SP3 起能装），XP 兼容版的被控服务也带了本机控制接口。见 [spec.md](../spec.md) 3.0.2 末尾。发布物叫法：桌面端 / CLI。
 
@@ -74,9 +74,9 @@
 | PowerShell | XP、Vista 默认没装 | 默认 shell 改成「有 PowerShell 用 PowerShell，没有用 cmd」；命令执行（AI 的 run_command 等）本来就支持 cmd |
 | 以指定账号起进程 | 进程属性表（只继承指定句柄、伪终端）是 Vista 起；XP 的 `CreateProcess` 不认 `EXTENDED_STARTUPINFO_PRESENT`【推测】 | XP 上不用属性表、用普通 STARTUPINFO。代价：子进程会继承同一时刻别的会话建的可继承管道端（只有管道，影响很小） |
 | 未登录账号的 S4U 登录 | 本机账号走 MSV1_0 的 S4U，XP 是否支持没查到确切资料 | 【待验证】；已登录账号取会话令牌不受影响 |
-| 声音 | WASAPI 是 Vista 起 | XP 上采集失败报错，其他功能不受影响 |
-| 隐私屏 | 黑窗不进截屏要 Win10 2004 | YY-Thunks 会让设置「假装成功」，黑窗会出现在远端画面里，所以先按版本号挡掉（`privacy.rs`） |
-| 虚拟屏 | IddCx 驱动要 Win10 1607 起，且只有 x64 驱动 | 显示配置接口（Win7 起）改成运行时加载，老系统直接报不支持 |
+| 声音 | WASAPI 是 Vista 起 | XP 改录声卡的「立体声混音」（waveIn + 混音器选录音源，`wavein.rs`）；声卡驱动没提供立体声混音就不报能传声音（第 9 节） |
+| 隐私屏 | WDA_EXCLUDEFROMCAPTURE 要 Win10 2004（YY-Thunks 会让设置「假装成功」，不能靠返回值） | 按版本号选做法：XP / Vista / 7 用分层黑窗、开着时 GDI 截屏不带 CAPTUREBLT（Vista / 7 先关 Aero），Win8 到 10 1909 不支持（`privacy.rs`，第 9 节） |
+| 虚拟屏 | IddCx 驱动要 Win10 1607 起，且只有 x64 驱动 | 显示配置接口（Win7 起）改成运行时加载；XP 用自写的 XPDM 驱动（`driver/xp`，第 9 节），Vista / 7 仍不支持（XPDM 驱动与 WDDM 显卡驱动不能共存） |
 | AI 应用操作（UI Automation） | XP 要另装 UIAutomationCore（KB971513） | 失败报错 |
 | 文件管理 | 标准库的 `FindFirstFileExW(FindExInfoBasic)`、`GetFinalPathNameByHandleW` 等由 YY-Thunks 补；符号链接 XP 不支持 | 无需处理 |
 
@@ -106,7 +106,7 @@
 1. `lemon-galaxy-worker-windows/src/win/compat.rs`：`co_task_mem_free`（ole32）；`win7` 模块运行时加载 4 个显示配置接口与 `DiUninstallDevice`。
 2. `src/win/xp.rs`（只在 `--cfg lemon_galaxy_xp` 时编）：`WSASendMsg` 替身，用 YY-Thunks 同样的办法定义 `__imp__WSASendMsg@24`。
 3. `src/win/encode/mod.rs`：32 位不编 NVENC。
-4. `src/win/privacy.rs`：Win10 2004 以下直接报不支持。
+4. `src/win/privacy.rs`：按版本号选做法（第 9 节）。
 5. `galaxy-host/src/win.rs`：`os_version()`（`RtlGetVersion`）；XP 不用进程属性表；XP 用 `IsUserAnAdmin` 判断管理员；没有 PowerShell 时默认 shell 用 cmd；简化终端的代码页转换与按字符退格。`win_cu.rs`：32 位上 `SHELLEXECUTEINFOW` 是 1 字节对齐的，字段先拷出再用。
 6. 自动更新平台名（第 5 节）。
 
@@ -148,3 +148,23 @@
 3. 终端要不要换 winpty（全屏程序、Tab 补全、颜色都能用，但要多带两个文件、以指定账号运行要多一层辅助进程）。现在的简化终端在 XP / Vista / 7 上都能用。
 4. CPU 要求 SSE2（2001 年以后的大多数机器都有），更老的不支持。
 5. Ctrl+Alt+Del：XP 经典登录界面远程发不了，要不要做 `WM_HOTKEY` 方案。
+
+## 9. 补齐声音、隐私屏、虚拟屏，以及第一次在 XP 上跑（2026-11-26）
+
+测试环境：用户 Ubuntu 测试机（192.168.50.197）上 VMware Workstation 里的 Windows XP Professional SP3 32 位虚拟机（VMware SVGA II 显卡、Sound Blaster PCI 声卡、VMware Tools 10.0.12），用 `vmrun` 拷文件、在登录用户的桌面里运行程序。装驱动前拍了快照。
+
+### 9.1 先用不带 C 运行库的小程序验证可行性（llvm-mingw 编，子系统 5.01）
+
+- **隐私屏**【已核实】：黑色分层置顶窗盖住整屏后，GDI `BitBlt` 带 CAPTUREBLT 截到全黑（非黑像素 0%），不带 CAPTUREBLT 截到的和开之前一样（81%），在黑窗下面新开一个记事本再截，记事本也在（99%）。XP 没有桌面合成，分层窗口由 GDI 另外叠在屏幕上，不在屏幕表面里。Vista / 7 关掉 Aero 后是同一套机制（【推测】，没有实测）。
+- **声音**【已核实】：XP 没有 WASAPI，但声卡驱动的录音混音器里有「立体声混音」（类型 SRC_ANALOG，名字按系统语言是「立体声混音」）。用混音器的 MUX 控件把录音源切到它，waveIn 48 kHz 双声道录，同时 waveOut 放 440 Hz，录到的信号过零率折合约 435 Hz；录完把录音源切回原来的（麦克风）。
+- **虚拟屏**【已核实】：XP 显示驱动模型（XPDM）可以做不带硬件的帧缓冲显示驱动（`driver/xp`，见驱动 README）。根枚举设备装上约 1 秒、不用重启，系统里多出 \\.\DISPLAY4、\\.\DISPLAY5 两块不接入桌面的「LemonGalaxy Virtual Display」；把 1470x956 写进设备键后 `ChangeDisplaySettingsEx` 接入约 0.16 秒，挪过去的记事本、桌面背景都正常画出，GDI 截那块屏正常；断开正常。DualView 主视图（\Device\Video5）在注册表里有，但系统没列成显示设备，所以目前可用 2 块。卸载设备后显示设备要重启才消失；装着驱动重启，开机正常。
+
+### 9.2 XP 兼容版被控端第一次在 XP 上跑
+
+- 能启动（`version`），`selftest-capture`：GDI 截屏 48 ms，openh264 编码 10 帧 518 ms，JPEG 截图正常；**隐私屏开着时截屏非黑像素 81.5%**（与开之前 81.3% 一样）；声音采集走立体声混音，48 kHz 双声道有数据。【已核实】
+- **网络不通**【已核实】：登录时 TCP 连上、TLS 1.3 握手完成、HTTP/2 请求发出，之后一直收不到响应，60 秒超时。根因：XP 没有 NtCancelIoFileEx，YY-Thunks 换成的 NtCancelIoFile 只取消调用线程自己发出的 I/O；mio 会在任意线程（例如 `block_on` 的主线程读到 WouldBlock 后重新登记事件）取消另一个线程发出的 AFD 轮询，XP 上取消不掉，套接字从此等不到「可读」。第 8 节第 1 条担心的「mio 在 XP 上」就是这里，AFD 轮询本身是好的。
+- 用不带运行库的 C 小程序在 XP 上复现 mio 的 AFD 轮询【已核实】：AFD 轮询本身正常（可写立即完成；先轮询可读再发数据，数据一到就完成；套接字句柄直接当基础句柄用可以）；**别的线程调 NtCancelIoFile 取消不掉**，发出的那个线程才能取消，取消后完成包状态 STATUS_CANCELLED，GetQueuedCompletionStatus 对这种包返回失败（但带着 overlapped）。
+- 抓包【已核实】：请求发出去了，服务器的响应也到了 XP、TCP 已确认，只是程序一直没去读。
+- 第二个坑【已核实，读 YY-Thunks 1.2.3 源码 `src/Thunks/api-ms-win-core-io.hpp`】：XP 上 GetQueuedCompletionStatusEx 的替代实现在 GetQueuedCompletionStatus 返回失败时直接返回失败（第一个包）或跳出循环（后面的包），这时已经取出来的失败完成包被丢掉。被取消的 AFD 轮询正是这种包，mio 永远等不到「取消完成」，套接字卡在「取消中」。
+- 修法：`scripts/xp-mio.patch`，XP 版构建时打在 mio 上，两处：① 系统没有 NtCancelIoFileEx 时，AFD 轮询的发出与取消都交给同一个专用线程（取消会连带取消同一 AFD 句柄上别的套接字的轮询，它们完成后 mio 照常重新发出）；② 系统没有 GetQueuedCompletionStatusEx 时，`CompletionPort::get_many` 自己循环调 GetQueuedCompletionStatus，失败但带 overlapped 的包也交给 mio。Vista 起两处都不生效。只打 ① 的那一版（0.1.0.71）在 XP 上仍然收不到响应。mio 的命名管道在 XP 上取消读操作同样只对本线程有效，失败只记日志、关句柄时收尾，先不处理。
+- 装服务时顺带装驱动报 0xE000022B（ERROR_DI_DONT_INSTALL）：当时刚卸过一次驱动、显示设备还等着重启，【推测】是显示类安装程序因此拒绝；重启后再测。

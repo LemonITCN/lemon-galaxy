@@ -15,6 +15,7 @@ members = [
     "lemon-galaxy-worker-linux",
     "lemon-galaxy-worker-linux/gui",
     "lemon-galaxy-worker-windows",
+    "lemon-galaxy-worker-windows/gui-native",
 ]
 
 [workspace.package]

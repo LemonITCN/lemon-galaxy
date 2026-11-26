@@ -2994,6 +2994,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-galaxy-worker-gui-win"
+version = "0.1.0"
+dependencies = [
+ "galaxy-proto",
+ "miniz_oxide",
+ "serde",
+ "serde_json",
+ "windows",
+]
+
+[[package]]
 name = "lemon-galaxy-worker-linux"
 version = "0.1.0"
 dependencies = [

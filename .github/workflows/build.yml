@@ -10,7 +10,7 @@
 #   Windows 被控端 桌面端 LemonGalaxyWorker-<版本>-windows-<x64|arm64>.zip：被控服务 + WPF 界面（窗口、托盘、自带安装与卸载），Windows 10 起；
 #                  CLI lemon-galaxy-worker.exe  Windows 10 / Server 2016 起，x64 / ARM64（系统服务 + 画面代理）；
 #                  老系统兼容版（scripts/build-windows-legacy.sh）：Windows 7 SP1 / 8 x64、Vista SP2 / 7 / 8 32 位、XP SP3 32 位（实验），
-#                  CLI 与桌面端各一份（桌面端的界面按 .NET Framework 4.0 编：LemonGalaxyWorker-<版本>-<windows7-x64|windows7-x86|windowsxp-x86>.zip）
+#                  CLI 与桌面端各一份（桌面端是原生界面、不需要 .NET：LemonGalaxyWorker-<版本>-<windows7-x64|windows7-x86|windowsxp-x86>.zip）
 #   Mac 被控端     桌面端 LemonGalaxyWorker.dmg  macOS 13 起，Apple 芯片 + Intel 通用
 #   Mac 客户端     LemonGalaxy.dmg      macOS 13 起，Apple 芯片 + Intel 通用（主控 + 被控）
 #   安卓客户端     LemonGalaxy.apk      Android 8.0 起
@@ -428,6 +428,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/legacy-${{ matrix.flavor }}
+            target/legacy-${{ matrix.flavor }}-gui
             target/legacy-tools
           key: rust-legacy-${{ matrix.flavor }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: rust-legacy-${{ matrix.flavor }}-
@@ -450,13 +451,16 @@ jobs:
           name: ${{ matrix.artifact }}
           path: |
             dist/lemon-galaxy-worker.exe
+            dist/LemonGalaxyWorker.exe
             dist/galaxy_ffi.dll
             dist/imports.txt
+            dist/gui-imports.txt
           if-no-files-found: warn
 
   windows-worker-gui-legacy:
     name: Windows 被控端桌面端（老系统兼容版）
-    # 界面同一份源码按 .NET Framework 4.0 编（XP / Vista / 7 都能装 4.0），配兼容版 CLI 编出来的被控服务；与兼容版 CLI 一样先不挡发布
+    # 老系统默认没有 .NET：界面是原生的（lemon-galaxy-worker-windows/gui-native，Rust + Win32，与被控端一起由兼容版构建编好），
+    # 这里只把界面、同一份兼容版被控服务和许可证打成压缩包；与兼容版 CLI 一样先不挡发布
     needs: windows7
     if: always()
     continue-on-error: true
@@ -481,48 +485,37 @@ jobs:
           name: windowsxp-x86
           path: art/windowsxp-x86
         continue-on-error: true
-      - uses: actions/cache@v6
-        with:
-          path: ~/.nuget/packages
-          key: nuget-worker-gui-${{ hashFiles('lemon-galaxy-worker-windows/gui/LemonGalaxyWorker.csproj') }}
-      - name: 构建、界面自测（.NET 4.0 那份）、连各兼容版被控服务走一遍、打包
+      - name: 打包（压缩包里是同名文件夹：LemonGalaxyWorker.exe、lemon-galaxy-worker.exe、LICENSE.txt）
         run: |
           BASE="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           if [ -n "$LEMONGALAXY_BUILD_VERSION" ]; then V="${LEMONGALAXY_BUILD_VERSION#v}"; else V="$BASE.$GITHUB_RUN_NUMBER"; fi
-          export LEMONGALAXY_VERSION="$V" LEMONGALAXY_BUILD="$GITHUB_RUN_NUMBER"
-          SKIP=()
+          mkdir -p out pkg
           FAILED=""
           for p in windows7-x64 windows7-x86 windowsxp-x86; do
-            if [ ! -f "art/$p/lemon-galaxy-worker.exe" ]; then
-              echo "没有 $p 的被控服务（兼容版 CLI 没编出来），跳过"
+            if [ ! -f "art/$p/lemon-galaxy-worker.exe" ] || [ ! -f "art/$p/LemonGalaxyWorker.exe" ]; then
+              echo "没有 $p 的被控服务或界面（兼容版没编出来），跳过"
               FAILED="$FAILED $p"
               continue
             fi
-            # 自测没过的包不进发布
-            if ! lemon-galaxy-worker-windows/gui/scripts/build.sh --arch "$p" --worker "art/$p/lemon-galaxy-worker.exe" "${SKIP[@]}" --selftest --live; then
-              rm -f lemon-galaxy-worker-windows/gui/dist/*-"$p".zip
-              FAILED="$FAILED $p"
-            fi
-            SKIP=(--skip-build)
+            N="LemonGalaxyWorker-$V-$p"
+            mkdir -p "pkg/$N"
+            cp "art/$p/LemonGalaxyWorker.exe" "art/$p/lemon-galaxy-worker.exe" "pkg/$N/"
+            cp LICENSE "pkg/$N/LICENSE.txt"
+            "pkg/$N/LemonGalaxyWorker.exe" --version
+            "pkg/$N/lemon-galaxy-worker.exe" version
+            powershell -NoProfile -Command "Compress-Archive -Path '$(cygpath -w "$PWD/pkg/$N")' -DestinationPath '$(cygpath -w "$PWD/out/$N.zip")' -Force"
           done
-          mkdir -p out
-          cp lemon-galaxy-worker-windows/gui/dist/*.zip out/ 2>/dev/null || true
           ls -l out
           echo "FAILED=$FAILED" >> "$GITHUB_ENV"
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: windows-worker-gui-legacy-selftest
-          path: lemon-galaxy-worker-windows/gui/selftest-output
       - uses: actions/upload-artifact@v7
         with:
           name: windows-worker-gui-legacy
           path: out/*.zip
           if-no-files-found: warn
-      - name: 有没过的包
+      - name: 有没打出来的包
         if: env.FAILED != ''
         run: |
-          echo "没过：$FAILED"
+          echo "没打出来：$FAILED"
           exit 1
 
   windows-legacy-test:
@@ -914,14 +907,13 @@ jobs:
               case $a in x86_64) W="x64" ;; *) W="ARM64" ;; esac
               echo "| Windows 被控端（CLI） | Windows 10 / 11 / Server 2016 及以上，$W | [lemon-galaxy-worker-$V-windows-$a.exe]($DL/lemon-galaxy-worker-$V-windows-$a.exe) |"
             done
-            # 老系统兼容版：桌面端（界面要 .NET Framework 4.0 或更高，Windows 8 起自带，XP / Vista / 7 要先装）与 CLI
+            # 老系统兼容版：桌面端（原生界面，不需要 .NET）与 CLI
             W7="Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2，x64"
             W7X86="Windows Vista SP2 / 7 / 8 / 8.1 / 10 32 位，Server 2008"
             WXP="Windows XP SP3 / Server 2003 SP2 32 位；声音要声卡有「立体声混音」，装虚拟屏驱动时 XP 提示没通过徽标测试点「仍然继续」"
-            NET40="需要 .NET Framework 4.0 或更高"
-            [ -f "out/LemonGalaxyWorker-$V-windows7-x64.zip" ] && echo "| Windows 被控端（桌面端，兼容版） | $W7（$NET40） | [LemonGalaxyWorker-$V-windows7-x64.zip]($DL/LemonGalaxyWorker-$V-windows7-x64.zip) |"
-            [ -f "out/LemonGalaxyWorker-$V-windows7-x86.zip" ] && echo "| Windows 被控端（桌面端，32 位兼容版） | $W7X86（$NET40） | [LemonGalaxyWorker-$V-windows7-x86.zip]($DL/LemonGalaxyWorker-$V-windows7-x86.zip) |"
-            [ -f "out/LemonGalaxyWorker-$V-windowsxp-x86.zip" ] && echo "| Windows 被控端（桌面端，XP 兼容版，实验） | $WXP（需要 .NET Framework 4.0） | [LemonGalaxyWorker-$V-windowsxp-x86.zip]($DL/LemonGalaxyWorker-$V-windowsxp-x86.zip) |"
+            [ -f "out/LemonGalaxyWorker-$V-windows7-x64.zip" ] && echo "| Windows 被控端（桌面端，兼容版） | $W7 | [LemonGalaxyWorker-$V-windows7-x64.zip]($DL/LemonGalaxyWorker-$V-windows7-x64.zip) |"
+            [ -f "out/LemonGalaxyWorker-$V-windows7-x86.zip" ] && echo "| Windows 被控端（桌面端，32 位兼容版） | $W7X86 | [LemonGalaxyWorker-$V-windows7-x86.zip]($DL/LemonGalaxyWorker-$V-windows7-x86.zip) |"
+            [ -f "out/LemonGalaxyWorker-$V-windowsxp-x86.zip" ] && echo "| Windows 被控端（桌面端，XP 兼容版，实验） | $WXP | [LemonGalaxyWorker-$V-windowsxp-x86.zip]($DL/LemonGalaxyWorker-$V-windowsxp-x86.zip) |"
             [ -f "out/lemon-galaxy-worker-$V-windows7-x86_64.exe" ] && echo "| Windows 被控端（CLI，兼容版） | $W7 | [lemon-galaxy-worker-$V-windows7-x86_64.exe]($DL/lemon-galaxy-worker-$V-windows7-x86_64.exe) |"
             [ -f "out/lemon-galaxy-worker-$V-windows7-x86.exe" ] && echo "| Windows 被控端（CLI，32 位兼容版） | $W7X86 | [lemon-galaxy-worker-$V-windows7-x86.exe]($DL/lemon-galaxy-worker-$V-windows7-x86.exe) |"
             [ -f "out/lemon-galaxy-worker-$V-windowsxp-x86.exe" ] && echo "| Windows 被控端（CLI，XP 兼容版，实验） | $WXP | [lemon-galaxy-worker-$V-windowsxp-x86.exe]($DL/lemon-galaxy-worker-$V-windowsxp-x86.exe) |"

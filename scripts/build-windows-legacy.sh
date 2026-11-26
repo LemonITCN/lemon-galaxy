@@ -4,7 +4,7 @@
 #   scripts/build-windows-legacy.sh win7-x64   Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2，x64（另出主控端兼容版用的 galaxy_ffi.dll）
 #   scripts/build-windows-legacy.sh win7-x86   Windows Vista SP2 / 7 / 8 / 8.1 / 10，32 位
 #   scripts/build-windows-legacy.sh xp         Windows XP SP3 / Server 2003 SP2 起，32 位（也能在更新的 32 位系统上跑）
-# 产物在 dist/：lemon-galaxy-worker.exe、imports.txt（导入表），win7-x64 另有 galaxy_ffi.dll。
+# 产物在 dist/：lemon-galaxy-worker.exe、imports.txt（导入表）、原生桌面端 LemonGalaxyWorker.exe 与 gui-imports.txt，win7-x64 另有 galaxy_ffi.dll。
 #
 # 做法（原理与取舍见 docs/research/windows-xp-32bit.md）：
 # - Rust 标准库要求 Windows 10，用 tier 3 的 *-win7-windows-msvc 目标自己编标准库（-Z build-std）；
@@ -123,6 +123,17 @@ DUMPBIN="$(ls /c/Program\ Files/Microsoft\ Visual\ Studio/*/*/VC/Tools/MSVC/*/bi
 "$DUMPBIN" -nologo -headers "$DIST/lemon-galaxy-worker.exe" | grep -iE "machine|subsystem version|operating system version" || true
 "$DUMPBIN" -nologo -imports "$DIST/lemon-galaxy-worker.exe" > "$DIST/imports.txt"
 python "$ROOT/scripts/check-legacy-imports.py" "$DIST/imports.txt" "$YY/Config/$OS_EXPORTS.txt"
+
+# 原生桌面端（lemon-galaxy-worker-windows/gui-native，Rust + Win32）：老系统默认没有 .NET，界面不能用 WPF。
+# Windows 子系统（XP 版同样要 5.01），单独的目标目录（RUSTFLAGS 不同，免得和被控端互相把缓存冲掉）
+GUI_RF="${RF//SUBSYSTEM:CONSOLE/SUBSYSTEM:WINDOWS}"
+CARGO_TARGET_DIR="$ROOT/target/legacy-$FLAVOR-gui" RUSTFLAGS="$GUI_RF" cargo "+$NIGHTLY" build -Z build-std=std,panic_abort --release --target "$TARGET" -p lemon-galaxy-worker-gui-win
+cp "$ROOT/target/legacy-$FLAVOR-gui/$TARGET/release/LemonGalaxyWorker.exe" "$DIST/"
+"$DUMPBIN" -nologo -headers "$DIST/LemonGalaxyWorker.exe" | grep -iE "subsystem" || true
+"$DUMPBIN" -nologo -imports "$DIST/LemonGalaxyWorker.exe" > "$DIST/gui-imports.txt"
+python "$ROOT/scripts/check-legacy-imports.py" "$DIST/gui-imports.txt" "$YY/Config/$OS_EXPORTS.txt"
+"$DIST/LemonGalaxyWorker.exe" --version
+
 if [ -f "$DIST/galaxy_ffi.dll" ]; then
   "$DUMPBIN" -nologo -imports "$DIST/galaxy_ffi.dll" > "$DIST/ffi-imports.txt"
   python "$ROOT/scripts/check-legacy-imports.py" "$DIST/ffi-imports.txt" "$YY/Config/$OS_EXPORTS.txt" || echo "主控端兼容版内核库 galaxy_ffi.dll 导入了 Windows 7 没有的函数（见上），先不挡发布"

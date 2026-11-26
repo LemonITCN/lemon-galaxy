@@ -1,0 +1,52 @@
+[package]
+name = "lemon-galaxy-worker-gui-win"
+description = "LemonGalaxy Windows 被控端桌面端（原生版，Rust + Win32）：XP SP3 / Vista / 7 用，不依赖 .NET；经本机控制接口（命名管道）遥控被控服务"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "LemonGalaxyWorker"
+path = "src/main.rs"
+
+[dependencies]
+# 消息类型直接引入 galaxy-worker/src/control.rs（见 main.rs），这里只要它用到的
+galaxy-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# 只用 XP 就有的 Win32 函数；Vista 起才有的运行时 GetProcAddress（见 src/win/compat.rs）
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_DataExchange",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_System_Pipes",
+  "Win32_System_Registry",
+  "Win32_System_Services",
+  "Win32_System_SystemInformation",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+  "Win32_System_Time",
+  "Win32_UI_Accessibility",
+  "Win32_UI_Controls",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+# 图标里的 PNG 条目解成位图（XP 不认 PNG 压缩的图标）
+miniz_oxide = "0.9"
