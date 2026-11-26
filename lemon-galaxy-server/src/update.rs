@@ -21,8 +21,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
-/// 保留最近几个版本的镜像。
-const KEEP_VERSIONS: usize = 2;
+/// 保留最近几个版本的镜像。一天可能发好几个版本，客户端检查完过一阵才下载，留少了它拿到的文件就被清掉了
+///（客户端遇到 404 会重新查询，见 galaxy-client 的 update::download）；每个版本约 230 MB。
+const KEEP_VERSIONS: usize = 4;
 
 #[derive(Default)]
 pub struct UpdateStatus {
