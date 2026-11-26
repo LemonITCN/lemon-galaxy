@@ -1,6 +1,7 @@
 //! 系统声音采集：WASAPI 环回（录下默认输出设备正在播放的声音）。在画面代理里运行（用户会话）。
 //!
 //! 没有声音时 WASAPI 不给数据，这时什么也不发；默认输出设备变了（插拔耳机等）自动换过去。
+//! 没有 WASAPI 的系统（XP / Server 2003）改录声卡的「立体声混音」（wavein.rs）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -53,9 +54,23 @@ fn device_id(d: &IMMDevice) -> String {
     }
 }
 
+/// 系统有没有 WASAPI（Vista 起；XP / Server 2003 是 5.x）。按版本号判断，不用在调用线程上初始化 COM。
+fn has_wasapi() -> bool {
+    galaxy_host::win::os_version().0 >= 6
+}
+
+/// 不用 WASAPI、改录立体声混音（没有 WASAPI，或测试时设 LEMON_GALAXY_AUDIO_WAVEIN=1）
+fn use_wavein() -> bool {
+    std::env::var("LEMON_GALAXY_AUDIO_WAVEIN").map(|v| v == "1").unwrap_or(false) || !has_wasapi()
+}
+
 /// 这台电脑有没有声音输出设备（决定是否告诉主控端能传声音）。服务进程里也能调。
+/// 没有 WASAPI 时看声卡有没有立体声混音（录不到系统声音就不报能传声音）。
 pub fn has_render_device() -> bool {
     com_init();
+    if use_wavein() {
+        return super::wavein::find().is_some();
+    }
     default_render().is_ok()
 }
 
@@ -142,6 +157,9 @@ impl Drop for Loopback {
 
 /// 开始采集。先同步打开一次，结果（采样率、声道数或错误）立即返回；之后在后台线程里持续推样本，`stop` 置位时结束。
 pub fn start(stop: Arc<AtomicBool>, push: impl Fn(Vec<f32>, u32, u16) + Send + 'static) -> Result<(u32, u16), String> {
+    if use_wavein() {
+        return super::wavein::start(stop, push);
+    }
     let (tx, rx) = std::sync::mpsc::channel::<Result<(u32, u16), String>>();
     std::thread::spawn(move || {
         com_init();

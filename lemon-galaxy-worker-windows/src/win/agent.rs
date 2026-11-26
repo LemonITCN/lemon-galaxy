@@ -92,6 +92,8 @@ pub fn main() -> i32 {
                 let _ = out.send(FromAgent::Log { error: false, text });
             };
             let mut vd = super::vdisplay::VirtualDisplays::default();
+            // XP 驱动的屏接入状态写在注册表里：上次代理异常退出、重启后留下的先断开
+            super::vdisplay_xp::detach_stale(&logf);
             while let Ok(j) = vd_rx.recv() {
                 if input_desktop_changed() {
                     attach_input_desktop();

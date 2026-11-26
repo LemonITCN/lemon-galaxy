@@ -1,5 +1,7 @@
 # LemonGalaxy 虚拟屏驱动（Windows，IddCx）
 
+XP / Server 2003 用的另一份驱动在 `xp/`（XPDM，32 位），见文末「XP 虚拟屏驱动」。
+
 驱动与独立测试工具；第二阶段已接进 worker（协议见 `docs/protocol.md` 8.6，实施记录见 `docs/research/virtual-display.md` 5.9）。
 
 worker 自己安装 / 卸载驱动（管理员）：
@@ -79,3 +81,25 @@ rmdir /s /q C:\ProgramData\LemonGalaxy\Logs
 ## 许可
 
 与仓库相同，MIT。驱动的结构参考了微软 Windows-driver-samples 的 IndirectDisplay 示例（MS-PL），代码由 LemonLink 作者重写后移植过来。
+
+## XP 虚拟屏驱动（`xp/`）
+
+XP 没有 IddCx，用 XP 显示驱动模型（XPDM）自己写的最简帧缓冲驱动，32 位：
+
+| 文件 | 说明 |
+|---|---|
+| `lgxpmp.c` → `lgxpmp.sys` | 小端口，只导入 videoprt.sys。没有硬件：报模式表，按显示驱动的要求从系统分页池分配 / 释放帧缓冲；主视图之外用 DualView 再建 2 个副视图 |
+| `lgxpdd.c` → `lgxpdd.dll` | 显示驱动，只导入 win32k.sys。表面是 GDI 管理的 32 位位图，不挂任何绘图函数；光标当硬件光标接下来但不画（远端由被控端叠加） |
+| `lgxp.h` | 两边共用的自定义控制码、注册表值名、上限 |
+| `LemonGalaxyDisplayXP.inf` | 根枚举设备 `Root\LemonGalaxyDisplayXP`，类 Display（只能是 ASCII：XP 按 ANSI 代码页读 INF） |
+| `build.sh` | 用 llvm-mingw 编（Mac / Linux / Windows 都行），`pe-checksum.py` 写 PE 校验和并核对子系统版本 5.01 |
+| `compat/` | mingw-w64 的 winddi.h 要的两个 DirectDraw 头文件的占位 |
+
+```sh
+lemon-galaxy-worker-windows/driver/xp/build.sh            # 输出到 driver/build/xp
+```
+
+- XP 兼容版编译时设 `LEMON_GALAXY_XP_DRIVER_DIR` 指到输出目录，三个文件就嵌进 exe（`lemon-galaxy-worker-windows/build.rs`，CI 的「XP 虚拟屏驱动」任务先编好再交给 XP 版）。
+- 安装：XP 上 `install-service` 时顺带装，或单独 `lemon-galaxy-worker install-display-driver`（管理员）。文件放到 `%ALLUSERSPROFILE%\LemonGalaxy\driver-xp\`，建根设备后 `UpdateDriverForPlugAndPlayDevices`；驱动没有微软签名，XP 会提示「没有通过 Windows 徽标测试」，要点「仍然继续」。不用重启。卸载：`uninstall-display-driver`。
+- 装好后系统里多出几块不接入桌面的显示设备「LemonGalaxy Virtual Display」。加屏：被控端把要的分辨率写进它的显示设备键（`LemonGalaxy.Width` / `LemonGalaxy.Height`，小端口每次报模式表时读，排在第一个），再 `ChangeDisplaySettingsEx` 接入、放在现有桌面右边；删屏：断开。接入状态写在注册表里，代理启动时先断开上次留下的。
+- 2026-11-26 在 Ubuntu 上 VMware 的 XP SP3 虚拟机里实测：装驱动约 1 秒、不用重启；接入 1470x956（非标准分辨率）约 0.16 秒，挪过去的窗口、桌面背景正常画出，GDI 截屏正常；断开正常。DualView 的主视图（`\Device\Video5`）在注册表里有，但系统没把它列成显示设备，所以目前是 2 块。

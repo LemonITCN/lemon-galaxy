@@ -51,7 +51,7 @@ struct Inner {
     /// (上次检查时间, 有没有声音输出设备)
     has_audio: Mutex<(Option<std::time::Instant>, bool)>,
     /// (上次检查时间, 虚拟屏驱动在不在)
-    has_vd_driver: Mutex<(Option<std::time::Instant>, bool)>,
+    has_vd_driver: Mutex<(Option<std::time::Instant>, u32)>,
     /// 现在这个画面代理里的虚拟屏 id（代理退出时驱动随句柄删屏，这里跟着清空）
     virtual_ids: Mutex<std::collections::HashSet<u32>>,
     /// 复制粘贴文件：最近几份清单的内容来源（清单 id → 来源），对方可能还在粘贴上一份
@@ -87,7 +87,7 @@ impl WinPlatform {
                 captures: Mutex::new(HashMap::new()),
                 audio: Mutex::new(None),
                 has_audio: Mutex::new((None, false)),
-                has_vd_driver: Mutex::new((None, false)),
+                has_vd_driver: Mutex::new((None, 0)),
                 virtual_ids: Mutex::new(Default::default()),
                 clip_sources: Mutex::new(VecDeque::new()),
                 clip_streams: Mutex::new(HashMap::new()),
@@ -605,13 +605,9 @@ impl HostPlatform for WinPlatform {
         // 驱动在不在：最多 10 秒查一次（握手时都会问）
         let mut g = self.inner.has_vd_driver.lock();
         if g.0.map(|t| t.elapsed() > Duration::from_secs(10)).unwrap_or(true) {
-            *g = (Some(std::time::Instant::now()), super::vdisplay::driver_present());
+            *g = (Some(std::time::Instant::now()), super::vdisplay::max_displays());
         }
-        if g.1 {
-            super::vdisplay::CONTROLLER_MAX
-        } else {
-            0
-        }
+        g.1
     }
 
     fn add_virtual_display(&self, width: u32, height: u32, refresh: u32) -> Result<DisplayInfo, String> {

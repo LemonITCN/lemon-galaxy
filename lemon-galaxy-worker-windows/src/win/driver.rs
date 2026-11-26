@@ -291,8 +291,24 @@ pub fn uninstall() -> Result<String, String> {
     Ok(notes.join("\n"))
 }
 
-/// 命令行入口。
+fn report(r: Result<String, String>) -> i32 {
+    match r {
+        Ok(s) => {
+            println!("{s}");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// 命令行入口。XP / Server 2003 装嵌在 exe 里的 XP 驱动（driver_xp.rs）。
 pub fn install_cmd(rest: &[String]) -> i32 {
+    if super::driver_xp::applies() {
+        return report(super::driver_xp::install());
+    }
     let pkg = rest.iter().find(|a| !a.starts_with("--")).map(PathBuf::from).or_else(package_next_to_exe);
     let Some(pkg) = pkg else {
         eprintln!("{}", t!("找不到驱动包：在命令后写驱动包目录（里面有 LemonGalaxyDisplay.inf），或放在程序旁边的 driver 目录。", "Driver package not found: pass its directory (containing LemonGalaxyDisplay.inf) or put it in a `driver` folder next to the program."));
@@ -311,6 +327,9 @@ pub fn install_cmd(rest: &[String]) -> i32 {
 }
 
 pub fn uninstall_cmd() -> i32 {
+    if super::driver_xp::applies() {
+        return report(super::driver_xp::uninstall());
+    }
     match uninstall() {
         Ok(s) => {
             println!("{s}");
@@ -325,6 +344,14 @@ pub fn uninstall_cmd() -> i32 {
 
 /// install-service 时：程序旁边有驱动包就复制到安装目录并安装（测试包要开发标志）。失败只提示，不影响服务安装。
 pub fn install_with_service(target_dir: &Path) {
+    // XP：驱动嵌在程序里，装服务时一起装（会弹徽标测试提示要人点「仍然继续」，装服务本来就要在桌面上操作）
+    if super::driver_xp::applies() {
+        match super::driver_xp::install() {
+            Ok(_) => println!("{}", t!("已安装虚拟屏驱动。", "Display driver installed.")),
+            Err(e) => eprintln!("{}：{e}", t!("虚拟屏驱动没装上（远程桌面不受影响，只是不能加虚拟屏；可以之后运行 install-display-driver 再装）", "Display driver not installed (remote desktop still works, without virtual displays; run install-display-driver later)")),
+        }
+        return;
+    }
     let Some(src) = package_next_to_exe() else { return };
     let dst = target_dir.join("driver");
     if src != dst {

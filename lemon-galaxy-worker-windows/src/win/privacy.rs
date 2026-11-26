@@ -1,8 +1,15 @@
 //! 隐私屏：本地每块屏幕盖一层黑窗（截屏时被排除，远端照常看到桌面，鼠标点击穿透到下面的窗口），
 //! 并用低级键鼠钩子挡掉本地物理输入（远端注入的输入带 INJECTED 标记，放行）。
-//! 需要 Windows 10 2004 起的 WDA_EXCLUDEFROMCAPTURE；更老的系统黑窗会被截进画面，直接报不支持。
+//!
+//! 黑窗怎么不进截屏：
+//! - Windows 10 2004 起：WDA_EXCLUDEFROMCAPTURE。
+//! - XP / Server 2003、Vista / 7：没有桌面合成时，分层窗口不在屏幕表面上（GDI 另外叠上去），GDI 截屏不带
+//!   CAPTUREBLT 就截不到它，截到的是下面的实时桌面（XP 虚拟机实测）。开着时 GDI 截屏去掉 CAPTUREBLT
+//!   （代价：别的程序的分层窗口远端也看不到）；Vista / 7 开着 Aero 时先关掉桌面合成，关隐私屏时再打开。
+//! - Windows 8 到 10 1909：桌面合成关不掉、截屏走桌面复制，黑窗一定会被截进去，不支持。
 
 use super::capture::{attach_input_desktop, monitors};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -14,6 +21,61 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, UnhookWindowsHookEx, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WDA_EXCLUDEFROMCAPTURE, WH_KEYBOARD_LL, WH_MOUSE_LL,
     WINDOW_EX_STYLE, WM_QUIT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
 };
+
+/// 老系统的隐私屏开着：GDI 截屏不能带 CAPTUREBLT（capture.rs）
+static LEGACY_ON: AtomicBool = AtomicBool::new(false);
+
+pub fn legacy_active() -> bool {
+    LEGACY_ON.load(Ordering::Relaxed)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// WDA_EXCLUDEFROMCAPTURE
+    Affinity,
+    /// 分层黑窗 + GDI 截屏不带 CAPTUREBLT；dwm 表示要先关 Vista / 7 的桌面合成
+    Layered { dwm: bool },
+}
+
+const TOO_OLD: &str = "这台电脑的系统不支持隐私屏（Windows 8 到 Windows 10 1909 没办法让黑窗不进截屏，Windows 10 请升级到 2004 或更新）";
+
+fn mode() -> Result<Mode, String> {
+    let (major, minor, build) = galaxy_host::win::os_version();
+    if major >= 10 && build >= 19041 {
+        Ok(Mode::Affinity)
+    } else if major == 5 {
+        Ok(Mode::Layered { dwm: false })
+    } else if major == 6 && minor <= 1 {
+        Ok(Mode::Layered { dwm: true })
+    } else {
+        Err(TOO_OLD.into())
+    }
+}
+
+type DwmIsEnabledFn = unsafe extern "system" fn(*mut i32) -> i32;
+type DwmEnableFn = unsafe extern "system" fn(u32) -> i32;
+
+/// dwmapi.dll 是 Vista 起才有的，运行时加载
+fn dwm_proc(name: &[u8]) -> Option<unsafe extern "system" fn() -> isize> {
+    use windows::core::PCSTR;
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    unsafe {
+        let m = LoadLibraryW(windows::core::w!("dwmapi.dll")).ok()?;
+        GetProcAddress(m, PCSTR(name.as_ptr()))
+    }
+}
+
+fn dwm_composition() -> bool {
+    let Some(f) = dwm_proc(b"DwmIsCompositionEnabled\0") else { return false };
+    let mut on = 0i32;
+    unsafe { std::mem::transmute::<_, DwmIsEnabledFn>(f)(&mut on) == 0 && on != 0 }
+}
+
+fn dwm_enable(on: bool) -> bool {
+    let Some(f) = dwm_proc(b"DwmEnableComposition\0") else { return false };
+    // DWM_EC_DISABLECOMPOSITION = 0，DWM_EC_ENABLECOMPOSITION = 1
+    unsafe { std::mem::transmute::<_, DwmEnableFn>(f)(on as u32) == 0 }
+}
 
 const LLKHF_INJECTED: u32 = 0x10;
 const LLMHF_INJECTED: u32 = 0x01;
@@ -51,14 +113,10 @@ pub struct Privacy {
 impl Privacy {
     /// 开启。不支持（系统太老、建不了窗口）时返回 Err。
     pub fn start() -> Result<Self, String> {
-        // 黑窗不进截屏要 Windows 10 2004（19041）起。XP / Vista 兼容版里 YY-Thunks 会让设置「假装成功」，
-        // 黑窗就会出现在远端画面里，所以先按版本号挡掉
-        let (major, _, build) = galaxy_host::win::os_version();
-        if major < 10 || build < 19041 {
-            return Err("这台电脑的系统太老（需要 Windows 10 2004 或更新），不支持隐私屏".into());
-        }
+        // 按版本号选做法：XP / Vista 兼容版里 YY-Thunks 会让 SetWindowDisplayAffinity「假装成功」，不能靠它的返回值
+        let mode = mode()?;
         let (tx, rx) = mpsc::channel::<Result<u32, String>>();
-        let join = std::thread::spawn(move || unsafe { run(tx) });
+        let join = std::thread::spawn(move || unsafe { run(tx, mode) });
         match rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(Ok(thread)) => Ok(Self { thread, join: Some(join) }),
             Ok(Err(e)) => {
@@ -81,8 +139,21 @@ impl Drop for Privacy {
     }
 }
 
-unsafe fn run(tx: mpsc::Sender<Result<u32, String>>) {
+unsafe fn run(tx: mpsc::Sender<Result<u32, String>>, mode: Mode) {
     attach_input_desktop();
+    // Vista / 7 开着桌面合成时分层窗口会被截进去：先关掉（只在本进程开着隐私屏期间有效）
+    let mut dwm_off = false;
+    if mode == (Mode::Layered { dwm: true }) && dwm_composition() {
+        if !dwm_enable(false) || dwm_composition() {
+            let _ = tx.send(Err("关不掉 Aero 桌面合成，隐私屏开不了".into()));
+            return;
+        }
+        dwm_off = true;
+    }
+    // 黑窗出现之前就让截屏不带 CAPTUREBLT，一帧黑的都不进画面
+    if mode != Mode::Affinity {
+        LEGACY_ON.store(true, Ordering::Relaxed);
+    }
     let inst: HINSTANCE = GetModuleHandleW(PCWSTR::null()).map(|m| m.into()).unwrap_or_default();
     let class = w!("LemonGalaxyPrivacy");
     let wc = WNDCLASSW { lpfnWndProc: Some(wnd_proc), hInstance: inst, lpszClassName: class, hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0), ..Default::default() };
@@ -93,16 +164,20 @@ unsafe fn run(tx: mpsc::Sender<Result<u32, String>>) {
         let Ok(h) = CreateWindowExW(ex, class, w!(""), WS_POPUP | WS_VISIBLE, m.rect.left, m.rect.top, m.width() as i32, m.height() as i32, None, None, Some(inst), None) else { continue };
         // 分层窗口要设一次不透明度才会显示
         let _ = windows::Win32::UI::WindowsAndMessaging::SetLayeredWindowAttributes(h, windows::Win32::Foundation::COLORREF(0), 255, windows::Win32::UI::WindowsAndMessaging::LWA_ALPHA);
-        if SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE).is_err() {
+        if mode == Mode::Affinity && SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE).is_err() {
             for w in wins.iter().chain(std::iter::once(&h)) {
                 let _ = DestroyWindow(*w);
             }
-            let _ = tx.send(Err("这台电脑的系统太老（需要 Windows 10 2004 或更新），不支持隐私屏".into()));
+            let _ = tx.send(Err(TOO_OLD.into()));
             return;
         }
         wins.push(h);
     }
     if wins.is_empty() {
+        LEGACY_ON.store(false, Ordering::Relaxed);
+        if dwm_off {
+            dwm_enable(true);
+        }
         let _ = tx.send(Err("没有可用的屏幕".into()));
         return;
     }
@@ -131,5 +206,10 @@ unsafe fn run(tx: mpsc::Sender<Result<u32, String>>) {
     }
     for w in wins {
         let _ = DestroyWindow(w);
+    }
+    // 黑窗没了再恢复 CAPTUREBLT 与桌面合成
+    LEGACY_ON.store(false, Ordering::Relaxed);
+    if dwm_off {
+        dwm_enable(true);
     }
 }

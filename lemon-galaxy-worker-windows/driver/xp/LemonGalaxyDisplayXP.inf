@@ -1,0 +1,61 @@
+; LemonGalaxy virtual display for Windows XP (XPDM, x86): root-enumerated Root\LemonGalaxyDisplayXP,
+; miniport lgxpmp.sys + display driver lgxpdd.dll. Installed by `lemon-galaxy-worker install-display-driver`.
+; Keep this file ASCII: XP's setupapi reads INF files in the ANSI code page.
+
+[Version]
+Signature="$Windows NT$"
+Class=Display
+ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%LemonIT%
+DriverVer=11/26/2026,0.1.0.0
+
+[DestinationDirs]
+DefaultDestDir=11
+lgxp.Miniport=12
+lgxp.Display=11
+
+[Manufacturer]
+%LemonIT%=LemonIT
+
+[LemonIT]
+%DeviceDesc%=lgxp, Root\LemonGalaxyDisplayXP
+
+[lgxp]
+CopyFiles=lgxp.Miniport, lgxp.Display
+
+[lgxp.SoftwareSettings]
+AddReg=lgxp_SoftwareDeviceSettings
+
+[lgxp_SoftwareDeviceSettings]
+HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, lgxpdd
+HKR,, VideoDebugLevel, %REG_DWORD%, 0
+
+[lgxp.Services]
+AddService=lgxpmp, 0x00000002, lgxp_Service_Inst
+
+[lgxp_Service_Inst]
+ServiceType=1
+StartType=3
+ErrorControl=0
+LoadOrderGroup=Video
+ServiceBinary=%12%\lgxpmp.sys
+
+[lgxp.Miniport]
+lgxpmp.sys
+
+[lgxp.Display]
+lgxpdd.dll
+
+[SourceDisksNames]
+1=%DiskId%,,,""
+
+[SourceDisksFiles]
+lgxpmp.sys=1
+lgxpdd.dll=1
+
+[Strings]
+REG_MULTI_SZ=0x00010000
+REG_DWORD=0x00010001
+LemonIT="LemonIT"
+DeviceDesc="LemonGalaxy Virtual Display"
+DiskId="LemonGalaxy Virtual Display Driver"

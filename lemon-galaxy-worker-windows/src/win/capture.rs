@@ -459,7 +459,9 @@ impl Capturer for GdiCapturer {
         let dib = self.dib.as_ref().unwrap();
         unsafe {
             let screen = GetDC(None);
-            let ok = BitBlt(dib.dc, 0, 0, w as i32, h as i32, Some(screen), self.mon.rect.left, self.mon.rect.top, SRCCOPY | CAPTUREBLT);
+            // CAPTUREBLT 把分层窗口也截进来；老系统的隐私屏开着时不能带（黑窗就是分层窗口，见 privacy.rs）
+            let rop = if super::privacy::legacy_active() { SRCCOPY } else { SRCCOPY | CAPTUREBLT };
+            let ok = BitBlt(dib.dc, 0, 0, w as i32, h as i32, Some(screen), self.mon.rect.left, self.mon.rect.top, rop);
             ReleaseDC(None, screen);
             ok?;
         }

@@ -5,6 +5,7 @@ mod clipboard;
 mod clipole;
 mod compat;
 mod driver;
+mod driver_xp;
 mod encode;
 mod input;
 mod ipc;
@@ -12,6 +13,8 @@ mod platform;
 mod privacy;
 mod service;
 mod vdisplay;
+mod vdisplay_xp;
+mod wavein;
 #[cfg(lemon_galaxy_xp)]
 mod xp;
 
@@ -152,7 +155,7 @@ impl WorkerOs for WindowsOs {
     fn extra_help(&self) -> Vec<(&'static str, &'static str, &'static str)> {
         vec![
             ("selftest-capture", "检查截屏与编码是否正常（--bench 测试本机每种编码器，--dump 目录 存下码流）", "Check screen capture and encoding (--bench: test every encoder, --dump DIR: save streams)"),
-            ("install-display-driver", "安装虚拟屏驱动 [--dev] [驱动包目录]（管理员；测试签名包要 --dev）", "Install the virtual display driver [--dev] [package dir] (admin; --dev for test-signed packages)"),
+            ("install-display-driver", "安装虚拟屏驱动 [--dev] [驱动包目录]（管理员；测试签名包要 --dev；XP 装程序自带的 XP 驱动）", "Install the virtual display driver [--dev] [package dir] (admin; --dev for test-signed packages; on XP installs the bundled XP driver)"),
             ("uninstall-display-driver", "卸载虚拟屏驱动（删设备、驱动包与测试证书）", "Remove the virtual display driver, its package and test certificate"),
         ]
     }

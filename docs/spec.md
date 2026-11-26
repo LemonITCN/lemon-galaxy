@@ -58,7 +58,7 @@
 - 正式包要求 Windows 10 / Server 2016 起（Rust 标准库的要求）；另用 win7 编译目标出老系统兼容版（`scripts/build-windows-legacy.sh`，调研见 [research/windows-xp-32bit.md](research/windows-xp-32bit.md)），截屏退回 GDI：
   - `windows7-x86_64`：Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2；
   - `windows7-x86`：Vista SP2 / 7 / 8 / 8.1 / 10 的 32 位系统（YY-Thunks 补 Win7 起的接口）；
-  - `windowsxp-x86`（实验）：XP SP3 / Server 2003 SP2 的 32 位系统（YY-Thunks 补 Vista 起的接口，VC-LTL5 改用系统自带的 msvcrt.dll）。XP 上没有声音、隐私屏、虚拟屏、显卡编码，远程发不了 Ctrl+Alt+Del。
+  - `windowsxp-x86`（实验）：XP SP3 / Server 2003 SP2 的 32 位系统（YY-Thunks 补 Vista 起的接口，VC-LTL5 改用系统自带的 msvcrt.dll）。XP 上没有显卡编码，远程发不了 Ctrl+Alt+Del；声音录声卡的「立体声混音」（没有 WASAPI，声卡驱动没提供立体声混音就传不了声音），隐私屏靠分层黑窗 + GDI 截屏不带 CAPTUREBLT，虚拟屏用自带的 XP 显示驱动（XPDM，见 `lemon-galaxy-worker-windows/driver/xp/`，嵌在 exe 里，装服务或 `install-display-driver` 时安装，XP 会弹「没有通过 Windows 徽标测试」要点「仍然继续」）。
   - 老系统只做被控（主控端要 .NET Framework 4.8）。CI 逐个核对导入表：每个导入的函数目标系统都要有。
 
 ### 3.0.1 macOS 被控端的无人值守
@@ -135,8 +135,8 @@ UAC 授权（相当于 polkit 的 `auth_admin_keep`）：服务对要授权的�
 
 - 画面：最高 4K、帧率按硬件最高 144；H.264 / H.265 硬件编解码（AV1 视硬件）；真彩 4:4:4（视硬件）；码率 / 画质 / 帧率可调；按网络自适应。
 - 多屏：单屏模式（顶部标签切换）/ 分屏模式（每个屏一个窗口，可拖到本地不同显示器）；小窗悬浮。
-- 虚拟屏：被控端最多创建 3 个虚拟屏，无头主机也能用（Windows 10 1607 起用虚拟显示驱动；macOS 用系统虚拟显示接口）。
-- 隐私屏：黑屏遮罩 / 关闭物理屏改走虚拟屏；macOS 可自定义遮挡图。
+- 虚拟屏：被控端最多创建 3 个虚拟屏，无头主机也能用（Windows 10 1607 起用虚拟显示驱动；XP / Server 2003 用自带的 XPDM 驱动，按系统列出的显示设备数，目前 2 块；macOS 用系统虚拟显示接口）。
+- 隐私屏：黑屏遮罩 / 关闭物理屏改走虚拟屏；macOS 可自定义遮挡图。Windows 10 2004 起黑窗用 WDA_EXCLUDEFROMCAPTURE 排除在截屏外；XP / Vista / 7 用分层黑窗、开着时 GDI 截屏不带 CAPTUREBLT（Vista / 7 先关 Aero 桌面合成；代价是别的程序的分层窗口远端也看不到）；Windows 8 到 10 1909 不支持。
 - 操作：鼠标模式 / 触控模式；移动端虚拟键盘与快捷键栏；外接键鼠。
 - 文件传输：双向、批量、断点续传、不限大小。剪贴板同步：文字、图片、文件（复制粘贴文件）。
 - 声音：远端声音传回，被控端本地可静音。
@@ -199,9 +199,9 @@ UAC 授权（相当于 polkit 的 `auth_admin_keep`）：服务对要授权的�
 
 | 平台 | 被控 | 主控 | 备注 |
 |---|---|---|---|
-| Windows XP SP3 / Server 2003 SP2（32 位） | 是（worker，实验） | 否 | GDI 截屏 + 软件编码；无声音、隐私屏、虚拟屏；简化终端；CPU 要支持 SSE2 |
-| Windows Vista SP2（32 位）、Windows 7 / 8 / 8.1 / 10（32 位） | 是（worker） | 否 | 截屏用 GDI（Vista / 7）或桌面复制（8+）；无虚拟屏；简化终端（10 1809 起 ConPTY） |
-| Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2 | 是（worker） | 是（control, WPF） | 截屏用 GDI（7）或桌面复制（8+）；无虚拟屏；简化终端 |
+| Windows XP SP3 / Server 2003 SP2（32 位） | 是（worker，实验） | 否 | GDI 截屏 + 软件编码；声音要声卡有「立体声混音」；隐私屏；虚拟屏（自带 XP 驱动）；简化终端；CPU 要支持 SSE2 |
+| Windows Vista SP2（32 位）、Windows 7 / 8 / 8.1 / 10（32 位） | 是（worker） | 否 | 截屏用 GDI（Vista / 7）或桌面复制（8+）；无虚拟屏；隐私屏 Vista / 7 与 10 2004 起有；简化终端（10 1809 起 ConPTY） |
+| Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2 | 是（worker） | 是（control, WPF） | 截屏用 GDI（7）或桌面复制（8+）；无虚拟屏；隐私屏 7 有、8 / 8.1 没有；简化终端 |
 | Windows 10 / 11 / Server 2016+ | 是 | 是 | 全功能；10 1607 起支持虚拟屏；ARM64 原生 |
 | macOS 13+ | 是 | 是 | 首次需本人授权「屏幕录制」「辅助功能」；Apple 芯片 + Intel 通用 |
 | Linux（x86_64 / ARM64，glibc 2.17 起；musl 精简版任意发行版） | 是（远程桌面、终端、文件、端口映射、AI） | 否 | X11 全支持（含登录界面）；GNOME Wayland 走 Mutter（无人值守），其他 Wayland 走桌面门户（首次本人点允许）；没人登录时开虚拟桌面；NVENC / VA-API 显卡编码；有 root 装系统服务，无 root 装用户级服务 |

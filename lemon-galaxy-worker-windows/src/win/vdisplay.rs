@@ -116,9 +116,23 @@ fn interface_path() -> Option<Vec<u16>> {
     }
 }
 
-/// 驱动装好且设备在运行（服务进程判断能力用，不打开设备）。
+/// 驱动装好且设备在运行（服务进程判断能力用，不打开设备）。XP 看有没有 XP 虚拟屏驱动的显示设备。
 pub fn driver_present() -> bool {
-    interface_path().is_some()
+    max_displays() > 0
+}
+
+/// 能给主控加几块屏：IddCx 驱动 3 块；XP 驱动按系统列出的显示设备数（最多 3 块）。
+pub fn max_displays() -> u32 {
+    if interface_path().is_some() {
+        CONTROLLER_MAX
+    } else {
+        (super::vdisplay_xp::devices().len() as u32).min(CONTROLLER_MAX)
+    }
+}
+
+/// 用 XP 虚拟屏驱动（没有 IddCx 驱动、有 XP 驱动的显示设备）
+fn use_xp() -> bool {
+    interface_path().is_none() && !super::vdisplay_xp::devices().is_empty()
 }
 
 struct Driver(HANDLE);
@@ -360,16 +374,18 @@ pub struct VirtualDisplays {
     slots: HashMap<u32, Slot>,
     /// 第一块虚拟屏加之前的显示配置：最后一块删掉后若配置变了就恢复它
     baseline: Option<Config>,
+    /// XP 驱动接入的屏（GDI 名）
+    xp: Vec<String>,
 }
 
 impl VirtualDisplays {
     /// 我们的虚拟屏的 GDI 名（列屏幕时标记 is_virtual）。
     pub fn names(&self) -> Vec<String> {
-        self.slots.values().map(|s| s.gdi.clone()).collect()
+        self.slots.values().map(|s| s.gdi.clone()).chain(self.xp.iter().cloned()).collect()
     }
 
     pub fn ids(&self) -> Vec<u32> {
-        self.slots.values().filter_map(|s| id_of(&s.gdi)).collect()
+        self.names().iter().filter_map(|n| id_of(n)).collect()
     }
 
     /// 没有任何亮着的显示器（不算我们的虚拟屏）。
@@ -379,6 +395,15 @@ impl VirtualDisplays {
     }
 
     pub fn add(&mut self, width: u32, height: u32, refresh: u32, log: &dyn Fn(String)) -> Result<DisplayInfo, String> {
+        if self.slots.is_empty() && self.driver.is_none() && use_xp() {
+            if self.xp.len() as u32 >= CONTROLLER_MAX {
+                return Err("虚拟屏槽位已用完".into());
+            }
+            let (name, info) = super::vdisplay_xp::add(&self.xp, width, height)?;
+            log(format!("已加虚拟屏 {name}（XP 驱动，{}x{}）", info.width, info.height));
+            self.xp.push(name);
+            return Ok(info);
+        }
         if self.driver.is_none() {
             let d = Driver::open()?;
             if let Some(i) = d.info() {
@@ -442,6 +467,12 @@ impl VirtualDisplays {
 
     /// 按屏幕 id 删；不是我们的屏时返回 Ok（已经不在了）。
     pub fn remove(&mut self, id: u32, log: &dyn Fn(String)) -> Result<(), String> {
+        if let Some(i) = self.xp.iter().position(|n| id_of(n) == Some(id)) {
+            let name = self.xp.remove(i);
+            let r = super::vdisplay_xp::detach(&name);
+            log(format!("已删虚拟屏 {name}（XP 驱动）"));
+            return r;
+        }
         let Some(connector) = self.slots.iter().find(|(_, s)| id_of(&s.gdi) == Some(id)).map(|(c, _)| *c) else { return Ok(()) };
         self.remove_slot(connector, log)
     }
@@ -482,6 +513,10 @@ impl VirtualDisplays {
         let all: Vec<u32> = self.slots.keys().copied().collect();
         for c in all {
             let _ = self.remove_slot(c, log);
+        }
+        for name in std::mem::take(&mut self.xp) {
+            let _ = super::vdisplay_xp::detach(&name);
+            log(format!("已删虚拟屏 {name}（XP 驱动）"));
         }
         self.driver = None;
     }

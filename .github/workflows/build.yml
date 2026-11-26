@@ -369,8 +369,38 @@ jobs:
           path: out/*.zip
           if-no-files-found: error
 
+  xp-display-driver:
+    name: XP 虚拟屏驱动
+    # XPDM 小端口 + 显示驱动（lemon-galaxy-worker-windows/driver/xp），用固定版本的 llvm-mingw 编，嵌进 XP 兼容版被控端
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_MINGW_VER: "20261117"
+      LLVM_MINGW_SHA: e7a15a49a2ea95e9f3d8a9d0cfabe5052a4b10fb4777cc54de5a8c27b64bb701
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: ~/llvm-mingw.tar.xz
+          key: llvm-mingw-${{ env.LLVM_MINGW_VER }}-ubuntu-x86_64
+      - name: 准备 llvm-mingw（校验 SHA-256）
+        run: |
+          F=~/llvm-mingw.tar.xz
+          if ! echo "$LLVM_MINGW_SHA  $F" | sha256sum -c --status 2>/dev/null; then
+            curl -fsSL --retry 3 -o "$F" "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VER/llvm-mingw-$LLVM_MINGW_VER-ucrt-ubuntu-22.04-x86_64.tar.xz"
+            echo "$LLVM_MINGW_SHA  $F" | sha256sum -c -
+          fi
+          mkdir -p ~/llvm-mingw && tar -xJf "$F" -C ~/llvm-mingw --strip-components=1
+      - name: 编译
+        run: LLVM_MINGW=~/llvm-mingw lemon-galaxy-worker-windows/driver/xp/build.sh dist/xp-driver
+      - uses: actions/upload-artifact@v7
+        with:
+          name: xp-display-driver
+          path: dist/xp-driver/
+          if-no-files-found: error
+
   windows7:
     name: Windows 老系统兼容版被控端 (${{ matrix.flavor }})
+    needs: xp-display-driver
     strategy:
       fail-fast: false
       matrix:
@@ -401,8 +431,16 @@ jobs:
             target/legacy-tools
           key: rust-legacy-${{ matrix.flavor }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: rust-legacy-${{ matrix.flavor }}-
+      - uses: actions/download-artifact@v8
+        if: matrix.flavor == 'xp'
+        with:
+          name: xp-display-driver
+          path: target/xp-driver
       - name: 编译并核对导入表（每个导入的函数目标系统都要有）
-        run: scripts/build-windows-legacy.sh ${{ matrix.flavor }}
+        run: |
+          # XP 版把 XP 虚拟屏驱动嵌进 exe（lemon-galaxy-worker-windows/build.rs）
+          [ "${{ matrix.flavor }}" = xp ] && export LEMON_GALAXY_XP_DRIVER_DIR="$PWD/target/xp-driver"
+          scripts/build-windows-legacy.sh ${{ matrix.flavor }}
       - name: 冒烟测试（在新系统上跑一下）
         run: |
           dist/lemon-galaxy-worker.exe version
@@ -879,7 +917,7 @@ jobs:
             # 老系统兼容版：桌面端（界面要 .NET Framework 4.0 或更高，Windows 8 起自带，XP / Vista / 7 要先装）与 CLI
             W7="Windows 7 SP1 / 8 / 8.1 / Server 2008 R2–2012 R2，x64"
             W7X86="Windows Vista SP2 / 7 / 8 / 8.1 / 10 32 位，Server 2008"
-            WXP="Windows XP SP3 / Server 2003 SP2 32 位；没有声音、隐私屏、虚拟屏"
+            WXP="Windows XP SP3 / Server 2003 SP2 32 位；声音要声卡有「立体声混音」，装虚拟屏驱动时 XP 提示没通过徽标测试点「仍然继续」"
             NET40="需要 .NET Framework 4.0 或更高"
             [ -f "out/LemonGalaxyWorker-$V-windows7-x64.zip" ] && echo "| Windows 被控端（桌面端，兼容版） | $W7（$NET40） | [LemonGalaxyWorker-$V-windows7-x64.zip]($DL/LemonGalaxyWorker-$V-windows7-x64.zip) |"
             [ -f "out/LemonGalaxyWorker-$V-windows7-x86.zip" ] && echo "| Windows 被控端（桌面端，32 位兼容版） | $W7X86（$NET40） | [LemonGalaxyWorker-$V-windows7-x86.zip]($DL/LemonGalaxyWorker-$V-windows7-x86.zip) |"

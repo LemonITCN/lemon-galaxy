@@ -10,7 +10,8 @@
 # - Rust 标准库要求 Windows 10，用 tier 3 的 *-win7-windows-msvc 目标自己编标准库（-Z build-std）；
 # - 32 位链接 YY-Thunks（Vista 版 / XP 版）：Vista、XP 没有的系统接口由它补（运行时有真的用真的）；
 # - XP 再链 VC-LTL5 的 XP 库（C 运行库改用系统自带的 msvcrt.dll），子系统版本设 5.01（XP 只认 5.x），
-#   加 --cfg lemon_galaxy_xp：自动更新平台名 windowsxp，补上 YY-Thunks 没有的 WSASendMsg（lemon-galaxy-worker-windows/src/win/xp.rs）。
+#   加 --cfg lemon_galaxy_xp：自动更新平台名 windowsxp，补上 YY-Thunks 没有的 WSASendMsg（lemon-galaxy-worker-windows/src/win/xp.rs）；
+#   设了 LEMON_GALAXY_XP_DRIVER_DIR（driver/xp/build.sh 的输出目录）时把 XP 虚拟屏驱动嵌进 exe。
 set -euo pipefail
 FLAVOR="${1:?用法：$0 win7-x64|win7-x86|xp}"
 NIGHTLY="${LEGACY_NIGHTLY:-nightly}"
@@ -83,6 +84,16 @@ cd "$ROOT"
 cargo "+$NIGHTLY" build -Z build-std=std,panic_abort --release --target "$TARGET" -p lemon-galaxy-worker-windows
 OUT="$CARGO_TARGET_DIR/$TARGET/release"
 cp "$OUT/lemon-galaxy-worker.exe" "$DIST/"
+if [ "$FLAVOR" = xp ]; then
+  # XP 虚拟屏驱动要嵌在 exe 里（设了 LEMON_GALAXY_XP_DRIVER_DIR 时，见 lemon-galaxy-worker-windows/build.rs）
+  if grep -aq "VideoPortCreateSecondaryDisplay" "$DIST/lemon-galaxy-worker.exe" && grep -aq "InstalledDisplayDrivers" "$DIST/lemon-galaxy-worker.exe"; then
+    echo "已嵌入 XP 虚拟屏驱动"
+  elif [ -n "${LEMON_GALAXY_XP_DRIVER_DIR:-}" ]; then
+    echo "设了 LEMON_GALAXY_XP_DRIVER_DIR 但 exe 里没有 XP 虚拟屏驱动" >&2; exit 1
+  else
+    echo "没设 LEMON_GALAXY_XP_DRIVER_DIR：这份 XP 版不带虚拟屏驱动（先运行 lemon-galaxy-worker-windows/driver/xp/build.sh）"
+  fi
+fi
 if [ "$FLAVOR" = win7-x64 ]; then
   # 主控端内核库也出一份 Win7 版（发布时换进主控端压缩包，另出兼容版）
   RUSTFLAGS="-C target-feature=+crt-static" cargo "+$NIGHTLY" build -Z build-std=std,panic_abort --release --target "$TARGET" -p galaxy-ffi --features decoder --lib
