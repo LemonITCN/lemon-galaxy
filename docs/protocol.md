@@ -159,7 +159,7 @@ HelloAck {
   host: HostInfo { device_id, hostname, platform, os_version, arch, app_version },
   account: Option<u64>,               // 以哪个账号的身份被控（协助模式为 None）
   permissions: Permissions { view, control, files, terminal, clipboard, audio, ai_cap },
-  capabilities: Vec<String>,          // "terminal" "files" "exec" "display" "input" "clipboard" "clipboard_offer" "port_forward" "screenshot" "ui_tree" "privacy" "audio" "video_keepalive"
+  capabilities: Vec<String>,          // "terminal" "files" "exec" "display" "input" "clipboard" "clipboard_offer" "port_forward" "screenshot" "ui_tree" "privacy" "audio" "video_keepalive" "video_nack"
                                       // "virtual_display" + "virtual_display_max=N"（8.6）
 }
 ```
@@ -176,7 +176,7 @@ HelloAck {
 | `Files(op)` | 一次文件操作一条流：`List{path}`、`Stat{path}`、`Read{path, offset, len}`（被控端回多个 `Chunk` + `End`）、`Write{path, offset, truncate, mode, expect_sha256}`（主控端发多个 `Chunk` + `End`，被控端回结果）、`Mkdir{path, parents}`、`Remove{path, recursive}`、`Rename{from, to, overwrite}`、`Chmod{path, mode}`、`Home`、`Realpath{path}`、`Search{root, pattern, max}` |
 | `Exec { command, shell, cwd, env, timeout_ms, origin, max_output }` | 被控端流式回 `Stdout(bytes)` / `Stderr(bytes)`，最后 `Done { code, signal, timed_out, truncated, duration_ms }`；主控端可发 `Stdin(bytes)` / `Cancel` |
 | `PortForward { host, port }` | 被控端回 `Ok` 后双向透传字节 |
-| `Display { display_id, codecs, max_fps, bitrate_kbps }` | 被控端回 `Started { width, height, codec, channel }`；画面走 DATAGRAM；本流上 主控→被控 `Input(InputEvent)` / `RequestKeyframe` / `SetBitrate` / `Stop` / `ClientCursor(bool)`，被控→主控 `Cursor{x, y, visible}` / `Resized{...}`。`ClientCursor(true)` 表示主控端在本地画光标（跟手）：只有这块屏的所有观看者都要求时，被控端发出的画面才不画光标，并在光标变化时发 `Cursor`（画面像素，光标热点）；主控端只在能力列表有 `client_cursor` 时发 |
+| `Display { display_id, codecs, max_fps, bitrate_kbps }` | 被控端回 `Started { width, height, codec, channel }`；画面走 DATAGRAM；本流上 主控→被控 `Input(InputEvent)` / `RequestKeyframe` / `SetBitrate` / `Stop` / `ClientCursor(bool)` / `Nack(Vec<FragNack>)`（能力 `video_nack`，见 8.3），被控→主控 `Cursor{x, y, visible}` / `Resized{...}`。`ClientCursor(true)` 表示主控端在本地画光标（跟手）：只有这块屏的所有观看者都要求时，被控端发出的画面才不画光标，并在光标变化时发 `Cursor`（画面像素，光标热点）；主控端只在能力列表有 `client_cursor` 时发 |
 | `Clipboard` | 双向 `Update { kind, data }` |
 | `Audio { codecs, bitrate_kbps }` | 被控端回 `Started { codec, sample_rate, channels, channel }` 或 `Error`；声音走 DATAGRAM（8.5）；主控端发 `Stop` 或关流即停止 |
 
@@ -189,16 +189,43 @@ HelloAck {
 ```
 channel u8 | frame_id u32 LE | frag_idx u16 LE | frag_count u16 LE | flags u8 (bit0 关键帧) | [frag_idx == 0 时: pts_us u64 LE] | 负载
 ```
-接收方按 frame_id 重组。编码端无 B 帧、低延迟模式、无限 GOP（只在被要求时出关键帧），所以丢帧后必须等关键帧：
-- 丢帧的判定：一帧的分片 150 毫秒没有新的到达（按最后一片算，大关键帧慢慢传不算丢）；后一帧先收齐（前面没收齐的作废）；帧号跳号（整帧一片都没收到）。
-- 丢帧后到下一个关键帧之前，收齐的帧也不交给解码器（画面停在最后一张好的帧，不花屏），立刻发 `RequestKeyframe`，之后每 500 毫秒重催；刚打开画面时也从第一个关键帧开始交。
+接收方按 frame_id 重组。编码端无 B 帧、低延迟模式、无限 GOP（只在被要求时出关键帧），P 帧依赖上一帧。
+
+**发送（被控端内核 `galaxy-host` 的 `vsend.rs`，三个平台共用）**：每路画面一个发送任务，平台层只把编好的帧放进队列。
+- 按令牌桶匀速发：速率为画面码率的 6 倍、至少 100 Mbit/s（环境变量 `LEMON_GALAXY_VIDEO_PACE_MBPS` 可改，0 为不限速）。
+  局域网往返只有几毫秒，QUIC 拥塞窗口很快涨得很大，不限速时一帧几百 KB 按有线网卡线速冲出去，主控在 Wi-Fi 上时中间成片丢。
+- 积压时新的关键帧到了，排在它前面还没发的帧直接丢掉；帧号只按真正发出的帧递增。
+- 发过的分片留 1 秒（最多 16 MB），主控端 `Nack` 时优先补发，每片最多补 4 次。
+
+**接收（主控端内核 `galaxy-client`）**：
+- 被控端有能力 `video_nack`（新内核都有）：按帧号**顺序**交给解码器（后面的帧先收齐也要等前面的）。缺片立即 `DisplayIn::Nack(Vec<FragNack { frame_id, frags }>)`
+  （`frags` 为空表示整帧）：同一帧里后面的分片到了而前面的没到、后一帧的分片到了而这一帧还缺、帧号跳过（整帧要）；
+  最后几片丢了又没有后续数据时，安静 max(1.5×往返, 12 毫秒) 后再要；要过还没到的隔 max(2×往返, 25 毫秒) 再要，每帧最多 4 轮。
+  挡在最前面的帧等了 max(8×往返, 400 毫秒) 还不齐才算丢帧，按下面老办法等关键帧。帧号一次跳过超过 64 帧直接等关键帧。
+  （Wi-Fi 上即使不拥塞也会成片丢包：Ubuntu 有线 → Mac Wi-Fi 用纯 UDP 实测 10 Mbit/s 时丢 5%～20%。一帧几十上百片，不补发几乎帧帧作废。）
+- 老被控端（没有 `video_nack`）：
+  - 丢帧的判定：一帧的分片 150 毫秒没有新的到达（按最后一片算，大关键帧慢慢传不算丢）；后一帧先收齐（前面没收齐的作废）；帧号跳号（整帧一片都没收到）。
+  - 丢帧后到下一个关键帧之前，收齐的帧也不交给解码器（画面停在最后一张好的帧，不花屏），立刻发 `RequestKeyframe`，之后每 500 毫秒重催；刚打开画面时也从第一个关键帧开始交。
 
 画面结束：本流结束（被控端结束、出错 `Error`、断线）时主控端必须告诉界面（内核 `VideoSink::on_closed`），自己 `Stop` 的不算。
 能力列表有 `video_keepalive` 的被控端（Windows、Linux）空闲时也每秒至少发一帧；主控端 4 秒没有画面数据先发 `RequestKeyframe` 探一下，
 10 秒（刚打开、还没收到过数据时 20 秒）仍没有就判定「画面没有响应」，`Stop` 并通知界面。界面收到画面结束或会话断开时显示「正在重新连接」并自动重连。
 
-码率自适应（被控端）：主控端要求的码率是上限；被控端每秒看一次 QUIC 连接的丢包率、拥塞事件和数据报发送缓冲占用，
-拥塞时立即降到七成（3 秒内不再降），连续 15 秒平稳再升 25%，最低 300 kbps。主控端发 `SetBitrate` 视为用户主动选择，直接按新值重新开始。
+**编码节奏与编码器码率（Windows、Linux 被控端的采集线程共用 `galaxy-host` 的 `pacing.rs`）**：
+- NVENC、VA-API、Media Foundation 的 CBR 按配置帧率分码率（每帧平均 = 码率 ÷ 帧率），不看两帧实际隔多久。桌面只在变化时出帧，
+  实际每秒几帧到十几帧，按要求的 60 帧分下来每帧只有选定码率的几十分之一（12 Mbps 时约 25 KB），整屏一变就满屏马赛克，实际只用掉
+  选定码率的几分之一（Ubuntu 26.04 + RTX 3080 Ti 实测窗口每 100 毫秒变一次：约 11 帧/秒、实际 2.2 Mbps）。所以按最近半秒的实际帧率
+  把交给编码器的码率放大（配置帧率 ÷ 实际帧率，最多 4 倍）；VBV 按要求码率的 250 毫秒算，不随放大变（12 Mbps 时单帧最多约 375 KB）。
+  openh264 用时间戳码控、macOS VideoToolbox 本来就按时间戳分码率，不放大。
+- 画面停下后，按距最后一次变化 80 / 200 / 450 / 900 毫秒把最后一帧再编几次（P 帧补上量化误差，内容没变时几乎不占码率），
+  几百毫秒内变清楚；之后每秒保活一次。这一阵变化里最大的帧不到 4 KB（光标闪烁、敲一个字）不补：小块区域本来就清楚，软件编码补一次要几十毫秒 CPU。
+  macOS 被控端在 `VideoEncoder.swift` 里按同样规则补编（本机实测补编后 PSNR 29.9 → 32.5 dB）。
+- NVENC 设量化参数下限（P 帧 20、I 帧 18）：预算放大后静止画面不往近乎无损里砸码率（不设时实测每帧约 6.5 KB 反复重编噪声、永不收敛）。
+
+码率自适应（被控端 `rate.rs`）：主控端要求的码率是上限；被控端每秒看一次积压（QUIC 数据报队列 + 发送任务队列里没发出的字节，按当前码率
+能发多久）与 QUIC 连接的丢包。连续两秒积压超过 300 毫秒，或两秒合计丢包至少 20 个且超过 25%，降到七成（2 秒内不再降）；连续 4 秒平稳升 30%，
+最低 300 kbps。以前按单秒丢包 3% 判拥塞、15 秒才升 25%，Wi-Fi 上零星丢包就把码率一路压到 300 kbps、几分钟回不来。
+主控端发 `SetBitrate` 视为用户主动选择，直接按新值重新开始。
 
 ### 8.4 输入事件
 

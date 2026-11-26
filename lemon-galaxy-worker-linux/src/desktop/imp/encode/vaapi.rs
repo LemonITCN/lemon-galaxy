@@ -10,7 +10,7 @@
 
 use super::convert::bgra_to_nv12;
 use super::dl::Lib;
-use super::{EncodedFrame, HwEncoder};
+use super::{EncodedFrame, EncoderRate, HwEncoder};
 use std::ffi::{c_char, c_int, c_void};
 use std::os::fd::{AsRawFd, OwnedFd};
 
@@ -172,6 +172,8 @@ pub struct Vaapi {
     aligned: (u32, u32),
     fps: u32,
     bps: u32,
+    /// VBV 缓冲（bit），见 galaxy_host::pacing::VBV_MS
+    vbv: u32,
     cabac: bool,
     rc_mode: u32,
     frame_num: u32,
@@ -323,6 +325,7 @@ impl Vaapi {
                 aligned,
                 fps: fps.max(1),
                 bps: kbps.clamp(200, 500_000) * 1000,
+                vbv: EncoderRate::plain(kbps).vbv_bits(kbps.clamp(200, 500_000) * 1000, fps),
                 cabac: profile == PROFILE_H264_MAIN,
                 rc_mode,
                 frame_num: 0,
@@ -372,7 +375,7 @@ impl Vaapi {
         rc.u32(24, if reset { RC_FLAG_RESET } else { 0 });
         let mut fr = Raw::new(FRAMERATE_SIZE);
         fr.u32(0, self.fps);
-        let vbv = self.bps / self.fps * 8;
+        let vbv = self.vbv;
         let mut hrd = Raw::new(HRD_SIZE);
         hrd.u32(0, vbv / 4 * 3);
         hrd.u32(4, vbv);
@@ -537,8 +540,9 @@ impl HwEncoder for Vaapi {
         Ok(vec![EncodedFrame { data, keyframe: key }])
     }
 
-    fn set_bitrate(&mut self, kbps: u32) -> bool {
-        self.bps = kbps.clamp(200, 500_000) * 1000;
+    fn set_bitrate(&mut self, rate: EncoderRate) -> bool {
+        self.bps = rate.kbps.clamp(200, 500_000) * 1000;
+        self.vbv = rate.vbv_bits(self.bps, self.fps);
         self.rate_dirty = true;
         true
     }

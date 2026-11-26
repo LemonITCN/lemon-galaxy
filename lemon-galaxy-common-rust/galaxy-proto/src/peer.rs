@@ -202,6 +202,10 @@ pub const CAP_COMPUTER_USE: &str = "computer_use";
 /// 不报这个能力的被控端（如 macOS 被控端画面不变时不发帧）主控端不做这个判断。
 pub const CAP_VIDEO_KEEPALIVE: &str = "video_keepalive";
 
+/// 被控端保留最近发过的画面分片，主控端发 `DisplayIn::Nack` 时补发（docs/protocol.md 8.3）。
+/// 没有这个能力的老被控端，主控端照旧丢帧后要关键帧。
+pub const CAP_VIDEO_NACK: &str = "video_nack";
+
 /// 虚拟屏能力：能力列表里有 "virtual_display"，另有 "virtual_display_max=N" 给出主控最多能加几块。
 pub const CAP_VIRTUAL_DISPLAY: &str = "virtual_display";
 pub const CAP_VIRTUAL_DISPLAY_MAX: &str = "virtual_display_max";
@@ -495,6 +499,15 @@ pub enum DisplayIn {
     /// 主控端自己在本地画光标（跟手）：被控端发出的画面里不画光标，只在位置变化时发 Cursor。
     /// 加在末尾，老版本被控端收到会关流——主控端只在能力列表有 "client_cursor" 时才发。
     ClientCursor(bool),
+    /// 丢片重传（docs/protocol.md 8.3）：这些帧缺的分片请再发一次。加在末尾，主控端只在能力列表有 "video_nack" 时才发。
+    Nack(Vec<FragNack>),
+}
+
+/// 一帧要重发的分片；`frags` 为空表示整帧（一片都没收到，不知道分了几片）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FragNack {
+    pub frame_id: u32,
+    pub frags: Vec<u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

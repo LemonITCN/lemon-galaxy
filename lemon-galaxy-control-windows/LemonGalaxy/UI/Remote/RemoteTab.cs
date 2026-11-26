@@ -1534,7 +1534,9 @@ internal static class RemoteView
         if (tab.PrivacySupported) items.Add(K.IconButton("eyeOff", L.T("remote.privacy"), tab.TogglePrivacy, tab.Privacy));
         items.Add(K.Spacer(8));
         var detail = tab.StreamW > 0 ? $"{tab.StreamW}×{tab.StreamH} · H.264" : "";
-        items.Add(K.Tip(K.Text($"{tab.MeasuredFps} fps · {(tab.MeasuredKbps / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)} Mbps", 11.5, Th.Tertiary), detail));
+        // 不到 1 Mbps 按 kbps 显示（画面静止时每秒只有几十 kbps，按 Mbps 只会显示 0.0）
+        var rate = tab.MeasuredKbps < 1000 ? $"{tab.MeasuredKbps} kbps" : $"{(tab.MeasuredKbps / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)} Mbps";
+        items.Add(K.Tip(K.Text($"{tab.MeasuredFps} fps · {rate}", 11.5, Th.Tertiary), detail));
         if (tab.Peer != null) items.Add(TerminalView.PathBadge(tab.Peer));
         items.Add(Divider());
         items.Add(K.IconButton("fullscreen", L.T("remote.fullscreen") + " (F11)", tab.EnterFullscreen));

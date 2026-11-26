@@ -5,7 +5,6 @@ use crate::fio;
 use crate::platform::FrameSink;
 use crate::service::{ActiveSession, HostService};
 use crate::term::TermEvent;
-use bytes::Bytes;
 use galaxy_agent::risk::{self, FileAction, ShellKind};
 use galaxy_proto::peer::*;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -286,7 +285,11 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
                 return Ok(());
             }
             let channel = NEXT_CHANNEL.fetch_add(1, Ordering::Relaxed).max(1);
-            let sink = Arc::new(VideoSender { conn: conn.clone(), channel, frame: AtomicU32::new(0), ctl: parking_lot::Mutex::new(None) });
+            // 这一路现在的画面码率（码率自适应与主控改码率时更新），发送任务按它定匀速发送的速率
+            let kbps_now = Arc::new(AtomicU32::new(req.bitrate_kbps.clamp(200, 200_000)));
+            let queue = crate::vsend::start(conn.clone(), channel, kbps_now.clone());
+            let backlog = queue.queued.clone();
+            let sink = Arc::new(VideoSender { queue: parking_lot::Mutex::new(Some(queue)), ctl: parking_lot::Mutex::new(None) });
             let (ctl_tx, mut ctl_rx) = mpsc::channel::<DisplayOut>(64);
             *sink.ctl.lock() = Some(ctl_tx);
             let platform = host.platform.read().clone();
@@ -314,10 +317,10 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
                     }
                 }
             });
-            // 码率自适应：每秒看一次连接的丢包与拥塞
+            // 码率自适应：每秒看一次数据报发送队列的积压与连接的丢包（rate.rs）
             let rate = Arc::new(parking_lot::Mutex::new(crate::rate::RateCtl::new(req.bitrate_kbps.clamp(200, 200_000), std::time::Instant::now())));
             let adapt = {
-                let (rate, conn, platform, display, hub) = (rate.clone(), conn.clone(), platform.clone(), req.display_id, host.captures.clone());
+                let (rate, conn, platform, display, hub, kbps_now) = (rate.clone(), conn.clone(), platform.clone(), req.display_id, host.captures.clone(), kbps_now.clone());
                 tokio::spawn(async move {
                     let mut max_free = conn.datagram_send_buffer_space().max(1);
                     loop {
@@ -325,15 +328,13 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
                         let st = conn.stats();
                         let free = conn.datagram_send_buffer_space();
                         max_free = max_free.max(free);
-                        let sample = crate::rate::Sample {
-                            sent_packets: st.path.sent_packets,
-                            lost_packets: st.path.lost_packets,
-                            congestion_events: st.path.congestion_events,
-                            buffer_free: free as f32 / max_free as f32,
-                        };
+                        // 积压 = QUIC 数据报队列里的 + 我们发送队列里还没交给 QUIC 的
+                        let queued_bytes = max_free.saturating_sub(free) as u64 + backlog.load(Ordering::Relaxed);
+                        let sample = crate::rate::Sample { sent_packets: st.path.sent_packets, lost_packets: st.path.lost_packets, queued_bytes };
                         let next = rate.lock().on_sample(sample, std::time::Instant::now());
                         if let Some(k) = next {
-                            tracing::debug!("画面码率自适应 → {k} kbps（丢包 {} / 发送 {}）", st.path.lost_packets, st.path.sent_packets);
+                            kbps_now.store(k, Ordering::Relaxed);
+                            tracing::info!("画面码率自适应 → {k} kbps（累计丢包 {} / 发送 {}，发送队列积压 {} 字节，往返 {} 毫秒）", st.path.lost_packets, st.path.sent_packets, sample.queued_bytes, st.path.rtt.as_millis());
                             let (p, hub) = (platform.clone(), hub.clone());
                             let _ = tokio::task::spawn_blocking(move || hub.set_bitrate(&p, display, sub_id, k)).await;
                         }
@@ -352,10 +353,20 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
                     DisplayIn::RequestKeyframe => platform.request_keyframe(req.display_id),
                     DisplayIn::SetBitrate(k) => {
                         let k = rate.lock().set_ceiling(k.clamp(200, 200_000), std::time::Instant::now());
+                        kbps_now.store(k, Ordering::Relaxed);
                         host.captures.set_bitrate(&platform, req.display_id, sub_id, k);
                     }
                     DisplayIn::Stop => break,
                     DisplayIn::ClientCursor(on) => host.captures.set_client_cursor(&platform, req.display_id, sub_id, on),
+                    DisplayIn::Nack(v) => {
+                        // 新主控端打开画面后先发一个空的打招呼：它会补要分片，零星丢包不必降码率
+                        rate.lock().set_retransmits(true);
+                        if !v.is_empty() {
+                            if let Some(q) = sink.queue.lock().as_ref() {
+                                q.nack(v);
+                            }
+                        }
+                    }
                 }
             }
             if !held.is_empty() {
@@ -367,6 +378,8 @@ async fn handle(host: Arc<HostService>, conn: quinn::Connection, sess: Arc<Activ
             adapt.abort();
             host.captures.unsubscribe(&platform, req.display_id, sub_id);
             *sink.ctl.lock() = None;
+            // 关掉发送队列，发送任务发完手上的帧后结束
+            *sink.queue.lock() = None;
             writer.abort();
         }
         StreamOpen::Audio(req) => {
@@ -649,30 +662,16 @@ async fn run_helper(exe: &std::path::Path, sess: &ActiveSession, op: FileOp, rec
     Ok(())
 }
 
-/// 把平台层编码好的帧切片成数据报发出。
+/// 平台层编码好的帧交给这一路的发送任务（切片、匀速发出，见 vsend.rs）。
 struct VideoSender {
-    conn: quinn::Connection,
-    channel: u8,
-    frame: AtomicU32,
+    queue: parking_lot::Mutex<Option<crate::vsend::Queue>>,
     ctl: parking_lot::Mutex<Option<mpsc::Sender<DisplayOut>>>,
 }
 
 impl FrameSink for VideoSender {
     fn push(&self, data: Vec<u8>, pts_us: u64, keyframe: bool) {
-        let max = self.conn.max_datagram_size().unwrap_or(1100).saturating_sub(VideoFragHeader::BASE_LEN + 8).max(256);
-        let frame_id = self.frame.fetch_add(1, Ordering::Relaxed);
-        let count = data.len().div_ceil(max).max(1);
-        if count > u16::MAX as usize {
-            return;
-        }
-        for (i, chunk) in data.chunks(max).enumerate() {
-            let h = VideoFragHeader { channel: self.channel, frame_id, frag_idx: i as u16, frag_count: count as u16, keyframe, pts_us };
-            let mut b = Vec::with_capacity(chunk.len() + 20);
-            h.encode(&mut b);
-            b.extend_from_slice(chunk);
-            if self.conn.send_datagram(Bytes::from(b)).is_err() {
-                break;
-            }
+        if let Some(q) = self.queue.lock().as_ref() {
+            q.push(crate::vsend::Frame { data, pts_us, keyframe });
         }
     }
     fn resized(&self, width: u32, height: u32) {

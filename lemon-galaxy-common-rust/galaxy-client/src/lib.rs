@@ -38,6 +38,7 @@ pub mod signal;
 pub mod ssh;
 pub mod update;
 pub mod vault;
+pub mod vrecv;
 pub mod wake;
 
 pub use error::{ClientError, Result};

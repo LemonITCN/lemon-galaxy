@@ -5,6 +5,7 @@ use super::capture::{attach_input_desktop, draw_cursor, find_monitor, grab, inpu
 use super::encode::{com_init, hardware_requests, has_parameter_sets, jpeg, nal_types, Request, VideoEncoder};
 use super::input::Injector;
 use super::ipc::{read_msg, write_msg, FromAgent, ToAgent};
+use galaxy_host::pacing::Pacer;
 use galaxy_proto::peer::{ClipboardData, ImageData, InputEvent};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -291,7 +292,8 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
     let mut started = false;
     // 编码器的输入里已经有画面
     let mut have = false;
-    let mut last_sent = Instant::now();
+    // 编码节奏（画面停下后补编、保活）与交给编码器的码率（按实际帧率放大），见 galaxy_host::pacing
+    let mut pacer = Pacer::new(fps, ctl.bitrate.load(Ordering::Relaxed));
     let mut last_cursor = (i32::MIN, i32::MIN);
     let mut last_report: Option<(i32, i32, bool)> = None;
     let mut last_in_video = true;
@@ -318,14 +320,17 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
         }
         // 编码器：没有或截屏尺寸变了就重建；改码率时硬件编码器直接改，软件编码器重建
         let size = cap.size();
+        if ctl.reconfig.swap(false, Ordering::Relaxed) {
+            pacer.set_target(ctl.bitrate.load(Ordering::Relaxed));
+        }
         let mut rebuild = enc.as_ref().map(|e| e.source_size() != size).unwrap_or(true);
-        if ctl.reconfig.swap(false, Ordering::Relaxed) && !rebuild {
-            if let Some(e) = enc.as_mut() {
-                rebuild = !e.set_bitrate(ctl.bitrate.load(Ordering::Relaxed));
+        if !rebuild {
+            if let (Some(e), Some(k)) = (enc.as_mut(), pacer.retune(Instant::now())) {
+                rebuild = !e.set_bitrate(k);
             }
         }
         if rebuild {
-            let kbps = ctl.bitrate.load(Ordering::Relaxed);
+            let kbps = pacer.target();
             let req = if hw_allowed { request.clone() } else { Request::software() };
             match VideoEncoder::new(size.0, size.1, fps, kbps, cap.device(), &req) {
                 Ok((e, notes)) => {
@@ -347,6 +352,7 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
                         reopen(&mut cap, &mon, fps, e.device());
                         have = false;
                     }
+                    pacer.encoder_ready(kbps, e.scales_bitrate());
                     enc = Some(e);
                     enc_errors = 0;
                     ctl.keyframe.store(true, Ordering::Relaxed);
@@ -432,20 +438,22 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
         }
         let toggled = in_video != last_in_video;
         last_in_video = in_video;
-        // 画面变了、画面里的光标动了、要关键帧、或空闲超过 1 秒（保活）时才编码
-        if changed || need_key || toggled || (in_video && cursor != last_cursor) || last_sent.elapsed() > Duration::from_secs(1) {
+        // 画面变了、画面里的光标动了、要关键帧时立即编码；停下后按节奏补编几次，之后每秒保活一次
+        let now = Instant::now();
+        if let Some(why) = pacer.decide(changed || need_key || toggled || (in_video && cursor != last_cursor), now) {
             last_cursor = cursor;
             match e.encode(&frame, &mon, in_video, need_key, t0.elapsed().as_micros() as u64) {
                 Ok(frames) => {
                     enc_errors = 0;
+                    pacer.encoded(why, now, frames.iter().map(|f| f.data.len()).sum());
                     for f in frames {
-                        last_sent = Instant::now();
                         if out.send(FromAgent::Frame { display, data: f.data, pts_us: t0.elapsed().as_micros() as u64, keyframe: f.keyframe }).is_err() {
                             return;
                         }
                     }
                 }
                 Err(err) => {
+                    pacer.encoded(why, now, 0);
                     log(&out, true, format!("编码失败（{}）：{err}", e.name()));
                     if need_key {
                         ctl.keyframe.store(true, Ordering::Relaxed);
@@ -587,7 +595,7 @@ fn bench(label: &str, req: &Request, mon: &Monitor, base: &Frame, cap: &mut Box<
         if i == 30 || i == 60 {
             let kbps = if i == 30 { 1000 } else { 8000 };
             let t = Instant::now();
-            if e.set_bitrate(kbps) {
+            if e.set_bitrate(galaxy_host::pacing::EncoderRate::plain(kbps)) {
                 runtime.push(format!("第 {i} 帧改 {kbps} kbps：运行时生效（{:.2} ms）", t.elapsed().as_secs_f64() * 1000.0));
             } else {
                 runtime.push(format!("第 {i} 帧改 {kbps} kbps：要重建编码器"));

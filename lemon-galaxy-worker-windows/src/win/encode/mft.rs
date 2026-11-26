@@ -5,7 +5,7 @@
 //! mfplat.dll 的函数全部运行时加载：Windows N 版没装媒体功能包、服务器核心版没有它，静态导入的话程序都起不来。
 //! 异步 MFT 的事件在单独线程里阻塞取，转给编码调用方；ProcessInput / ProcessOutput 都在调用方线程。
 
-use super::{has_parameter_sets, strip_aud, EncodedFrame, HwEncoder};
+use super::{has_parameter_sets, strip_aud, EncodedFrame, EncoderRate, HwEncoder};
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -518,9 +518,10 @@ impl HwEncoder for Mft {
         Ok(())
     }
 
-    fn set_bitrate(&mut self, kbps: u32) -> bool {
+    /// 只改平均码率（Media Foundation 编码器开始编码后不一定允许改 VBV）
+    fn set_bitrate(&mut self, rate: EncoderRate) -> bool {
         let Some(api) = &self.codec else { return false };
-        unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(kbps.clamp(200, 500_000) * 1000)).is_ok() }
+        unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(rate.kbps.clamp(200, 500_000) * 1000)).is_ok() }
     }
 }
 

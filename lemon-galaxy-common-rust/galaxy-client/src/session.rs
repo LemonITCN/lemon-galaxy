@@ -547,6 +547,13 @@ impl PeerSession {
         let close_once = Arc::new(CloseOnce { done: closed, sink: sink.clone() });
         // 被控端空闲时也每秒至少发一帧（能力 video_keepalive）时才能用「多久没数据」判断画面卡死
         let keepalive = self.ack.capabilities.iter().any(|c| c == CAP_VIDEO_KEEPALIVE);
+        // 被控端能补发丢了的分片（能力 video_nack）：按帧号顺序交、缺片就要（vrecv.rs）；老被控端照旧丢帧后要关键帧
+        let nack_mode = self.ack.capabilities.iter().any(|c| c == CAP_VIDEO_NACK);
+        if nack_mode {
+            // 打招呼：告诉被控端这一路会补要分片（它据此不把零星丢包当拥塞，见 galaxy-host rate.rs）
+            let _ = frame::write(&mut *ch.send.lock().await, &DisplayIn::Nack(vec![])).await;
+        }
+        let conn = self.conn.clone();
         // 控制消息；这条流结束（被控端结束画面、出错、断线）要告诉界面，不然界面停在最后一帧还以为连着
         let sink2 = sink.clone();
         let rec2 = recorder.clone();
@@ -573,10 +580,15 @@ impl PeerSession {
             };
             close2.fire(reason);
         });
-        // 重组：收不齐、跳号的帧都算丢帧；丢帧后到关键帧之前的帧不交给解码器，并要关键帧（见 Reassembler）
+        // 重组：收不齐、跳号的帧都算丢帧；丢帧后到关键帧之前的帧不交给解码器，并要关键帧（见 Reassembler）。
+        // 丢片重传时缺片先要被控端补发，补不回来才算丢帧（见 vrecv.rs）
         let ch2 = Arc::downgrade(&ch);
         tokio::spawn(async move {
             let mut asm = Reassembler::default();
+            let mut oasm = crate::vrecv::OrderedAssembler::default();
+            let mut rtt = conn.rtt();
+            let mut rtt_at = std::time::Instant::now();
+            let mut last_tick = std::time::Instant::now();
             // 刚打开时被控端第一帧就是关键帧，先等一会再催
             let mut last_kf_req = std::time::Instant::now();
             // 看门狗：最后一次收到画面数据的时间，以及这段静默里有没有探过（要过关键帧）
@@ -584,8 +596,9 @@ impl PeerSession {
             let mut got_any = false;
             let mut probed = false;
             loop {
-                // 没有新数据时也要定时检查：收不齐的帧超时、等关键帧时重催
-                let got = match tokio::time::timeout(KEYFRAME_POLL, rx.recv()).await {
+                // 没有新数据时也要定时检查：收不齐的帧超时、等关键帧时重催；丢片重传时有没收齐的帧就勤点查（尾部丢片要靠它发现）
+                let poll = if nack_mode && oasm.incomplete() { NACK_POLL } else { KEYFRAME_POLL };
+                let got = match tokio::time::timeout(poll, rx.recv()).await {
                     Ok(Some(d)) => Some(d),
                     Ok(None) => break,
                     Err(_) => None,
@@ -617,19 +630,45 @@ impl PeerSession {
                         break;
                     }
                 }
-                let step = match got.as_ref().and_then(|d| VideoFragHeader::decode(d).map(|(h, pos)| (h, d.slice(pos..)))) {
-                    Some((h, payload)) => asm.push(h, payload, now),
-                    None => asm.tick(now),
+                let frag = got.as_ref().and_then(|d| VideoFragHeader::decode(d).map(|(h, pos)| (h, d.slice(pos..))));
+                let (frames, nacks, new_loss, waiting) = if nack_mode {
+                    if now.duration_since(rtt_at) >= Duration::from_millis(500) {
+                        rtt = conn.rtt();
+                        rtt_at = now;
+                    }
+                    let mut out = match frag {
+                        Some((h, payload)) => oasm.push(h, payload, now, rtt),
+                        None => crate::vrecv::Out::default(),
+                    };
+                    // 数据一直在来时也要定时查尾部丢片、补发超时与放弃
+                    if got.is_none() || now.duration_since(last_tick) >= NACK_POLL {
+                        last_tick = now;
+                        let t = oasm.tick(now, rtt);
+                        out.frames.extend(t.frames);
+                        out.nacks.extend(t.nacks);
+                        out.new_loss |= t.new_loss;
+                    }
+                    (out.frames, out.nacks, out.new_loss, oasm.waiting_keyframe())
+                } else {
+                    let step = match frag {
+                        Some((h, payload)) => asm.push(h, payload, now),
+                        None => asm.tick(now),
+                    };
+                    (step.frame.into_iter().collect(), vec![], step.new_loss, asm.waiting_keyframe())
                 };
-                if let Some((data, pts, kf)) = step.frame {
+                for (data, pts, kf) in frames {
                     if let Some(r) = recorder.lock().clone() {
                         r.on_video(&data, kf);
                     }
                     sink.on_frame(data, pts, kf);
                 }
-                if asm.waiting_keyframe() {
+                if !nacks.is_empty() {
+                    let Some(c) = ch2.upgrade() else { break };
+                    c.nack(nacks).await;
+                }
+                if waiting {
                     // 刚发现丢帧立刻要；之后关键帧也可能丢，隔一会再催
-                    let gap = if step.new_loss { KEYFRAME_REQ_MIN_GAP } else { KEYFRAME_RETRY };
+                    let gap = if new_loss { KEYFRAME_REQ_MIN_GAP } else { KEYFRAME_RETRY };
                     if now.duration_since(last_kf_req) >= gap {
                         last_kf_req = now;
                         let Some(c) = ch2.upgrade() else { break };
@@ -788,6 +827,11 @@ impl DisplayChannel {
     pub async fn request_keyframe(&self) {
         let _ = frame::write(&mut *self.send.lock().await, &DisplayIn::RequestKeyframe).await;
     }
+
+    /// 要被控端补发丢了的分片（只在被控端有能力 video_nack 时调用）
+    async fn nack(&self, v: Vec<FragNack>) {
+        let _ = frame::write(&mut *self.send.lock().await, &DisplayIn::Nack(v)).await;
+    }
     /// 主控端自己画光标（被控端能力里有 "client_cursor" 才发）。
     pub async fn set_client_cursor(&self, on: bool) {
         let _ = frame::write(&mut *self.send.lock().await, &DisplayIn::ClientCursor(on)).await;
@@ -813,6 +857,8 @@ const KEYFRAME_REQ_MIN_GAP: Duration = Duration::from_millis(100);
 const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
 /// 没有新数据时多久检查一次超时与重催
 const KEYFRAME_POLL: Duration = Duration::from_millis(100);
+/// 丢片重传时有没收齐的帧，多久查一次（尾部丢片、补发超时）
+const NACK_POLL: Duration = Duration::from_millis(5);
 /// 看门狗（被控端有 video_keepalive 时）：这么久没有画面数据先要关键帧探一下
 const STALL_PROBE: Duration = Duration::from_secs(4);
 /// 再久还没有就判定画面没有响应，结束画面让界面重连

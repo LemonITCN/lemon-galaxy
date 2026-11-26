@@ -106,6 +106,7 @@ H.264（Annex-B，关键帧带 SPS/PPS，不带 AUD，与其他被控端相同�
 2. **VA-API**（Intel、AMD，以及 NVIDIA 以外装了 VA 驱动的显卡）：`libva.so.2` + `libva-drm.so.2`，打开 `/dev/dri/renderD*`；CPU 转 NV12 后上传，驱动自己写 SPS/PPS。
 3. **openh264** 软件编码兜底。
 
+NVENC、VA-API 按配置帧率分码率，画面帧率低时由内核 `galaxy-host` 的 `pacing.rs` 放大交给编码器的码率、VBV 按时间算；openh264 用时间戳码控；画面停下后补编几次（见 [protocol.md](protocol.md) 8.3）。
 建好编码器后先试编一帧，确认真能出带 SPS/PPS 的关键帧才用；硬件编码连续出错 3 次，这路画面改用软件编码。环境变量 `LEMON_GALAXY_VIDEO_ENCODER=auto|nvenc|vaapi|software` 可指定。`lemon-galaxy-worker selftest-capture` 打印找到的会话、屏幕、各编码器能不能用与耗时。
 
 ## 7. 本机控制接口（图形界面用）

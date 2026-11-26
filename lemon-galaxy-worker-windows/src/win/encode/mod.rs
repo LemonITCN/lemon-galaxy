@@ -17,6 +17,7 @@ mod nvenc;
 mod soft;
 
 use super::capture::{draw_cursor, Frame, Monitor};
+pub use galaxy_host::pacing::EncoderRate;
 use gpu::{Adapter, Gpu, VENDOR_AMD, VENDOR_INTEL, VENDOR_NVIDIA};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
@@ -32,8 +33,8 @@ trait HwEncoder: Send {
     fn name(&self) -> String;
     /// 编一帧。异步编码器可能一次出 0 帧或多帧。
     fn encode(&mut self, nv12: &ID3D11Texture2D, keyframe: bool, pts_us: u64) -> anyhow::Result<Vec<EncodedFrame>>;
-    /// 运行时改码率（不出关键帧）；不支持返回 false（调用方重建编码器）。
-    fn set_bitrate(&mut self, kbps: u32) -> bool;
+    /// 运行时改码率与 VBV（不出关键帧）；不支持返回 false（调用方重建编码器）。
+    fn set_bitrate(&mut self, rate: EncoderRate) -> bool;
     /// 建好后试编一帧，确认真能出帧（输出丢掉）。
     fn probe(&mut self, _nv12: &ID3D11Texture2D) -> anyhow::Result<()> {
         Ok(())
@@ -270,7 +271,7 @@ impl VideoEncoder {
                 if keyframe {
                     enc.force_keyframe();
                 }
-                Ok(match enc.encode(&work.data, work.width, work.height)? {
+                Ok(match enc.encode(&work.data, work.width, work.height, pts_us)? {
                     Some((mut data, keyframe)) => {
                         strip_aud(&mut data);
                         vec![EncodedFrame { data, keyframe }]
@@ -285,10 +286,16 @@ impl VideoEncoder {
         }
     }
 
+    /// 编码器按配置帧率分码率、能运行时改码率（NVENC、Media Foundation 的 CBR）：画面帧率低时由 galaxy_host::pacing 放大码率。
+    /// openh264 按时间戳分码率，不用放大。
+    pub fn scales_bitrate(&self) -> bool {
+        matches!(self.inner, Inner::Hw { .. })
+    }
+
     /// 改码率。硬件编码器运行时改，不出关键帧；返回 false 时调用方重建编码器。
-    pub fn set_bitrate(&mut self, kbps: u32) -> bool {
+    pub fn set_bitrate(&mut self, rate: EncoderRate) -> bool {
         match &mut self.inner {
-            Inner::Hw { enc, .. } => enc.set_bitrate(kbps),
+            Inner::Hw { enc, .. } => enc.set_bitrate(rate),
             Inner::Soft { .. } => false,
         }
     }

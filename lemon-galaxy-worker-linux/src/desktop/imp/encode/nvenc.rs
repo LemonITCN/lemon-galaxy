@@ -9,7 +9,7 @@
 
 #![allow(dead_code)]
 
-use super::{EncodedFrame, HwEncoder};
+use super::{EncodedFrame, EncoderRate, HwEncoder};
 use super::dl::Lib;
 use std::ffi::{c_char, c_void};
 use std::mem::{offset_of, size_of};
@@ -511,17 +511,24 @@ fn preset() -> (GUID, u32) {
     }
 }
 
-/// VBV 缓冲（帧数）：关键帧、大面积变化时允许一帧占几帧的码率
-const VBV_FRAMES: u32 = 8;
-
-fn apply_rate(rc: &mut RcParams, kbps: u32, fps: u32) {
-    let bps = kbps.clamp(200, 500_000) * 1000;
+/// CBR：平均码率按 `rate.kbps`（画面帧率低时 galaxy_host::pacing 已放大），VBV 按时间算（决定单帧最大，见 pacing::VBV_MS）
+fn apply_rate(rc: &mut RcParams, rate: EncoderRate, fps: u32) {
+    let bps = rate.kbps.clamp(200, 500_000) * 1000;
     rc.rate_control_mode = RC_CBR;
     rc.average_bit_rate = bps;
     rc.max_bit_rate = bps;
-    rc.vbv_buffer_size = bps / fps.max(1) * VBV_FRAMES;
+    rc.vbv_buffer_size = rate.vbv_bits(bps, fps);
     rc.vbv_initial_delay = rc.vbv_buffer_size;
+    // 量化参数下限：画面停下后补编、预算放大时，不往近乎无损里砸码率（实测不设时静止画面每帧约 6.5 KB 反复重编噪声，永不收敛）
+    rc.flags |= RC_ENABLE_MIN_QP;
+    rc.min_qp = Qp { inter_p: MIN_QP_P, inter_b: MIN_QP_P, intra: MIN_QP_I };
 }
+
+/// enableMinQP（RcParams.flags 第 0 位）
+const RC_ENABLE_MIN_QP: u32 = 1;
+/// 量化参数下限：P 帧 20、I 帧 18，文字已经看不出损失
+const MIN_QP_P: u32 = 20;
+const MIN_QP_I: u32 = 18;
 
 pub struct Nvenc {
     cuda: Cuda,
@@ -644,7 +651,7 @@ impl Nvenc {
             c.profile_guid = PROFILE_H264_MAIN;
             c.gop_length = INFINITE_GOP;
             c.frame_interval_p = 1;
-            apply_rate(&mut c.rc_params, kbps, self.fps);
+            apply_rate(&mut c.rc_params, EncoderRate::plain(kbps), self.fps);
             let h = &mut c.h264;
             h.flags = (h.flags | H264_REPEAT_SPSPPS) & !(H264_OUTPUT_AUD | H264_ENABLE_INTRA_REFRESH | H264_ENABLE_LTR | H264_FILLER_DATA);
             h.idr_period = INFINITE_GOP;
@@ -804,11 +811,11 @@ impl HwEncoder for Nvenc {
         }
     }
 
-    fn set_bitrate(&mut self, kbps: u32) -> bool {
+    fn set_bitrate(&mut self, rate: EncoderRate) -> bool {
         let Some(f) = self.api.reconfigure_encoder else { return false };
         let Ok(_g) = CtxGuard::push(&self.cuda, self.ctx) else { return false };
         let mut cfg = *self.config;
-        apply_rate(&mut cfg.rc_params, kbps, self.fps);
+        apply_rate(&mut cfg.rc_params, rate, self.fps);
         let mut r: Box<ReconfigureParams> = zeroed();
         r.version = RECONFIGURE_VER;
         r.re_init_encode_params = *self.init;

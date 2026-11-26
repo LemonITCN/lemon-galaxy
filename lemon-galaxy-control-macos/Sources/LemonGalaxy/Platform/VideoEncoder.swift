@@ -22,6 +22,22 @@ final class VideoEncoder {
     private var lastPts: UInt64 = 0
     private var lastAt = Date()
     private(set) var hardwareAccelerated = false
+    /// 画面停下后补编（同 galaxy_host::pacing::REFRESH_AFTER）：ScreenCaptureKit 画面不变时不出帧，
+    /// 变化中的最后一帧往往不够清楚；停下后把它再编几次（P 帧补上量化误差，内容没变时几乎不占码率），几百毫秒内变清楚。
+    /// 本机 VideoToolbox 实测（1080p 文字画面、12 Mbps）：补编 4 次后最后一帧 PSNR 29.9 → 32.5 dB。
+    private static let refreshAfter: [Double] = [0.08, 0.2, 0.45, 0.9]
+    /// 每来一帧新画面加一，补编时比对：期间又有新画面就不补旧的
+    private var generation: UInt64 = 0
+    private var refreshStep = 0
+    private var refreshItem: DispatchWorkItem?
+    /// 最后一帧新画面的时刻与时间戳（补编的节奏与时间戳都从这里算，时间戳要跟真实时间一致，码率按时间分）
+    private var changeAt = Date()
+    private var changePts: UInt64 = 0
+    /// 这一阵变化里最大的一帧（字节）。小于 refreshMinBytes（光标闪烁、敲一个字）不补编：小块区域本来就编得清楚
+    /// 由 sizeLock 保护（编码输出回调里只能拿这把：invalidate 拿着 lock 等 VideoToolbox 吐完剩下的帧，回调再拿 lock 会死锁）
+    private var burstMax = 0
+    private let sizeLock = NSLock()
+    private static let refreshMinBytes = 4096
 
     init?(codec: VideoCodec, width: Int, height: Int, fps: Int, bitrateKbps: Int, output: @escaping Output) {
         self.codec = codec
@@ -62,6 +78,8 @@ final class VideoEncoder {
 
     func invalidate() {
         lock.lock(); defer { lock.unlock() }
+        refreshItem?.cancel()
+        refreshItem = nil
         if let s = session {
             VTCompressionSessionCompleteFrames(s, untilPresentationTimeStamp: .invalid)
             VTCompressionSessionInvalidate(s)
@@ -99,7 +117,53 @@ final class VideoEncoder {
         }
     }
 
+    /// 编一帧新画面（截屏线程、补发关键帧时调用），之后按 refreshAfter 补编。
     func encode(_ pixelBuffer: CVPixelBuffer, ptsUs requested: UInt64) {
+        lock.lock()
+        // 上一阵补编完了或停了一秒以上：新的一阵
+        if Date().timeIntervalSince(changeAt) >= 1.0 || refreshStep >= Self.refreshAfter.count { sizeLock.locked { burstMax = 0 } }
+        lock.unlock()
+        encodeFrame(pixelBuffer, ptsUs: requested, change: true)
+        lock.lock()
+        generation &+= 1
+        refreshStep = 0
+        changeAt = lastAt
+        changePts = lastPts
+        scheduleRefresh(generation: generation)
+        lock.unlock()
+    }
+
+    /// 安排下一次补编（调用时持有 lock）
+    private func scheduleRefresh(generation gen: UInt64) {
+        refreshItem?.cancel()
+        guard session != nil, refreshStep < Self.refreshAfter.count else { refreshItem = nil; return }
+        let due = changeAt.addingTimeInterval(Self.refreshAfter[refreshStep])
+        let item = DispatchWorkItem { [weak self] in self?.refresh(generation: gen) }
+        refreshItem = item
+        repeatQueue.asyncAfter(deadline: .now() + max(0, due.timeIntervalSinceNow), execute: item)
+    }
+
+    private func refresh(generation gen: UInt64) {
+        lock.lock()
+        guard gen == generation, let buf = lastBuffer, session != nil else { lock.unlock(); return }
+        let changedAt = changeAt
+        let pts = changePts + UInt64(max(0, Date().timeIntervalSince(changedAt)) * 1_000_000)
+        let worth = sizeLock.locked { burstMax } >= Self.refreshMinBytes
+        lock.unlock()
+        if worth { encodeFrame(buf, ptsUs: pts, change: false) }
+        lock.lock()
+        if gen == generation {
+            // 跳过已经过时的补编点（线程被耽搁时不连着补好几次）
+            let since = Date().timeIntervalSince(changedAt)
+            refreshStep += 1
+            while refreshStep < Self.refreshAfter.count && since >= Self.refreshAfter[refreshStep] { refreshStep += 1 }
+            scheduleRefresh(generation: gen)
+        }
+        lock.unlock()
+    }
+
+    /// `change`：新画面（记下编出来的大小，决定停下后要不要补编）
+    private func encodeFrame(_ pixelBuffer: CVPixelBuffer, ptsUs requested: UInt64, change: Bool) {
         encodeLock.lock()
         defer { encodeLock.unlock() }
         lock.lock()
@@ -117,8 +181,9 @@ final class VideoEncoder {
         let codec = self.codec
         let out = self.output
         VTCompressionSessionEncodeFrame(s, imageBuffer: pixelBuffer, presentationTimeStamp: pts, duration: .invalid,
-                                        frameProperties: props, infoFlagsOut: nil) { status, _, sample in
+                                        frameProperties: props, infoFlagsOut: nil) { [weak self] status, _, sample in
             guard status == noErr, let sample, let (data, keyframe) = AnnexB.fromSampleBuffer(sample, codec: codec) else { return }
+            if change, let self { self.sizeLock.locked { self.burstMax = max(self.burstMax, data.count) } }
             out(data, ptsUs, keyframe)
         }
     }

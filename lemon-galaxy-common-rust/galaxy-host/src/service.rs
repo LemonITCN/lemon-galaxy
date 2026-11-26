@@ -809,6 +809,10 @@ impl HostService {
         if perms.view && pc.iter().any(|x| x == galaxy_proto::peer::CAP_VIDEO_KEEPALIVE) {
             c.push(galaxy_proto::peer::CAP_VIDEO_KEEPALIVE.into());
         }
+        // 丢片重传在内核里做（vsend.rs），有画面就支持
+        if perms.view && pc.iter().any(|x| x == "display") {
+            c.push(galaxy_proto::peer::CAP_VIDEO_NACK.into());
+        }
         // 隐私屏要有控制权限（开着时被控端本地键鼠失效）
         if perms.control && pc.iter().any(|x| x == "privacy") {
             c.push("privacy".into());

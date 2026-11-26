@@ -1381,7 +1381,9 @@ struct RemoteToolbar: View {
 
     private var stats: some View {
         let detail = tab.streamSize.width > 0 ? "\(Int(tab.streamSize.width))×\(Int(tab.streamSize.height)) · " + (tab.codec == .h265 ? "H.265" : "H.264") : ""
-        return Text(verbatim: "\(tab.measuredFps) fps · " + String(format: "%.1f Mbps", Double(tab.measuredKbps) / 1000))
+        // 不到 1 Mbps 按 kbps 显示（画面静止时每秒只有几十 kbps，按 Mbps 只会显示 0.0）
+        let rate = tab.measuredKbps < 1000 ? "\(tab.measuredKbps) kbps" : String(format: "%.1f Mbps", Double(tab.measuredKbps) / 1000)
+        return Text(verbatim: "\(tab.measuredFps) fps · " + rate)
             .font(.system(size: 11).monospacedDigit())
             .foregroundStyle(p.tertiaryText)
             .lineLimit(1)

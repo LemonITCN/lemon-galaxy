@@ -1,7 +1,9 @@
 //! H.264 软件编码（openh264，屏幕内容实时模式）。没有可用的硬件编码器时用。输出 Annex-B，关键帧带 SPS/PPS。
 //! openh264 的封装没有运行时改码率的接口，改码率要重建（会出关键帧）。
+//! 码率控制用时间戳模式：按两帧实际间隔分码率（桌面只在变化时出帧，按固定帧率分时每帧预算太小，画面一变就糊）。
 
 use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, RateControlMode, UsageType};
+use openh264::Timestamp;
 use openh264::formats::{BgraSliceU8, YUVBuffer};
 use openh264::OpenH264API;
 
@@ -21,7 +23,7 @@ impl H264 {
         let cfg = EncoderConfig::new()
             .bitrate(BitRate::from_bps(bitrate_kbps.clamp(200, 200_000) * 1000))
             .max_frame_rate(FrameRate::from_hz(fps.clamp(1, 60) as f32))
-            .rate_control_mode(RateControlMode::Bitrate)
+            .rate_control_mode(RateControlMode::Timestamp)
             .usage_type(UsageType::ScreenContentRealTime)
             .skip_frames(true)
             // 每 10 秒左右一个关键帧，丢包后靠主控端请求关键帧恢复
@@ -35,8 +37,9 @@ impl H264 {
         self.enc.force_intra_frame();
     }
 
-    /// 编码一帧 BGRA（宽高可以是奇数，会裁掉最后一行 / 列）。返回 (数据, 是否关键帧)；被跳过的帧返回 None。
-    pub fn encode(&mut self, bgra: &[u8], width: u32, height: u32) -> anyhow::Result<Option<(Vec<u8>, bool)>> {
+    /// 编码一帧 BGRA（宽高可以是奇数，会裁掉最后一行 / 列），`pts_us` 是采集时刻（码率按时间分配）。
+    /// 返回 (数据, 是否关键帧)；被跳过的帧返回 None。
+    pub fn encode(&mut self, bgra: &[u8], width: u32, height: u32, pts_us: u64) -> anyhow::Result<Option<(Vec<u8>, bool)>> {
         let (w, h) = (self.width as usize, self.height as usize);
         let src: &[u8] = if width as usize == w && height as usize == h {
             bgra
@@ -49,7 +52,7 @@ impl H264 {
             &self.crop
         };
         self.yuv.read_bgra8(BgraSliceU8::new(src, (w, h)));
-        let bs = self.enc.encode(&self.yuv)?;
+        let bs = self.enc.encode_at(&self.yuv, Timestamp::from_millis(pts_us / 1000))?;
         let kind = bs.frame_type();
         if matches!(kind, FrameType::Skip | FrameType::Invalid) {
             return Ok(None);

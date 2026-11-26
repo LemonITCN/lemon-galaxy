@@ -16,7 +16,8 @@
 //! galaxy-dev --data <目录> displays <设备>      列出屏幕（没有亮着的显示器时被控端会加无头兜底屏）
 //! galaxy-dev --data <目录> vd-test <设备> [宽 高 刷新率 [看画面秒数]]
 //!                                             虚拟屏：加一块、列屏、开画面数帧、删掉、再列屏（断开时被控端也会自动删）
-//! galaxy-dev --data <目录> view <设备> <屏幕 id> [秒数]    看画面（不解码），每秒打印收到的帧数与分辨率
+//! galaxy-dev --data <目录> view <设备> <屏幕 id> [秒数 [帧率 [码率 kbps]]] [--kf] [--dump <文件>]
+//!                                             看画面（不解码），每秒打印帧数、码率、关键帧、帧大小与连接往返；--dump 存下码流
 //! galaxy-dev --data <目录> vd-add <设备> <块数> [宽 高 刷新率]   连加几块（验证上限），列屏后直接断开（验证会话结束自动删屏）
 //! galaxy-dev --data <目录> shot <设备> <屏幕 id> <输出 .jpg>   截一张图存到本机
 //! galaxy-dev --data <目录> clip-text <设备> [set <文字>]      读（或写）远端剪贴板文字
@@ -256,19 +257,42 @@ async fn main() -> anyhow::Result<()> {
                 }
                 "vd-test" => vd_test(&session, &args[2..]).await?,
                 "view" => {
-                    let display: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let secs: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
+                    // 不加 --kf 时不主动要关键帧，收到的就是主控端界面实际收到的
+                    use std::sync::atomic::Ordering::Relaxed;
+                    let num = |i: usize, d: u64| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+                    let (display, secs, fps, kbps) = (num(2, 0) as u32, num(3, 10), num(4, 30) as u32, num(5, 4000) as u32);
+                    let kf = args.iter().any(|a| a == "--kf");
                     let sink = Arc::new(FrameCount::default());
-                    let req = galaxy_proto::peer::DisplayRequest { display_id: display, codecs: vec![galaxy_proto::peer::VideoCodec::H264], max_fps: 30, bitrate_kbps: 4000, view_only: true };
+                    // --dump <文件>：把收到的码流（Annex B，交给解码器的那些帧）原样写进文件，可用 ffmpeg 解出来看画质
+                    if let Some(i) = args.iter().position(|a| a == "--dump") {
+                        *sink.dump.lock().unwrap() = Some(std::fs::File::create(&args[i + 1])?);
+                    }
+                    let req = galaxy_proto::peer::DisplayRequest { display_id: display, codecs: vec![galaxy_proto::peer::VideoCodec::H264], max_fps: fps, bitrate_kbps: kbps, view_only: true };
+                    let p = session.path();
+                    println!("路径 {:?} {} 往返 {} 毫秒；请求 {fps} 帧 {kbps} kbps", p.kind, p.remote, p.rtt_ms);
                     let ch = session.open_display(req, sink.clone()).await?;
+                    let mut prev = session.conn.stats();
                     for i in 0..secs {
                         tokio::time::sleep(Duration::from_secs(1)).await;
-                        if i % 2 == 1 {
+                        if kf && i % 2 == 1 {
                             ch.request_keyframe().await;
                         }
                         let (w, h) = *sink.size.lock().unwrap();
-                        println!("第 {} 秒：累计 {} 帧，{w}x{h}", i + 1, sink.frames.load(std::sync::atomic::Ordering::Relaxed));
+                        let st = session.conn.stats();
+                        let (n, bytes, keys, max) = (sink.sec_frames.swap(0, Relaxed), sink.sec_bytes.swap(0, Relaxed), sink.sec_keys.swap(0, Relaxed), sink.sec_max.swap(0, Relaxed));
+                        println!(
+                            "第 {:>3} 秒：{n:>3} 帧 {:>6} kbps 关键帧 {keys} 最大帧 {:>6} 字节 平均 {:>6} 字节 {w}x{h}｜收包 {} 往返 {} 毫秒 本端判丢 {}",
+                            i + 1,
+                            bytes * 8 / 1000,
+                            max,
+                            if n > 0 { bytes / n as u64 } else { 0 },
+                            st.udp_rx.datagrams.saturating_sub(prev.udp_rx.datagrams),
+                            st.path.rtt.as_millis(),
+                            st.path.lost_packets.saturating_sub(prev.path.lost_packets),
+                        );
+                        prev = st;
                     }
+                    println!("累计 {} 帧", sink.frames.load(Relaxed));
                     ch.stop().await;
                 }
                 "shot" => {
@@ -276,6 +300,19 @@ async fn main() -> anyhow::Result<()> {
                     let img = session.screenshot(display, 0, 0).await?;
                     std::fs::write(&args[3], &img.data)?;
                     println!("截图 {}x{} {} 字节 → {}", img.width, img.height, img.data.len(), args[3]);
+                }
+                // privacy-shot <设备> <屏幕 id> <输出 .jpg>：开隐私屏，等 2 秒截一张（黑窗不该进画面），再关掉
+                "privacy-shot" => {
+                    let display: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    session.set_privacy(true).await?;
+                    println!("隐私屏已打开");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    let img = session.screenshot(display, 0, 0).await;
+                    session.set_privacy(false).await?;
+                    println!("隐私屏已关闭");
+                    let img = img?;
+                    std::fs::write(&args[3], &img.data)?;
+                    println!("隐私屏开着时的截图 {}x{} {} 字节 → {}", img.width, img.height, img.data.len(), args[3]);
                 }
                 "clip-text" => {
                     if args.get(2).map(|s| s.as_str()) == Some("set") {
@@ -411,14 +448,31 @@ async fn main() -> anyhow::Result<()> {
 struct FrameCount {
     frames: std::sync::atomic::AtomicU32,
     size: std::sync::Mutex<(u32, u32)>,
+    // 本秒统计（view 每秒取走清零）
+    sec_frames: std::sync::atomic::AtomicU32,
+    sec_bytes: std::sync::atomic::AtomicU64,
+    sec_keys: std::sync::atomic::AtomicU32,
+    sec_max: std::sync::atomic::AtomicU64,
+    dump: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 impl galaxy_client::session::VideoSink for FrameCount {
     fn on_config(&self, _c: galaxy_proto::peer::VideoCodec, w: u32, h: u32) {
         *self.size.lock().unwrap() = (w, h);
     }
-    fn on_frame(&self, _d: Vec<u8>, _p: u64, _kf: bool) {
-        self.frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    fn on_frame(&self, d: Vec<u8>, _p: u64, kf: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.frames.fetch_add(1, Relaxed);
+        self.sec_frames.fetch_add(1, Relaxed);
+        self.sec_bytes.fetch_add(d.len() as u64, Relaxed);
+        self.sec_max.fetch_max(d.len() as u64, Relaxed);
+        if kf {
+            self.sec_keys.fetch_add(1, Relaxed);
+        }
+        if let Some(f) = self.dump.lock().unwrap().as_mut() {
+            use std::io::Write;
+            let _ = f.write_all(&d);
+        }
     }
     fn on_cursor(&self, _x: i32, _y: i32, _v: bool) {}
 }

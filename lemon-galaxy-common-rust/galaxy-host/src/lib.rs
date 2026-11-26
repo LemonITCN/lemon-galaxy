@@ -8,12 +8,14 @@ pub mod exec;
 pub mod files;
 pub mod held;
 pub mod fio;
+pub mod pacing;
 pub mod platform;
 pub mod rate;
 pub mod serve;
 pub mod service;
 pub mod sysuser;
 pub mod term;
+pub mod vsend;
 pub mod vdisplay;
 #[cfg(windows)]
 pub mod win;

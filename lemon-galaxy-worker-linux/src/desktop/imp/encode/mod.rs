@@ -8,6 +8,8 @@
 //! 环境变量 LEMON_GALAXY_VIDEO_ENCODER=auto|nvenc|vaapi|software 可指定；
 //! LEMON_GALAXY_VAAPI_DEVICE=/dev/dri/renderD129 指定 VA 设备，LEMON_GALAXY_CUDA_DEVICE=1 指定第几块 NVIDIA 卡。
 
+pub use galaxy_host::pacing::EncoderRate;
+
 pub mod convert;
 pub mod dl;
 mod nvenc;
@@ -24,8 +26,8 @@ pub struct EncodedFrame {
 trait HwEncoder: Send {
     fn name(&self) -> String;
     fn encode(&mut self, bgra: &[u8], src_w: u32, keyframe: bool, pts_us: u64) -> anyhow::Result<Vec<EncodedFrame>>;
-    /// 运行时改码率（不出关键帧）；不支持返回 false（调用方重建编码器）
-    fn set_bitrate(&mut self, kbps: u32) -> bool;
+    /// 运行时改码率与 VBV（不出关键帧）；不支持返回 false（调用方重建编码器）
+    fn set_bitrate(&mut self, rate: EncoderRate) -> bool;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +123,12 @@ impl VideoEncoder {
         matches!(self.inner, Inner::Hw(_))
     }
 
+    /// 编码器按配置帧率分码率、能运行时改码率（NVENC、VA-API 的 CBR）：画面帧率低时由 galaxy_host::pacing 放大码率。
+    /// openh264 按时间戳分码率，不用放大。
+    pub fn scales_bitrate(&self) -> bool {
+        self.is_hardware()
+    }
+
     pub fn source_size(&self) -> (u32, u32) {
         self.src
     }
@@ -134,7 +142,7 @@ impl VideoEncoder {
                 if keyframe {
                     e.force_keyframe();
                 }
-                Ok(e.encode(bgra, sw, sh)?.map(|(data, keyframe)| vec![EncodedFrame { data, keyframe }]).unwrap_or_default())
+                Ok(e.encode(bgra, sw, sh, pts_us)?.map(|(data, keyframe)| vec![EncodedFrame { data, keyframe }]).unwrap_or_default())
             }
             Inner::Hw(e) => {
                 let mut v = e.encode(bgra, sw, keyframe, pts_us)?;
@@ -149,10 +157,10 @@ impl VideoEncoder {
     }
 
     /// 改码率；返回 false 时调用方重建编码器。
-    pub fn set_bitrate(&mut self, kbps: u32) -> bool {
+    pub fn set_bitrate(&mut self, rate: EncoderRate) -> bool {
         match &mut self.inner {
             Inner::Soft(_) => false,
-            Inner::Hw(e) => e.set_bitrate(kbps),
+            Inner::Hw(e) => e.set_bitrate(rate),
         }
     }
 }

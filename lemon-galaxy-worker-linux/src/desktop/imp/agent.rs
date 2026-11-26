@@ -5,6 +5,7 @@
 use super::backend::{draw_cursor, Backend, Controller, CursorImage, CursorPos, Frame, Monitor};
 use super::encode::{jpeg, Request, VideoEncoder};
 use super::ipc::{read_msg, write_msg, FromAgent, ToAgent};
+use galaxy_host::pacing::Pacer;
 use galaxy_proto::peer::{ClipOffer, ClipboardData, ImageData, InputEvent};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
@@ -383,7 +384,8 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
     let mut enc: Option<VideoEncoder> = None;
     let mut started = false;
     let mut have = false;
-    let mut last_sent = Instant::now();
+    // 编码节奏（画面停下后补编、保活）与交给编码器的码率（按实际帧率放大），见 galaxy_host::pacing
+    let mut pacer = Pacer::new(fps, ctl.bitrate.load(Ordering::Relaxed));
     let mut cursor_img: Option<CursorImage> = None;
     let mut last_cursor: Option<CursorPos> = None;
     let mut last_report: Option<CursorPos> = None;
@@ -455,14 +457,17 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
         }
         // 编码器：没有或截屏尺寸变了就重建；改码率时硬件编码器直接改，软件编码器重建
         let size = (frame.width, frame.height);
+        if ctl.reconfig.swap(false, Ordering::Relaxed) {
+            pacer.set_target(ctl.bitrate.load(Ordering::Relaxed));
+        }
         let mut rebuild = enc.as_ref().map(|e| e.source_size() != size).unwrap_or(true);
-        if ctl.reconfig.swap(false, Ordering::Relaxed) && !rebuild {
-            if let Some(e) = enc.as_mut() {
-                rebuild = !e.set_bitrate(ctl.bitrate.load(Ordering::Relaxed));
+        if !rebuild {
+            if let (Some(e), Some(k)) = (enc.as_mut(), pacer.retune(Instant::now())) {
+                rebuild = !e.set_bitrate(k);
             }
         }
         if rebuild {
-            let kbps = ctl.bitrate.load(Ordering::Relaxed);
+            let kbps = pacer.target();
             let req = if hw_allowed { request.clone() } else { Request::software() };
             match VideoEncoder::new(size.0, size.1, fps, kbps, &req) {
                 Ok((e, notes)) => {
@@ -474,6 +479,7 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
                     if started && old.as_ref().map(|o| (o.width, o.height) != (e.width, e.height)).unwrap_or(false) {
                         let _ = out.send(FromAgent::Resized { display, width: e.width, height: e.height });
                     }
+                    pacer.encoder_ready(kbps, e.scales_bitrate());
                     enc = Some(e);
                     enc_errors = 0;
                     ctl.keyframe.store(true, Ordering::Relaxed);
@@ -514,7 +520,9 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
         let toggled = in_video != last_in_video;
         last_in_video = in_video;
         let cursor_moved = in_video && !embedded && cursor != last_cursor;
-        if changed || need_key || toggled || cursor_moved || last_sent.elapsed() > Duration::from_secs(1) {
+        // 画面变了、画面里的光标动了、要关键帧时立即编码；停下后按节奏补编几次，之后每秒保活一次
+        let now = Instant::now();
+        if let Some(why) = pacer.decide(changed || need_key || toggled || cursor_moved, now) {
             last_cursor = cursor;
             // 画面里要画光标：画在副本上（frame 要留着和下一帧比较）
             let src: &[u8] = match (in_video && !embedded, cursor, cursor_img.as_ref()) {
@@ -531,14 +539,15 @@ fn capture_thread(id: u64, display: u32, fps: u32, ctl: Arc<CaptureCtl>, out: Sy
             match e.encode(src, need_key, t0.elapsed().as_micros() as u64) {
                 Ok(frames) => {
                     enc_errors = 0;
+                    pacer.encoded(why, now, frames.iter().map(|f| f.data.len()).sum());
                     for f in frames {
-                        last_sent = Instant::now();
                         if out.send(FromAgent::Frame { display, data: f.data, pts_us: t0.elapsed().as_micros() as u64, keyframe: f.keyframe }).is_err() {
                             return;
                         }
                     }
                 }
                 Err(err) => {
+                    pacer.encoded(why, now, 0);
                     log(&out, true, format!("编码失败（{}）：{err}", e.name()));
                     if need_key {
                         ctl.keyframe.store(true, Ordering::Relaxed);
