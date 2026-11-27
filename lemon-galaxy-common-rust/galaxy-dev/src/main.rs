@@ -160,13 +160,16 @@ async fn main() -> anyhow::Result<()> {
             let resp: galaxy_proto::api::ListResp<galaxy_proto::api::ClientDevice> = api.get("/devices").await?;
             for d in resp.items {
                 println!(
-                    "{}  {:<8} {:<8} {:<20} {}  {}",
+                    "{}  {:<8} {:<8} {:<20} {}  {}  {} {}{}",
                     d.id,
                     d.kind.as_str(),
                     d.platform.as_str(),
                     d.hostname,
                     if d.online { "在线" } else { "离线" },
-                    if d.macs.is_empty() { "-".to_string() } else { d.macs.join(",") }
+                    if d.macs.is_empty() { "-".to_string() } else { d.macs.join(",") },
+                    d.app_version,
+                    d.update_channel,
+                    if d.update_version.is_empty() { String::new() } else { format!("  可升级到 {}", d.update_version) }
                 );
             }
         }
@@ -302,6 +305,42 @@ async fn main() -> anyhow::Result<()> {
                     println!("截图 {}x{} {} 字节 → {}", img.width, img.height, img.data.len(), args[3]);
                 }
                 // privacy-shot <设备> <屏幕 id> <输出 .jpg>：开隐私屏，等 2 秒截一张（黑窗不该进画面），再关掉
+                // remote-update <设备> [等几秒]：远程升级被控端，等它以新版本重新上线（设备列表里的版本号变了）
+                "remote-update" => {
+                    let wait: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(600);
+                    let before = session.ack.host.app_version.clone();
+                    let target = session.apply_update().await?;
+                    let Some(v) = target else {
+                        println!("对方已是最新版本 {before}");
+                        return Ok(());
+                    };
+                    println!("对方开始升级：{before} → {v}");
+                    let (api, _s, _) = load(&dir, &id)?;
+                    let t0 = std::time::Instant::now();
+                    let mut went_offline = false;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        let resp: galaxy_proto::api::ListResp<galaxy_proto::api::ClientDevice> = match api.get("/devices").await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                println!("读设备列表失败：{e}");
+                                continue;
+                            }
+                        };
+                        // 与 connect 选设备同一个条件（前缀为空时别选到主控端自己）
+                        let Some(d) = resp.items.into_iter().find(|d| d.id.to_hex().starts_with(&target_prefix(&args[1])) && d.id != id.device_id && d.kind.can_host()) else { anyhow::bail!("设备列表里找不到这台设备") };
+                        if !d.online {
+                            went_offline = true;
+                        }
+                        if d.online && d.app_version == v {
+                            println!("已以新版本 {} 重新上线（{} 秒，期间{}离线过）", d.app_version, t0.elapsed().as_secs(), if went_offline { "" } else { "没有" });
+                            break;
+                        }
+                        if t0.elapsed().as_secs() > wait {
+                            anyhow::bail!("{wait} 秒内没有以新版本 {v} 上线（现在 {}，{}）", d.app_version, if d.online { "在线" } else { "离线" });
+                        }
+                    }
+                }
                 "privacy-shot" => {
                     let display: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                     session.set_privacy(true).await?;
@@ -791,4 +830,9 @@ async fn ssh_test(host: &str, port: u16, user: &str, key: &str) -> anyhow::Resul
     s.disconnect().await;
     println!("SSH 自测完成");
     Ok(())
+}
+
+/// 命令行里写的设备（id 前缀，不分大小写）
+fn target_prefix(s: &str) -> String {
+    s.to_ascii_lowercase()
 }

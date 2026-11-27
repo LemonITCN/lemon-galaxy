@@ -84,14 +84,32 @@ impl WorkerOs for LinuxOs {
     }
 
     fn restart_service(&self) -> bool {
-        let user = !is_root();
-        let mut args = vec![];
-        if user {
-            args.push("--user");
-        }
-        args.extend(["restart", "lemon-galaxy-worker"]);
-        std::process::Command::new("systemctl").args(&args).status().map(|s| s.success()).unwrap_or(false)
+        systemctl(&["restart", "lemon-galaxy-worker"])
     }
+
+    fn stop_service(&self) -> bool {
+        systemctl(&["stop", "lemon-galaxy-worker"])
+    }
+
+    /// 换回旧版本后启动：新版本崩溃太频繁时 systemd 会拒绝再启动（start-limit-hit），先清掉失败状态
+    fn start_service(&self) -> bool {
+        let _ = systemctl(&["reset-failed", "lemon-galaxy-worker"]);
+        systemctl(&["start", "lemon-galaxy-worker"])
+    }
+
+    /// deb / rpm 装的（包管理器查得到、程序就是 /usr/bin 下那份）：自动更新由包管理器装整个新包（界面 + 被控服务）
+    fn desktop_install(&self) -> Option<galaxy_worker::upgrade::DesktopInstall> {
+        galaxy_worker::upgrade::linux_package()
+    }
+}
+
+/// systemctl（系统服务；不是 root 时是用户服务）
+fn systemctl(args: &[&str]) -> bool {
+    let mut c = std::process::Command::new("systemctl");
+    if !is_root() {
+        c.arg("--user");
+    }
+    c.args(args).stdin(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// 装 .deb / .rpm 时自带的系统服务

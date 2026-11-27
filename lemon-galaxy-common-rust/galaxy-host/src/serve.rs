@@ -555,6 +555,28 @@ async fn mgmt(host: &Arc<HostService>, sess: &Arc<ActiveSession>, req: MgmtReq) 
             }
         }
         MgmtReq::HostStatus => MgmtResp::Text(serde_json::to_string(&host.status()).unwrap_or_default()),
+        MgmtReq::ApplyUpdate => {
+            // 临时协助（没有账号）不能升级对方
+            if !p.control || sess.account.is_none() {
+                return MgmtResp::Error(denied("没有控制权限，不能升级被控端"));
+            }
+            let Some(u) = host.updater.read().clone() else { return MgmtResp::Error(PeerError::new("unsupported", "被控端不支持远程升级")) };
+            let sid = sess.info.read().id.clone();
+            match u.start().await {
+                Ok(v) => {
+                    let what = match &v {
+                        Some(v) => format!("远程升级到 {v}"),
+                        None => "远程升级：已是最新版本".into(),
+                    };
+                    host.log(&sid, &sess.from_user_name, "update", &what, false);
+                    MgmtResp::Update { version: v }
+                }
+                Err(e) => {
+                    host.log(&sid, &sess.from_user_name, "update", &format!("远程升级失败：{e}"), false);
+                    MgmtResp::Error(PeerError::new("failed", e))
+                }
+            }
+        }
         MgmtReq::SetPrivacy { on } => {
             if !p.control {
                 return MgmtResp::Error(denied("没有控制权限"));

@@ -146,6 +146,20 @@ jobs:
           ls -l dist
       - name: 端到端测试（服务器 + Linux 被控端 + 主控）
         run: scripts/e2e.sh dist
+      - name: 被控端自动更新端到端（systemd 服务：换版本 → 自己重启 → 连回服务器 → 确认；起不来、起来就崩、连不上的版本自动换回）
+        run: |
+          # 只认测试发布密钥的测试构建（正式包不认测试密钥，见 galaxy-proto/src/update.rs），版本编成 9.8.7.6000，脚本据此做出新版本与坏版本
+          T="$RUNNER_TEMP/e2e-update"
+          LEMONGALAXY_BUILD_VERSION=9.8.7.6000 CARGO_PROFILE_DEV_DEBUG=0 cargo build --target-dir "$T" --config 'profile.dev.package."*".opt-level=0' \
+            -p lemon-galaxy-server -p galaxy-dev -p lemon-galaxy-worker-linux --features galaxy-proto/test-release-key
+          mkdir -p e2e-update && for b in lemon-galaxy-server galaxy-dev lemon-galaxy-worker; do cp "$T/debug/$b" e2e-update/; done
+          scripts/e2e-update.sh e2e-update
+      - uses: actions/upload-artifact@v7
+        with:
+          # 给「Linux 被控端界面与安装包」测安装包的自动更新
+          name: linux-update-test-${{ matrix.arch }}
+          path: e2e-update/
+          if-no-files-found: error
       - name: 服务器装成 systemd 服务（安装、改参数、卸载）
         run: scripts/server-service-test.sh dist
       - name: 远程桌面端到端（没人登录 → 虚拟桌面 → 画面、截图、剪贴板、键鼠）
@@ -214,6 +228,14 @@ jobs:
           xvfb-run -a timeout 5 lemon-galaxy-worker-gui --version || true
           sudo apt-get remove -y -qq lemon-galaxy-worker >/dev/null
           ! systemctl is-active lemon-galaxy-worker
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-update-test-${{ matrix.arch }}
+          path: e2e-update
+      - name: 安装包的自动更新（装 9.8.7.6000 的 .deb，立即更新成 9.8.7.6001：守护进程在单独的 systemd 单元里调 dpkg，包脚本重启服务）
+        run: |
+          chmod +x e2e-update/*
+          scripts/e2e-update.sh --deb e2e-update dist/lemon-galaxy-worker-gui ${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
         with:
           name: linux-pkg-${{ matrix.arch }}
@@ -270,6 +292,15 @@ jobs:
         run: dist/lemon-galaxy-worker.exe selftest-capture
       - name: 端到端测试（服务器 + Windows 被控端 + 主控，含系统服务）
         run: scripts/e2e.sh dist
+      - name: 被控端自动更新端到端（Windows 服务：桌面端整套换 → 自己重启 → 连回服务器 → 确认；坏版本自动换回）
+        if: matrix.arch == 'x86_64'
+        run: |
+          # 只认测试发布密钥的测试构建（正式包不认测试密钥，见 galaxy-proto/src/update.rs），版本编成 9.8.7.6000
+          T="$(cygpath -u "$RUNNER_TEMP")/e2e-update"
+          LEMONGALAXY_BUILD_VERSION=9.8.7.6000 CARGO_PROFILE_DEV_DEBUG=0 cargo build --target "$TARGET" --target-dir "$T" --config 'profile.dev.package."*".opt-level=0' \
+            -p lemon-galaxy-worker-windows -p lemon-galaxy-server -p galaxy-dev --features galaxy-proto/test-release-key
+          mkdir -p e2e-update && for b in lemon-galaxy-worker lemon-galaxy-server galaxy-dev; do cp "$T/$TARGET/debug/$b.exe" e2e-update/; done
+          scripts/e2e-update.sh e2e-update
       - name: 服务器装成 Windows 服务（安装、防火墙规则、改参数、卸载）
         run: scripts/server-service-test.sh dist
       - uses: actions/upload-artifact@v7
@@ -873,6 +904,15 @@ jobs:
               (cd "art/windows-$a" && zip -q "../../out/lemon-galaxy-server-$V-windows-$a.zip" lemon-galaxy-server.exe)
             fi
           done
+          # 发布的程序里不能有测试发布公钥：测试构建（--features galaxy-proto/test-release-key）只认测试密钥，绝不能混进发布
+          python3 - <<'PY'
+          import glob, sys
+          key = bytes.fromhex("f8e136532473980dadbe4f7f47bf93a9c70ba65fb648050b1e11a7927687dd01")
+          bad = [f for f in sorted(glob.glob("out/*")) if key in open(f, "rb").read()]
+          if bad:
+              sys.exit("这些发布文件是只认测试密钥的测试构建：" + ", ".join(bad))
+          print("发布文件里没有测试发布公钥")
+          PY
           (cd out && sha256sum * > SHA256SUMS.txt)
           SIGNED=false
           if [ -n "${RELEASE_SIGNING_KEY:-}" ]; then

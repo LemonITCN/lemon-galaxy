@@ -15,6 +15,7 @@ mod decode;
 mod host;
 mod local_ai;
 mod mcp;
+mod remote_update;
 mod screen;
 mod session;
 mod ssh;

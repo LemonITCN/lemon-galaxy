@@ -255,6 +255,7 @@ impl Inner {
                 };
                 match galaxy_host::HostService::start(cfg, me.identity.clone()).await {
                     Ok(h) => {
+                        crate::remote_update::register_host(&h);
                         if let Some(l) = me.logged_in() {
                             let user = galaxy_host::sysuser::SysUser::current().name;
                             let policy = h.state().accounts.iter().find(|a| a.user_id == l.user.id).map(|a| a.policy.clone()).unwrap_or_else(|| galaxy_host::HostPolicy::default_for(&user));
@@ -657,8 +658,85 @@ impl GalaxyClient {
                 lan_seen: c.as_ref().map(|c| c.lan_seen(&d.id)).unwrap_or(false),
                 last_seen_at: d.last_seen_at,
                 is_self: d.id == me,
+                update_version: d.update_version.clone(),
             })
             .collect()
+    }
+
+    /// 远程升级被控端（设备详情里的「升级被控端」，不用先开远程桌面）：连上对方发请求，对方自己走完整个零交互升级；
+    /// 这里接着轮询设备列表，直到它以新版本重新上线（最多 10 分钟）。进度经 listener，立即返回。
+    pub fn upgrade_device(&self, device_id: String, listener: Arc<dyn crate::callbacks::UpgradeListener>) {
+        let inner = self.inner.clone();
+        crate::rt().spawn(async move {
+            // 升级特有的几种失败按界面语言给文字（连不上等通用错误照内核原样）
+            let zh = crate::locale().starts_with("zh");
+            let tr = move |c: String, e: String| if zh { c } else { e };
+            let r: std::result::Result<Option<String>, String> = async {
+                let d = parse_dev(&device_id).map_err(|e| e.to_string())?;
+                let target = {
+                    let s = inner.session_for(d).await.map_err(|e| e.to_string())?;
+                    if !s.ack.capabilities.iter().any(|c| c == galaxy_proto::peer::CAP_REMOTE_UPDATE) {
+                        return Err(tr(
+                            "对方版本太旧，不支持远程升级，需要先在那台设备上更新一次".into(),
+                            "This device is too old for remote upgrade. Update it once on the device itself.".into(),
+                        ));
+                    }
+                    match s.apply_update().await {
+                        Ok(v) => v,
+                        Err(galaxy_client::ClientError::Permission(_)) => {
+                            return Err(tr("没有控制这台设备的权限，不能升级".into(), "You don't have control permission on this device, so it can't be upgraded.".into()))
+                        }
+                        Err(e) => return Err(e.to_string()),
+                    }
+                };
+                let Some(target) = target else {
+                    let cur = inner.devices.lock().iter().find(|x| x.id == d).map(|x| x.app_version.clone());
+                    return Ok(cur);
+                };
+                listener.on_started(target.clone());
+                // 对方断开后旧会话作废，别再复用
+                inner.sessions.lock().remove(&d);
+                let t0 = std::time::Instant::now();
+                let mut told_offline = false;
+                // 断开后又以旧版本上线的时刻：持续一分钟仍是旧版本就算没装上（短暂断网再连上时还会继续等）
+                let mut back_old: Option<std::time::Instant> = None;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let _ = inner.refresh_devices().await;
+                    let (online, ver) = inner.devices.lock().iter().find(|x| x.id == d).map(|x| (x.online, x.app_version.clone())).unwrap_or((false, String::new()));
+                    if !online && !told_offline {
+                        told_offline = true;
+                        listener.on_offline();
+                    }
+                    if online && ver == target {
+                        return Ok(Some(ver));
+                    }
+                    if told_offline && online && !ver.is_empty() {
+                        let since = *back_old.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() > std::time::Duration::from_secs(60) {
+                            return Err(tr(
+                                format!("对方重新上线了，但仍是 {ver}，新版本 {target} 没有装上（详情看对方的日志）"),
+                                format!("The device came back online still on {ver}; {target} was not installed (see the device's log)."),
+                            ));
+                        }
+                    } else {
+                        back_old = None;
+                    }
+                    if t0.elapsed() > std::time::Duration::from_secs(600) {
+                        let ver = if ver.is_empty() { "?".to_string() } else { ver };
+                        return Err(tr(
+                            format!("10 分钟内没有以新版本 {target} 重新上线（现在 {ver}，{}）", if online { "在线" } else { "离线" }),
+                            format!("The device did not come back online on {target} within 10 minutes (now {ver}, {}).", if online { "online" } else { "offline" }),
+                        ));
+                    }
+                }
+            }
+            .await;
+            match r {
+                Ok(v) => listener.on_finished(v, None),
+                Err(e) => listener.on_finished(None, Some(e)),
+            }
+        });
     }
 
     pub async fn refresh_devices(&self) -> Result<()> {

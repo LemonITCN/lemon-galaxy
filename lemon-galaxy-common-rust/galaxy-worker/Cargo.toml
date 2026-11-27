@@ -21,6 +21,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rpassword = "7"
 parking_lot.workspace = true
+sha2.workspace = true
+hex.workspace = true
+# 解 Windows 桌面端的更新包（zip）
+flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["user"] }

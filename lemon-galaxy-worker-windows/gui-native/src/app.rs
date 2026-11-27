@@ -1,4 +1,5 @@
-//! 程序：参数与子命令、单实例（再打开就把窗口切到前面）、主窗口、托盘、连入通知、协助请求、换语言时重建窗口。
+//! 程序：参数与子命令、单实例（再打开就把窗口切到前面）、主窗口、托盘、连入通知、协助请求、换语言时重建窗口、
+//! 被控服务自动更新换了界面程序后以同样的方式换成新版本。
 
 use crate::client::Signal;
 use crate::control::*;
@@ -53,11 +54,13 @@ pub fn main() -> i32 {
     if tray_only && !settings.tray_at_login {
         return 0;
     }
-    let Some(single) = SingleInstance::acquire(has("--replace"), tray_only) else { return 0 };
+    // --background：只放托盘、不开窗口，也不看「登录后在托盘显示」（自动更新换了界面后，没开窗口的旧实例这样换成新版本）
+    let hidden = tray_only || has("--background");
+    let Some(single) = SingleInstance::acquire(has("--replace"), hidden) else { return 0 };
     crate::setup::clean_old_files();
     init_ui();
     log_info(&format!("界面 {} 启动（{}）", galaxy_proto::APP_VERSION, crate::setup::os_name()));
-    let gui = Gui::start(settings, tray_only);
+    let gui = Gui::start(settings, hidden);
     single.listen();
     let code = run_loop();
     if let Some(t) = gui.tray.borrow_mut().take() {
@@ -148,7 +151,9 @@ fn named(prefix: &str, tag: &str) -> Vec<u16> {
 impl SingleInstance {
     /// 拿到了就返回；已经有一份在运行时把它的窗口切到前面（登录自启的那份不打扰）后返回 None
     fn acquire(replace: bool, tray: bool) -> Option<SingleInstance> {
-        let tag = format!("{:016x}", fnv(&crate::setup::exe_path().display().to_string().to_lowercase()));
+        // 装好的那份按安装位置算（自动更新时运行中的程序会被改名挪开，新旧两份要算出同一个）
+        let exe = if crate::setup::running_installed() { crate::setup::installed_exe() } else { crate::setup::exe_path() };
+        let tag = format!("{:016x}", fnv(&exe.display().to_string().to_lowercase()));
         unsafe {
             // 「Local\」命名空间（XP 起都有）；万一建不了就不做单实例，照常打开
             let Ok(m) = CreateMutexW(None, false, pcw(&named("", &tag))) else {
@@ -301,7 +306,54 @@ impl Gui {
                 }
             }
         });
+        gui.watch_self_update();
         gui
+    }
+
+    /// 被控服务自动更新换了整个桌面端（docs/auto-update.md）：装好的这份界面发现自己的程序文件变成了别的版本
+    /// （连着两次、10 秒以上），就以同样的方式（窗口开着 / 只在托盘）打开新版本接替自己（--replace），
+    /// 本进程收到「退出」信号后退出。不弹提示；新版本一分钟内没接替就接着看着。
+    fn watch_self_update(self: &Rc<Self>) {
+        if !crate::setup::running_installed() {
+            return;
+        }
+        let w = Rc::downgrade(self);
+        let seen: Rc<RefCell<(Option<String>, u32, Option<std::time::Instant>)>> = Rc::default();
+        set_interval(10_000, move || {
+            let Some(g) = w.upgrade() else { return };
+            let mut st = seen.borrow_mut();
+            if st.2.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60)) {
+                return;
+            }
+            // 按安装位置找（运行中的程序被改名挪开后，那个位置上就是新版本）
+            let disk = crate::setup::file_version(&crate::setup::installed_exe()).filter(|v| !v.is_empty());
+            let Some(v) = disk.filter(|v| v != galaxy_proto::APP_VERSION) else {
+                *st = (None, 0, None);
+                return;
+            };
+            if st.0.as_deref() != Some(&v) {
+                *st = (Some(v), 1, None);
+                return;
+            }
+            st.1 += 1;
+            if st.1 < 2 {
+                return;
+            }
+            let visible = g.win.borrow().as_ref().is_some_and(|w| Ctl(w.hwnd).visible());
+            log_info(&format!("界面程序已更新到 {v}，换成新版本（{}）", if visible { "窗口" } else { "托盘" }));
+            let mut c = std::process::Command::new(crate::setup::installed_exe());
+            c.arg("--replace");
+            if !visible {
+                c.arg("--background");
+            }
+            match c.current_dir(crate::setup::base_dir()).spawn() {
+                Ok(_) => st.2 = Some(std::time::Instant::now()),
+                Err(e) => {
+                    log_error(&format!("打开新版本的界面失败：{e}"));
+                    *st = (None, 0, Some(std::time::Instant::now()));
+                }
+            }
+        });
     }
 
     fn make_window(&self) -> Rc<MainWindow> {

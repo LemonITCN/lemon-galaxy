@@ -47,16 +47,30 @@ EOF
 install -Dm644 "$STAGE/unit" "$R/usr/lib/systemd/system/lemon-galaxy-worker.service"
 install -Dm644 "$ROOT_DIR/LICENSE" "$R/usr/share/doc/lemon-galaxy-worker/copyright"
 
-POSTINST='#!/bin/sh
-set -e
-mkdir -p /var/lib/lemon-galaxy-worker && chmod 700 /var/lib/lemon-galaxy-worker
+# 装好后（deb 的 postinst、rpm 的 %post 共用；FIRST=1 表示首次安装，由各自的开头按参数算出）：
+#   首次安装：开机自启并启动服务。
+#   升级（含被控服务自动更新：更新守护进程在单独的 systemd 单元里调用 dpkg / rpm，不受这里重启服务的影响）：
+#   不改用户设的开机自启；开着开机自启就重启成新版本（没在运行也启动），关了就只在它正在运行时重启。
+POSTINST_BODY='mkdir -p /var/lib/lemon-galaxy-worker && chmod 700 /var/lib/lemon-galaxy-worker
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload || true
-  systemctl enable lemon-galaxy-worker.service >/dev/null 2>&1 || true
-  systemctl restart lemon-galaxy-worker.service || true
-fi
-exit 0'
+  if [ -n "$FIRST" ]; then
+    systemctl enable lemon-galaxy-worker.service >/dev/null 2>&1 || true
+    systemctl restart lemon-galaxy-worker.service || true
+  elif systemctl is-enabled --quiet lemon-galaxy-worker.service 2>/dev/null; then
+    systemctl restart lemon-galaxy-worker.service || true
+  else
+    systemctl try-restart lemon-galaxy-worker.service || true
+  fi
+fi'
+# deb：postinst configure <上次配置好的版本>，首次安装时没有第二个参数
+POSTINST="#!/bin/sh
+set -e
+FIRST=
+[ \"\$1\" = configure ] && [ -z \"\$2\" ] && FIRST=1
+$POSTINST_BODY
+exit 0"
 PRERM='#!/bin/sh
 set -e
 # 升级时不停服务（新版装好后 postinst 会重启）；卸载时停掉并取消开机自启
@@ -128,7 +142,9 @@ service and a desktop app with tray icon.
 cp -a "$R/." %{buildroot}/
 
 %post
-$(printf '%s\n' "$POSTINST" | sed '1d' | sed 's/^exit 0$//')
+FIRST=
+[ "\$1" = 1 ] && FIRST=1
+$POSTINST_BODY
 
 %preun
 if [ "\$1" = 0 ] && [ -d /run/systemd/system ]; then systemctl disable --now lemon-galaxy-worker.service >/dev/null 2>&1 || true; fi

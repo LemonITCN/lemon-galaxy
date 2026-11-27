@@ -480,7 +480,7 @@ async fn list_devices(State(st): State<St>, User(s): User) -> AppResult<Json<Lis
         .db
         .call(move |c| {
             let mut stmt = c.prepare(
-                "SELECT d.id, d.kind, d.platform, d.os_version, d.arch, d.hostname, d.app_version, d.last_seen_at, da.cert, da.cert_sig, d.pubkey, d.last_ip, d.macs
+                "SELECT d.id, d.kind, d.platform, d.os_version, d.arch, d.hostname, d.app_version, d.last_seen_at, da.cert, da.cert_sig, d.pubkey, d.last_ip, d.macs, d.update_channel
                  FROM device_accounts da JOIN devices d ON d.id = da.device_id WHERE da.user_id = ?1 AND da.status = 'active'
                  ORDER BY d.hostname",
             )?;
@@ -500,18 +500,22 @@ async fn list_devices(State(st): State<St>, User(s): User) -> AppResult<Json<Lis
                         r.get::<_, Vec<u8>>(10)?,
                         r.get::<_, String>(11)?,
                         r.get::<_, String>(12)?,
+                        r.get::<_, String>(13)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(v)
         })
         .await?;
+    let latest = crate::update::latest_by_channel(&st).await;
     let hub = st.hub.devices.read();
     let items = rows
         .into_iter()
-        .filter_map(|(id, kind, platform, os, arch, host, ver, seen, cert, sig, pk, last_ip, macs)| {
+        .filter_map(|(id, kind, platform, os, arch, host, ver, seen, cert, sig, pk, last_ip, macs, channel)| {
             let did = DeviceId::from_slice(&id)?;
             let online = hub.get(&did);
+            let update_channel = crate::update::device_channel(&channel, &kind, &platform, &os, &arch);
+            let update_version = crate::update::update_version_for(&latest, &update_channel, &ver);
             Some(ClientDevice {
                 id: did,
                 kind: DeviceKind::parse(&kind)?,
@@ -528,6 +532,8 @@ async fn list_devices(State(st): State<St>, User(s): User) -> AppResult<Json<Lis
                 device_pubkey: pk,
                 last_ip,
                 macs: macs.split(',').filter(|m| !m.is_empty()).map(String::from).collect(),
+                update_channel,
+                update_version,
             })
         })
         .collect();

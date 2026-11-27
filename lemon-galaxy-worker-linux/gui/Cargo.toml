@@ -22,3 +22,5 @@ gtk = "0.18"
 async-channel = "2"
 # 托盘：StatusNotifierItem，纯 Rust 的 D-Bus（不依赖 libappindicator / libdbus）
 ksni = { version = "0.3", default-features = false, features = ["blocking", "tokio"] }
+# 自动更新后原地换成新程序前，把打开的文件都设成 exec 时关闭
+libc = "0.2"

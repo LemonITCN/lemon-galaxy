@@ -6,6 +6,7 @@
 //! LemonGalaxyWorker.exe                         打开主窗口（已在运行就把窗口切到前面）
 //! LemonGalaxyWorker.exe --tray                  登录后自启：只放托盘（本用户关了「登录后在托盘显示」时直接退出）
 //! LemonGalaxyWorker.exe --replace               接替同一位置正在运行的旧实例（安装、更新后用）
+//!   加 --background：只放托盘、不开窗口（被控服务自动更新换了界面后，没开窗口的旧实例这样换成新版本）
 //! LemonGalaxyWorker.exe --version               打印版本
 //! 以管理员身份运行的子命令（界面经 UAC 调用；XP 上是管理员就直接运行）：
 //!   --elevate <钥匙> --pipe <管道>               把钥匙交给服务，授权界面那个连接几分钟内直接改配置

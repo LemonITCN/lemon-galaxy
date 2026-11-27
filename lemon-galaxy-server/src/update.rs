@@ -247,6 +247,66 @@ pub async fn latest(State(st): State<St>, _u: crate::auth::User, Query(q): Query
     }))
 }
 
+/// 设备的更新通道「组件/平台/架构」：被控端报过就用报的；老版本没报时按设备类型与系统推断
+/// （与 galaxy-host 的 update::update_channel 同一套分法；Linux musl 版老版本推断不出来，当成 glibc 版）。
+pub fn device_channel(reported: &str, kind: &str, platform: &str, os_version: &str, arch: &str) -> String {
+    if reported.split('/').count() == 3 {
+        return reported.to_string();
+    }
+    let component = match kind {
+        "control" => "control",
+        "mobile" => "mobile",
+        _ => "worker",
+    };
+    let arch = match arch.to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" | "x64" => "x86_64".to_string(),
+        "aarch64" | "arm64" => "aarch64".to_string(),
+        "x86" | "i386" | "i586" | "i686" => "x86".to_string(),
+        other => other.to_string(),
+    };
+    let os = os_version.to_ascii_lowercase();
+    match platform {
+        "macos" => format!("{component}/macos/universal"),
+        "android" => format!("{component}/android/universal"),
+        "ios" => format!("{component}/ios/universal"),
+        "windows" if os.contains("windows xp") || os.contains("server 2003") => format!("{component}/windowsxp/{arch}"),
+        "windows" if ["vista", "windows 7", "windows 8", "server 2008", "server 2012"].iter().any(|k| os.contains(k)) => format!("{component}/windows7/{arch}"),
+        "windows" => format!("{component}/windows/{arch}"),
+        _ => format!("{component}/linux/{arch}"),
+    }
+}
+
+/// 服务器上各更新通道的最新版本（只算验过签名的）。
+pub async fn latest_by_channel(st: &St) -> std::collections::HashMap<String, String> {
+    let rows: Vec<(String, String, String, String)> = st
+        .db
+        .call(|c| {
+            let mut stmt = c.prepare("SELECT component, platform, arch, version FROM update_packages WHERE signature_ok = 1")?;
+            let v = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<Vec<_>, _>>()?;
+            Ok(v)
+        })
+        .await
+        .unwrap_or_default();
+    let mut m: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (comp, plat, arch, ver) in rows {
+        let key = format!("{comp}/{plat}/{arch}");
+        if m.get(&key).map(|cur| version_newer(&ver, cur)).unwrap_or(true) {
+            m.insert(key, ver);
+        }
+    }
+    m
+}
+
+/// 设备能升级到的版本（没有更新的为空）
+pub fn update_version_for(latest: &std::collections::HashMap<String, String>, channel: &str, current: &str) -> String {
+    let Some(v) = latest.get(channel) else { return String::new() };
+    if current.is_empty() || version_newer(v, current) {
+        v.clone()
+    } else {
+        String::new()
+    }
+}
+
 /// 下载更新文件。
 pub async fn file(State(st): State<St>, _u: crate::auth::User, Path(id): Path<i64>) -> AppResult<Response> {
     let row: Option<(String, String)> = st.db.call(move |c| c.query_row("SELECT version, file_name FROM update_packages WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?))).optional()).await?;
@@ -263,9 +323,13 @@ pub async fn file(State(st): State<St>, _u: crate::auth::User, Path(id): Path<i6
         .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal").detail(e.to_string()))
 }
 
-/// 从发布文件名里取版本号（第一个形如 0.1.0.5 的段）。
+/// 从发布文件名里取版本号（第一个形如 0.1.0.5 的段）。rpm 的版本后面直接跟「.架构.rpm」（`lemon-galaxy-worker-0.1.0.5.x86_64.rpm`），
+/// 取开头连续的数字段。
 fn version_in_name(name: &str) -> Option<String> {
-    name.split(['-', '_']).find(|p| p.contains('.') && p.split('.').all(|x| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit()))).map(|s| s.to_string())
+    name.split(['-', '_']).find_map(|p| {
+        let nums: Vec<&str> = p.split('.').take_while(|x| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit())).collect();
+        (nums.len() >= 2).then(|| nums.join("."))
+    })
 }
 
 /// 后台手动上传：更新文件 + 同一版的 SHA256SUMS.txt + SHA256SUMS.txt.sig（服务器连不上 GitHub 时用）。
@@ -493,10 +557,37 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn device_channels() {
+        assert_eq!(super::device_channel("worker/windowsxp/x86", "worker", "windows", "", ""), "worker/windowsxp/x86");
+        assert_eq!(super::device_channel("", "worker", "windows", "Microsoft Windows XP (2600)", "x86"), "worker/windowsxp/x86");
+        assert_eq!(super::device_channel("", "worker", "windows", "Windows 7 Ultimate (7601)", "x86_64"), "worker/windows7/x86_64");
+        assert_eq!(super::device_channel("", "worker", "windows", "Windows 11 Pro 24H2 (26100)", "x86_64"), "worker/windows/x86_64");
+        assert_eq!(super::device_channel("", "control", "macos", "macOS 27.2", "arm64"), "control/macos/universal");
+        assert_eq!(super::device_channel("", "worker", "linux", "Ubuntu 26.04", "amd64"), "worker/linux/x86_64");
+        let mut m = std::collections::HashMap::new();
+        m.insert("worker/linux/x86_64".to_string(), "0.1.0.76".to_string());
+        assert_eq!(super::update_version_for(&m, "worker/linux/x86_64", "0.1.0.68"), "0.1.0.76");
+        assert_eq!(super::update_version_for(&m, "worker/linux/x86_64", "0.1.0.76"), "");
+        assert_eq!(super::update_version_for(&m, "worker/windows/x86_64", "0.1.0.1"), "");
+    }
+
+    #[test]
     fn version_from_name() {
         assert_eq!(version_in_name("lemon-galaxy-worker-0.1.0.5-linux-x86_64").as_deref(), Some("0.1.0.5"));
         assert_eq!(version_in_name("LemonGalaxy-0.2.0-macOS.dmg").as_deref(), Some("0.2.0"));
         assert_eq!(version_in_name("nothing"), None);
+        // 被控端桌面端的包（组件 worker-desktop，后台手动上传时要认出版本）
+        for (name, plat, arch) in [
+            ("LemonGalaxyWorker-0.1.0.75-windows-x64.zip", "windows", "x86_64"),
+            ("LemonGalaxyWorker-0.1.0.75-windowsxp-x86.zip", "windowsxp", "x86"),
+            ("lemon-galaxy-worker_0.1.0.75_amd64.deb", "linux-deb", "x86_64"),
+            ("lemon-galaxy-worker-0.1.0.75.aarch64.rpm", "linux-rpm", "aarch64"),
+        ] {
+            assert_eq!(version_in_name(name).as_deref(), Some("0.1.0.75"), "{name}");
+            assert_eq!(classify_asset(name), Some(("worker-desktop", plat, arch.to_string())), "{name}");
+        }
+        assert_eq!(version_in_name("lemon-galaxy-worker-0.1.0.75-windows7-x86.exe").as_deref(), Some("0.1.0.75"));
+        assert_eq!(version_in_name("lemon-galaxy-server-0.1.0.75-linux-x86_64.tar.gz").as_deref(), Some("0.1.0.75"));
     }
 
     #[test]

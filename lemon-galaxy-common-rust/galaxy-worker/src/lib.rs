@@ -20,6 +20,7 @@ mod control_server;
 pub mod gdm;
 #[cfg(unix)]
 mod localsys;
+pub mod upgrade;
 #[cfg(windows)]
 mod localsys_win;
 
@@ -37,6 +38,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const VERSION: &str = galaxy_proto::APP_VERSION;
+
+/// 核心程序（被控服务）的文件名
+pub const CORE_EXE: &str = if cfg!(windows) { "lemon-galaxy-worker.exe" } else { "lemon-galaxy-worker" };
 
 /// 各系统的差异部分。
 pub trait WorkerOs: Send + Sync + 'static {
@@ -72,6 +76,20 @@ pub trait WorkerOs: Send + Sync + 'static {
     fn restart_service(&self) -> bool {
         false
     }
+    /// 停止已安装的服务并等它停下（更新守护进程换回旧版本前用）；没有服务或失败返回 false
+    fn stop_service(&self) -> bool {
+        false
+    }
+    /// 启动已安装的服务（换回旧版本后用；Linux 先清掉「启动太频繁」的失败状态）
+    fn start_service(&self) -> bool {
+        self.restart_service()
+    }
+    /// 本机装的桌面端（界面 + 被控服务一起的安装包）：有的话自动更新换整套，没有只换核心程序
+    fn desktop_install(&self) -> Option<upgrade::DesktopInstall> {
+        None
+    }
+    /// 桌面端整套换成新版本并确认后（Windows：改「应用和功能」里显示的版本号）
+    fn desktop_updated(&self, _version: &str) {}
     /// 帮助里补充的系统专有命令说明 (命令, 中文, 英文)
     fn extra_help(&self) -> Vec<(&'static str, &'static str, &'static str)> {
         vec![]
@@ -185,21 +203,33 @@ pub fn main(os: Arc<dyn WorkerOs>) -> ! {
     galaxy_net::init_crypto();
     let a = parse_args();
     let dir = data_dir(os.as_ref(), a.data_dir.clone());
-    let log_level = if a.cmd == "run" || a.cmd == "service" { "info" } else { "warn" };
+    let guard = a.cmd == "__lg-update-guard";
+    let log_level = if a.cmd == "run" || a.cmd == "service" || guard { "info" } else { "warn" };
     let filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| format!("{log_level},quinn=warn,rustls=warn").into());
-    // 系统服务没有终端：日志写到数据目录 logs/worker.log（超过 8 MB 转存为 worker.log.1）
-    let log_file = (a.cmd == "service").then(|| {
+    // 系统服务没有终端：日志写到数据目录 logs/worker.log（超过 8 MB 转存为 worker.log.1）；更新守护进程写 logs/update.log
+    let log_name = if guard { Some("update.log") } else if a.cmd == "service" { Some("worker.log") } else { None };
+    let log_file = log_name.map(|name| {
         let d = dir.join("logs");
         let _ = std::fs::create_dir_all(&d);
-        let p = d.join("worker.log");
+        let p = d.join(name);
         if std::fs::metadata(&p).map(|m| m.len() > 8 * 1024 * 1024).unwrap_or(false) {
-            let _ = std::fs::rename(&p, d.join("worker.log.1"));
+            let _ = std::fs::rename(&p, d.join(format!("{name}.1")));
         }
         std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
     });
     match log_file.flatten() {
         Some(f) => tracing_subscriber::fmt().with_env_filter(filter()).with_writer(std::sync::Mutex::new(f)).with_ansi(false).init(),
         None => tracing_subscriber::fmt().with_env_filter(filter()).with_writer(std::io::stderr).with_ansi(std::io::stderr().is_terminal()).init(),
+    }
+    if galaxy_proto::update::TEST_RELEASE_KEY && (a.cmd == "run" || a.cmd == "service" || guard) {
+        tracing::warn!("这是只认测试发布密钥的测试构建，不能用于正式环境");
+    }
+    // 自动更新：新版本试运行中的记账与守护进程，放在启动最早、最不容易出错的地方（还没联网、没起线程）
+    if a.cmd == "run" || a.cmd == "service" {
+        upgrade::on_start(&dir);
+    }
+    if guard {
+        std::process::exit(upgrade::guard_main(os.clone(), &dir));
     }
     if let Some(code) = os.extra_command(&a.cmd, &a.rest, &dir) {
         std::process::exit(code);
@@ -216,7 +246,7 @@ pub fn main(os: Arc<dyn WorkerOs>) -> ! {
             "enable" => set_enabled(&dir, true),
             "disable" => set_enabled(&dir, false),
             "events" => events(&dir, &a.rest),
-            "update" => update_cmd(os.as_ref(), &dir, &a.rest).await,
+            "update" => update_cmd(os.clone(), &dir, &a.rest).await,
             "auto-update" => auto_update_cmd(&dir, &a.rest),
             "lock-on-end" => lock_on_end_cmd(&dir, &a.rest),
             "headless-display" => headless_display_cmd(&dir, &a.rest),
@@ -224,6 +254,9 @@ pub fn main(os: Arc<dyn WorkerOs>) -> ! {
             "uninstall-service" => os.uninstall_service(),
             "version" | "--version" | "-V" => {
                 println!("lemon-galaxy-worker {VERSION}");
+                if galaxy_proto::update::TEST_RELEASE_KEY {
+                    println!("（测试构建：只认测试发布密钥 / test build: trusts the test release key only）");
+                }
                 0
             }
             "help" | "--help" | "-h" => {
@@ -611,26 +644,30 @@ pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl s
     let ctl = control_server::start(os.clone(), dir).await;
     #[cfg(not(any(unix, windows)))]
     let ctl: Option<Arc<NoControl>> = None;
-    // 服务模式下定期自动更新：换好程序后退出，由服务管理器拉起新版本
-    if std::env::var("LEMON_GALAXY_SUPERVISED").as_deref() == Ok("1") {
-        let (os2, dir2) = (os.clone(), dir.to_path_buf());
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(600)).await;
-            loop {
-                let st = HostState::load(&dir2.join("host.json"));
-                if st.auto_update && !st.accounts.is_empty() {
-                    match apply_update(os2.as_ref(), &dir2).await {
-                        Ok(Some(v)) => {
-                            tracing::info!("已更新到 {v}，重启服务");
-                            std::process::exit(75);
-                        }
-                        Ok(None) => {}
-                        Err(e) => tracing::warn!("自动更新失败：{e}"),
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
-            }
+    // 正在运行的被控服务（自动更新看有没有人在远程、新版本有没有连上服务器）
+    let current: Arc<parking_lot::RwLock<Option<Arc<HostService>>>> = Arc::default();
+    // 新版本试运行中：连上服务器并稳定一段时间后确认
+    {
+        let cur = current.clone();
+        upgrade::watch_health(os.clone(), dir, move || cur.read().as_ref().is_some_and(|h| h.status().online));
+    }
+    // 服务模式下定时自动更新：换好程序后退出，由服务管理器拉起新版本；有人在远程时先推迟
+    let supervised = std::env::var("LEMON_GALAXY_SUPERVISED").as_deref() == Ok("1");
+    if supervised {
+        let cur = current.clone();
+        let ctl2 = ctl.clone();
+        let busy: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+            let host_busy = cur.read().as_ref().is_some_and(|h| !h.status().sessions.is_empty());
+            host_busy || ctl2.as_ref().is_some_and(|c| c.assist_busy())
         });
+        tokio::spawn(upgrade::auto_loop(os.clone(), dir.to_path_buf(), busy));
+    }
+    // 端到端测试的故障注入（只在测试构建里生效）：起来就崩 / 一直不连服务器
+    let fault = upgrade::test_fault();
+    if fault == "crash" {
+        tracing::error!("测试故障注入：启动后崩溃");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        std::process::exit(3);
     }
     let path = dir.join("host.json");
     let device_id = Identity::load_or_create(&store(dir)).device_id.to_hex();
@@ -643,7 +680,7 @@ pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl s
     tokio::pin!(stop);
     loop {
         // 还没有在运行的被控服务：看看登录了没有
-        if host.is_none() && retry_at.is_none_or(|t| tokio::time::Instant::now() >= t) {
+        if host.is_none() && fault != "offline" && retry_at.is_none_or(|t| tokio::time::Instant::now() >= t) {
             retry_at = None;
             let st = HostState::load(&path);
             if st.server.is_empty() {
@@ -661,10 +698,15 @@ pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl s
                         last = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
                         match start_host(os.clone(), dir, server).await {
                             Ok(h) => {
+                                // 主控端在设备详情里「升级被控端」：与界面「立即更新」同一条路（只在有服务管理器拉起新版本时提供）
+                                if supervised {
+                                    h.set_updater(Arc::new(RemoteUpdate { os: os.clone(), dir: dir.to_path_buf() }));
+                                }
                                 if let Some(c) = &ctl {
                                     c.set_host(Some(h.clone()));
                                 }
                                 h.write_status_file();
+                                *current.write() = Some(h.clone());
                                 host = Some(h);
                             }
                             Err(e) => {
@@ -719,12 +761,49 @@ pub async fn run_host(os: Arc<dyn WorkerOs>, dir: &std::path::Path, stop: impl s
                 c.set_host(None);
             }
             h.shutdown();
+            *current.write() = None;
             host = None;
             continue;
         }
         if h.reload_from_disk() {
             tracing::info!("已重新读取账号配置");
         }
+    }
+}
+
+/// 远程升级（主控端在设备详情里点「升级被控端」，galaxy-host 的 MgmtReq::ApplyUpdate）：先查有没有新版本，有就立即回复版本号，
+/// 在后台做完整的零交互升级（下载、整套换、退出让服务管理器拉起新版本、出问题自动换回），与界面「立即更新」同一条路。
+/// 远程会话随服务重启断开，被控端以新版本自己连回服务器。
+struct RemoteUpdate {
+    os: Arc<dyn WorkerOs>,
+    dir: PathBuf,
+}
+
+impl galaxy_host::update::RemoteUpdater for RemoteUpdate {
+    fn start(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + '_>> {
+        Box::pin(async move {
+            let Some(found) = upgrade::check(self.os.as_ref(), &self.dir).await? else { return Ok(None) };
+            let version = found.info.version.clone();
+            tracing::info!("主控端要求远程升级到 {version}");
+            let (os, dir) = (self.os.clone(), self.dir.clone());
+            let t0 = std::time::Instant::now();
+            tokio::spawn(async move {
+                match upgrade::update_now(os, &dir, true).await {
+                    Ok(Some(a)) if a.exit => {
+                        // 给回复留时间发到主控端，再退出让服务管理器拉起新版本
+                        if let Some(rest) = Duration::from_secs(2).checked_sub(t0.elapsed()) {
+                            tokio::time::sleep(rest).await;
+                        }
+                        tracing::info!("远程升级：已换上 {}，重启服务", a.version);
+                        exit_for_update(&dir);
+                    }
+                    Ok(Some(a)) => tracing::info!("远程升级：开始安装 {}，装好后服务自动重启", a.version),
+                    Ok(None) => tracing::info!("远程升级：已是最新版本"),
+                    Err(e) => tracing::warn!("远程升级失败：{e}"),
+                }
+            });
+            Ok(Some(version))
+        })
     }
 }
 
@@ -764,6 +843,9 @@ impl NoControl {
         std::future::pending::<()>().await
     }
     fn close(&self) {}
+    fn assist_busy(&self) -> bool {
+        false
+    }
 }
 
 pub async fn shutdown_signal() {
@@ -847,7 +929,7 @@ async fn assist(os: &dyn WorkerOs, rest: &[String]) -> i32 {
 
 // ---------------- 更新 ----------------
 
-fn platform_name(os: &dyn WorkerOs) -> &'static str {
+pub(crate) fn platform_name(os: &dyn WorkerOs) -> &'static str {
     match os.platform() {
         // XP 兼容版（构建时加 --cfg lemon_galaxy_xp）、Windows 7 兼容版单独发布，不能更新成 Windows 10 起的版本
         Platform::Windows if cfg!(lemon_galaxy_xp) => "windowsxp",
@@ -861,7 +943,7 @@ fn platform_name(os: &dyn WorkerOs) -> &'static str {
 }
 
 /// 用本机任一有效账号的令牌访问服务器。
-fn api_for(dir: &Path) -> Result<Api, String> {
+pub(crate) fn api_for(dir: &Path) -> Result<Api, String> {
     let st = HostState::load(&dir.join("host.json"));
     let server = ServerAddr::parse(&st.server).map_err(|_| t!("还没有登录", "Not signed in").to_string())?;
     let acct = st.accounts.iter().find(|a| a.status == galaxy_host::AccountStatus::Active).ok_or_else(|| t!("没有可用的账号", "No active account").to_string())?;
@@ -870,49 +952,22 @@ fn api_for(dir: &Path) -> Result<Api, String> {
     Ok(api)
 }
 
-async fn check_update(os: &dyn WorkerOs, dir: &Path) -> Result<Option<galaxy_client::update::UpdateInfo>, String> {
-    let api = api_for(dir)?;
-    galaxy_client::update::check(&api, "worker", platform_name(os), galaxy_proto::update::this_arch(), VERSION).await.map_err(|e| e.to_string())
+pub(crate) async fn check_update(os: &dyn WorkerOs, dir: &Path) -> Result<Option<galaxy_client::update::UpdateInfo>, String> {
+    upgrade::check(os, dir).await.map(|f| f.map(|f| f.info))
 }
 
-/// 检查、下载、验证并替换当前程序。返回新版本号（没有新版本为 None）。
-pub async fn apply_update(os: &dyn WorkerOs, dir: &Path) -> Result<Option<String>, String> {
-    let Some(info) = check_update(os, dir).await? else { return Ok(None) };
-    let api = api_for(dir)?;
-    let exe = match os.update_target() {
-        Some(p) => p,
-        None => std::env::current_exe().map_err(|e| e.to_string())?,
-    };
-    let new = exe.with_extension("new");
-    galaxy_client::update::download(&api, &info, &new, &|_, _| {}).await.map_err(|e| e.to_string())?;
-    replace_exe(&exe, &new).map_err(|e| format!("{}: {e}", t!("替换程序失败", "Cannot replace program")))?;
-    Ok(Some(info.version))
+/// 换好新版本后退出，由服务管理器拉起新版本（退出码 75：Windows 服务管理器按「意外退出」处理、执行恢复操作；
+/// systemd 的 Restart=always 照常拉起）。
+pub(crate) fn exit_for_update(dir: &Path) -> ! {
+    let _ = std::fs::remove_file(dir.join("status.json"));
+    std::process::exit(upgrade::EXIT_RESTART);
 }
 
-fn replace_exe(exe: &Path, new: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(new, std::fs::Permissions::from_mode(0o755))?;
-        std::fs::rename(new, exe)
-    }
-    #[cfg(not(unix))]
-    {
-        // 运行中的程序不能覆盖，但可以改名
-        let old = exe.with_extension("old.exe");
-        let _ = std::fs::remove_file(&old);
-        std::fs::rename(exe, &old)?;
-        if let Err(e) = std::fs::rename(new, exe) {
-            let _ = std::fs::rename(&old, exe);
-            return Err(e);
-        }
-        Ok(())
-    }
-}
-
-async fn update_cmd(os: &dyn WorkerOs, dir: &Path, rest: &[String]) -> i32 {
+/// 命令行 `update`：服务在运行时交给服务做（与界面「立即更新」同一条路：整套换、自己重启、出问题自动换回）；
+/// 服务没在运行时只在本机换程序，重启由用户自己来。
+async fn update_cmd(os: Arc<dyn WorkerOs>, dir: &Path, rest: &[String]) -> i32 {
     if rest.iter().any(|a| a == "--check") {
-        return match check_update(os, dir).await {
+        return match check_update(os.as_ref(), dir).await {
             Ok(Some(i)) => {
                 println!("{} {}（{} {}）", t!("有新版本", "New version"), i.version, t!("当前", "current"), VERSION);
                 0
@@ -927,9 +982,26 @@ async fn update_cmd(os: &dyn WorkerOs, dir: &Path, rest: &[String]) -> i32 {
             }
         };
     }
-    match apply_update(os, dir).await {
-        Ok(Some(v)) => {
+    let d = dir.to_path_buf();
+    match tokio::task::spawn_blocking(move || ask_service_update(&d)).await.ok().flatten() {
+        Some(Ok((Some(v), restarting))) => {
             println!("{} {v}", t!("已更新到", "Updated to"));
+            println!("{}", if restarting { t!("服务正在重启成新版本；出问题会自动换回旧版本。", "The service is restarting into the new version; it rolls back automatically on problems.") } else { t!("重启服务后生效。", "Restart the service to use it.") });
+            return 0;
+        }
+        Some(Ok((None, _))) => {
+            println!("{} {VERSION}", t!("已是最新版本", "Up to date:"));
+            return 0;
+        }
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            return 1;
+        }
+        None => {}
+    }
+    match upgrade::update_now(os.clone(), dir, false).await {
+        Ok(Some(a)) => {
+            println!("{} {}", t!("已更新到", "Updated to"), a.version);
             if os.restart_service() {
                 println!("{}", t!("已重启服务。", "Service restarted."));
             } else {
@@ -945,6 +1017,69 @@ async fn update_cmd(os: &dyn WorkerOs, dir: &Path, rest: &[String]) -> i32 {
             eprintln!("{e}");
             1
         }
+    }
+}
+
+/// 经本机控制接口让正在运行的服务更新（ApplyUpdate）。连不上服务返回 None；返回 (新版本, 服务是否马上重启)。
+fn ask_service_update(dir: &Path) -> Option<Result<(Option<String>, bool), String>> {
+    use crate::control::{encode, ErrorCode, Request, RequestLine, Response, ServerLine};
+    use std::io::BufRead;
+    let lang = if zh() { "zh-CN" } else { "en" };
+    #[cfg(unix)]
+    let (reader, mut writer): (Box<dyn std::io::Read>, Box<dyn std::io::Write>) = {
+        let mut cands = vec![];
+        if let Some(p) = std::env::var_os("LEMON_GALAXY_CONTROL_SOCKET").filter(|v| !v.is_empty()) {
+            cands.push(PathBuf::from(p));
+        } else {
+            if galaxy_host::sysuser::is_root() {
+                cands.push(control::system_socket_path());
+            }
+            cands.push(control::user_socket_path(dir));
+            cands.push(dir.join("control.sock"));
+        }
+        let s = cands.iter().find_map(|p| std::os::unix::net::UnixStream::connect(p).ok())?;
+        let _ = s.set_read_timeout(Some(Duration::from_secs(3600)));
+        (Box::new(s.try_clone().ok()?), Box::new(s))
+    };
+    #[cfg(windows)]
+    let (reader, mut writer): (Box<dyn std::io::Read>, Box<dyn std::io::Write>) = {
+        let _ = dir;
+        let mut cands = vec![];
+        if let Some(p) = std::env::var_os("LEMON_GALAXY_CONTROL_SOCKET").filter(|v| !v.is_empty()) {
+            cands.push(p.to_string_lossy().to_string());
+        } else {
+            cands.push(control::SYSTEM_PIPE.to_string());
+            cands.push(control::user_pipe_name(&galaxy_host::sysuser::SysUser::current().sid));
+        }
+        let f = cands.iter().find_map(|p| std::fs::OpenOptions::new().read(true).write(true).open(p).ok())?;
+        (Box::new(f.try_clone().ok()?), Box::new(f))
+    };
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (dir, lang);
+        return None;
+    }
+    #[cfg(any(unix, windows))]
+    {
+        let send = |w: &mut Box<dyn std::io::Write>, id: u64, req: Request| w.write_all(encode(&RequestLine { id, req }).as_bytes()).and_then(|_| w.flush());
+        if send(&mut writer, 1, Request::Hello { lang: lang.into() }).is_err() || send(&mut writer, 2, Request::ApplyUpdate).is_err() {
+            return None;
+        }
+        println!("{}", t!("正在由服务下载并安装新版本……", "The service is downloading and installing the update..."));
+        for line in std::io::BufReader::new(reader).lines() {
+            let Ok(line) = line else { break };
+            let Ok(ServerLine::Response(r)) = serde_json::from_str::<ServerLine>(&line) else { continue };
+            if r.id != 2 {
+                continue;
+            }
+            return Some(match r.resp {
+                Response::Updated { version, restarting } => Ok((version, restarting)),
+                Response::Error { code: ErrorCode::Denied, message } => Err(format!("{message}（{}）", t!("请以管理员 / root 身份运行", "run as administrator / root"))),
+                Response::Error { message, .. } => Err(message),
+                other => Err(format!("{other:?}")),
+            });
+        }
+        Some(Err(t!("服务没有回复（可能正在重启）", "No reply from the service (it may be restarting)").into()))
     }
 }
 

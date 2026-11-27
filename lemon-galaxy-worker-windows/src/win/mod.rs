@@ -59,6 +59,56 @@ fn reg_value(name: &str) -> Option<String> {
     None
 }
 
+/// exe 的产品版本（版本信息资源里的 ProductVersion，去掉 + 后面的部分）；读不到返回 None
+fn file_version(p: &Path) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+    let w: Vec<u16> = p.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let n = GetFileVersionInfoSizeW(PCWSTR(w.as_ptr()), None);
+        if n == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; n as usize];
+        GetFileVersionInfoW(PCWSTR(w.as_ptr()), None, n, buf.as_mut_ptr() as _).ok()?;
+        let mut ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut len = 0u32;
+        let q: Vec<u16> = "\\VarFileInfo\\Translation\0".encode_utf16().collect();
+        let tag = if VerQueryValueW(buf.as_ptr() as _, PCWSTR(q.as_ptr()), &mut ptr, &mut len).as_bool() && len >= 4 {
+            let t = std::slice::from_raw_parts(ptr as *const u16, 2);
+            format!("{:04x}{:04x}", t[0], t[1])
+        } else {
+            "040904b0".to_string()
+        };
+        let q: Vec<u16> = format!("\\StringFileInfo\\{tag}\\ProductVersion\0").encode_utf16().collect();
+        if !VerQueryValueW(buf.as_ptr() as _, PCWSTR(q.as_ptr()), &mut ptr, &mut len).as_bool() || len == 0 {
+            return None;
+        }
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr as *const u16, len as usize));
+        let v = s.trim_end_matches('\0').split('+').next().unwrap_or("").trim().to_string();
+        (!v.is_empty()).then_some(v)
+    }
+}
+
+/// 改卸载项里的版本号（WPF 版界面按 64 位视图写、原生版按程序自己的位数写：两个视图里有就都改）
+fn set_uninstall_version(version: &str) {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_SZ};
+    let key: Vec<u16> = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\LemonGalaxyWorker\0".encode_utf16().collect();
+    let name: Vec<u16> = "DisplayVersion\0".encode_utf16().collect();
+    let val: Vec<u16> = version.encode_utf16().chain(Some(0)).collect();
+    let bytes = unsafe { std::slice::from_raw_parts(val.as_ptr() as *const u8, val.len() * 2) };
+    for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+        unsafe {
+            let mut h = HKEY::default();
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key.as_ptr()), None, KEY_SET_VALUE | view, &mut h).is_ok() {
+                let _ = RegSetValueExW(h, PCWSTR(name.as_ptr()), None, REG_SZ, Some(bytes));
+                let _ = RegCloseKey(h);
+            }
+        }
+    }
+}
+
 impl WorkerOs for WindowsOs {
     fn platform(&self) -> Platform {
         Platform::Windows
@@ -107,6 +157,29 @@ impl WorkerOs for WindowsOs {
 
     fn restart_service(&self) -> bool {
         service::restart()
+    }
+
+    fn stop_service(&self) -> bool {
+        service::stop()
+    }
+
+    fn start_service(&self) -> bool {
+        service::start()
+    }
+
+    /// 安装目录里有界面（WPF 版或老系统的原生版）就是装了桌面端：自动更新换整套
+    fn desktop_install(&self) -> Option<galaxy_worker::upgrade::DesktopInstall> {
+        let dir = service::install_dir();
+        let gui = dir.join(galaxy_worker::upgrade::DESKTOP_GUI_EXE);
+        if !gui.is_file() || !dir.join(galaxy_worker::upgrade::DESKTOP_CORE_EXE).is_file() {
+            return None;
+        }
+        Some(galaxy_worker::upgrade::DesktopInstall::WindowsDir { gui_version: file_version(&gui), dir })
+    }
+
+    /// 「应用和功能」（「添加或删除程序」）里显示的版本号：界面安装时写的卸载项还在就改成新版本
+    fn desktop_updated(&self, version: &str) {
+        set_uninstall_version(version);
     }
 
     fn service_autostart(&self) -> Option<Option<bool>> {
@@ -162,9 +235,9 @@ impl WorkerOs for WindowsOs {
 }
 
 pub fn main() {
-    // 上次自动更新留下的旧程序
+    // 上次自动更新挪开的旧程序（还在运行的删不掉，下次再删）
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::remove_file(exe.with_extension("old.exe"));
+        galaxy_worker::upgrade::files::clean_old_of(&exe);
     }
     galaxy_worker::main(Arc::new(WindowsOs));
 }

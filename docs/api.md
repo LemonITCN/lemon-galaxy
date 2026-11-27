@@ -290,6 +290,7 @@ kind：`folder`、`device_meta`、`ssh_host`、`rdp_host`、`credential`、`snip
 ### 6. 自动更新
 
 - `GET /api/v1/updates/latest?component=&platform=&arch=&current=` → `{ "available": true, "version": "...", "url": "/api/v1/updates/files/{id}", "size": 0, "sha256": "...", "signature": "b64" }`
+  组件：`control`、`worker`（被控服务单文件）、`worker-desktop`（被控端桌面端：Windows 压缩包平台 `windows` / `windows7` / `windowsxp`，Linux 安装包平台 `linux-deb` / `linux-rpm`，见 [auto-update.md](auto-update.md)）、`mobile`、`server`。
 - `GET /api/v1/updates/files/{id}` → 文件
 
 ### 7. WebSocket 信令 `GET /api/v1/ws`

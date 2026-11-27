@@ -1,6 +1,7 @@
-//! 程序：单实例、主窗口、托盘、连入通知、协助请求。
+//! 程序：单实例、主窗口、托盘、连入通知、协助请求、自动更新换了程序文件后原地换成新版本。
 
 use crate::client::{Client, Signal};
+use crate::selfupdate;
 use crate::control::*;
 use crate::tr;
 use crate::tray::{Icons, Tray, TrayCmd, TrayState};
@@ -23,14 +24,31 @@ struct Gui {
     _hold: RefCell<Option<gio::ApplicationHoldGuard>>,
 }
 
+thread_local! {
+    /// 退出主循环后原地换成的新程序与参数（自动更新换了程序文件）
+    static RESTART: RefCell<Option<(std::path::PathBuf, Vec<String>)>> = const { RefCell::new(None) };
+}
+
 pub fn run() -> i32 {
-    let tray_only = std::env::args().any(|a| a == "--tray");
-    let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
-    app.connect_startup(|_| crate::ui::install_css());
-    if app.register(None::<&gio::Cancellable>).is_err() {
-        eprintln!("cannot register application");
-        return 1;
-    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let tray_only = args.iter().any(|a| a == "--tray");
+    let restarted = args.iter().any(|a| a == selfupdate::RESTARTED);
+    let mut tries = 0;
+    let app = loop {
+        let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+        app.connect_startup(|_| crate::ui::install_css());
+        if app.register(None::<&gio::Cancellable>).is_err() {
+            eprintln!("cannot register application");
+            return 1;
+        }
+        // 换版本原地重启：旧版本在会话总线上的名字可能还没释放，等一会再注册
+        if app.is_remote() && restarted && tries < 25 {
+            tries += 1;
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            continue;
+        }
+        break app;
+    };
     if app.is_remote() {
         // 已经在运行：再开一次就把窗口切到前面；登录自启动的那份不打扰
         if !tray_only {
@@ -60,6 +78,12 @@ pub fn run() -> i32 {
         if let Some(t) = g.tray.borrow().as_ref() {
             t.shutdown();
         }
+    }
+    if let Some((exe, args)) = RESTART.with(|r| r.borrow_mut().take()) {
+        drop(app);
+        let e = selfupdate::exec(&exe, &args);
+        eprintln!("cannot restart into {}: {e}", exe.display());
+        return 1;
     }
     code.value()
 }
@@ -134,6 +158,38 @@ impl Gui {
         client.subscribe(move |s| {
             if let Some(m) = m.upgrade() {
                 m.on_signal(s);
+            }
+        });
+
+        // 自动更新装了新包、程序文件换了：连着两次（10 秒以上）都看到、新程序能跑，就以同样的方式原地换成新版本
+        let m = Rc::downgrade(&me);
+        let seen = Cell::new(0u32);
+        let warned = Cell::new(false);
+        glib::timeout_add_seconds_local(10, move || {
+            let Some(m) = m.upgrade() else { return glib::ControlFlow::Break };
+            let Some(exe) = selfupdate::replaced_exe() else {
+                seen.set(0);
+                return glib::ControlFlow::Continue;
+            };
+            seen.set(seen.get() + 1);
+            if seen.get() < 2 {
+                return glib::ControlFlow::Continue;
+            }
+            match selfupdate::probe(&exe) {
+                Some(v) => {
+                    let orig: Vec<String> = std::env::args().skip(1).collect();
+                    let args = selfupdate::restart_args(&orig, m.win.window.is_visible());
+                    eprintln!("program updated to {v}, restarting");
+                    RESTART.with(|r| *r.borrow_mut() = Some((exe, args)));
+                    m.ctx.app.quit();
+                    glib::ControlFlow::Break
+                }
+                None => {
+                    if !warned.replace(true) {
+                        eprintln!("{} changed but does not run yet; keeping the current version", exe.display());
+                    }
+                    glib::ControlFlow::Continue
+                }
             }
         });
         me

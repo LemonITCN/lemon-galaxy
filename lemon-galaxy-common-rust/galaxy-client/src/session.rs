@@ -732,6 +732,20 @@ impl PeerSession {
         }
     }
 
+    /// 远程升级被控端（能力列表要有 "remote_update"）：返回要升级到的版本，None 表示对方已是最新。
+    /// 返回后对方会断开、以新版本重新上线；主控端据设备列表里的版本号判断升级完成。
+    pub async fn apply_update(&self) -> Result<Option<String>> {
+        if !self.ack.capabilities.iter().any(|c| c == galaxy_proto::peer::CAP_REMOTE_UPDATE) {
+            return Err(ClientError::Protocol("对方版本太旧，不支持远程升级，需要先在那台设备上升级一次".into()));
+        }
+        match self.mgmt(MgmtReq::ApplyUpdate).await? {
+            MgmtResp::Update { version } => Ok(version),
+            MgmtResp::Error(e) if e.code == "permission_denied" => Err(ClientError::Permission(e.message)),
+            MgmtResp::Error(e) => Err(ClientError::Other(e.message)),
+            _ => Err(ClientError::Protocol("应答错误".into())),
+        }
+    }
+
     pub async fn clipboard_get(&self) -> Result<Option<ClipboardData>> {
         match self.mgmt(MgmtReq::ClipboardGet).await? {
             MgmtResp::Clipboard(c) => Ok(c),

@@ -130,6 +130,8 @@ pub struct HostService {
     assist_active: Mutex<Option<String>>,
     public_ip: RwLock<String>,
     ai_stop: watch::Sender<u64>,
+    /// 远程升级（见 update.rs）；没装时不报 "remote_update" 能力
+    pub(crate) updater: RwLock<Option<Arc<dyn crate::update::RemoteUpdater>>>,
 }
 
 fn state_path(dir: &std::path::Path) -> PathBuf {
@@ -173,6 +175,7 @@ impl HostService {
             stopped: std::sync::atomic::AtomicBool::new(false),
             lan_stop,
             events: RwLock::new(Arc::new(NoEvents)),
+            updater: RwLock::new(None),
             assist_active: Mutex::new(None),
             public_ip: RwLock::new(String::new()),
             ai_stop,
@@ -211,6 +214,11 @@ impl HostService {
 
     pub fn set_platform(&self, p: Arc<dyn HostPlatform>) {
         *self.platform.write() = p;
+    }
+
+    /// 装上远程升级的做法（见 update.rs）。之后新建的会话能力列表里有 "remote_update"
+    pub fn set_updater(&self, u: Arc<dyn crate::update::RemoteUpdater>) {
+        *self.updater.write() = Some(u);
     }
 
     pub fn set_events(&self, e: Arc<dyn HostEvents>) {
@@ -557,19 +565,17 @@ impl HostService {
         if !assist && !has_account {
             return;
         }
-        let params = if assist {
-            Some(AssistParams {
-                kind: self.cfg.meta.kind.as_str().into(),
-                platform: self.cfg.meta.platform.as_str().into(),
-                hostname: self.cfg.meta.hostname.clone(),
-                os_version: self.cfg.meta.os_version.clone(),
-                arch: self.cfg.meta.arch.clone(),
-                app_version: self.cfg.meta.app_version.clone(),
-            })
-        } else {
-            None
+        let params = AssistParams {
+            kind: self.cfg.meta.kind.as_str().into(),
+            platform: self.cfg.meta.platform.as_str().into(),
+            hostname: self.cfg.meta.hostname.clone(),
+            os_version: self.cfg.meta.os_version.clone(),
+            arch: self.cfg.meta.arch.clone(),
+            app_version: self.cfg.meta.app_version.clone(),
+            update_channel: crate::update::update_channel(self.cfg.meta.kind, self.cfg.meta.platform),
         };
-        let sig = SignalClient::start(self.cfg.server.clone(), self.identity.clone(), None, params);
+        // 临时协助带全部设备信息（未登录的设备也要登记）；已登录的每次连上报版本与更新通道
+        let sig = if assist { SignalClient::start(self.cfg.server.clone(), self.identity.clone(), None, Some(params)) } else { SignalClient::start_device(self.cfg.server.clone(), self.identity.clone(), params) };
         *self.signal.write() = Some(sig.clone());
         // 事件循环（持有弱引用，服务释放后自动结束）
         let weak = Arc::downgrade(self);
@@ -816,6 +822,10 @@ impl HostService {
         // 隐私屏要有控制权限（开着时被控端本地键鼠失效）
         if perms.control && pc.iter().any(|x| x == "privacy") {
             c.push("privacy".into());
+        }
+        // 远程升级：要有控制权限，运行内核的程序装了升级做法才有
+        if perms.control && self.updater.read().is_some() {
+            c.push(galaxy_proto::peer::CAP_REMOTE_UPDATE.into());
         }
         // 虚拟屏：要有控制权限，平台层有驱动才有
         if perms.control {

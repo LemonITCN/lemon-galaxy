@@ -30,6 +30,8 @@ pub struct AssistParams {
     pub os_version: String,
     pub arch: String,
     pub app_version: String,
+    /// 更新通道「组件/平台/架构」（服务器据此在设备列表里标「可升级」）
+    pub update_channel: String,
 }
 
 pub struct SignalClient {
@@ -59,12 +61,21 @@ fn enc(s: &str) -> String {
 
 impl SignalClient {
     pub fn start(server: ServerAddr, identity: Identity, token: Option<String>, assist: Option<AssistParams>) -> Arc<Self> {
+        Self::start_inner(server, identity, token, assist, None)
+    }
+
+    /// 已登录的被控端：连上时把版本号、系统、更新通道报给服务器（每次连上都报，升级后设备列表跟着变）
+    pub fn start_device(server: ServerAddr, identity: Identity, report: AssistParams) -> Arc<Self> {
+        Self::start_inner(server, identity, None, None, Some(report))
+    }
+
+    fn start_inner(server: ServerAddr, identity: Identity, token: Option<String>, assist: Option<AssistParams>, report: Option<AssistParams>) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(1024);
         let (state_tx, state) = watch::channel(SignalState::Connecting);
         let (stop, stop_rx) = watch::channel(false);
         let ev = events.clone();
-        tokio::spawn(run(server, identity, token, assist, rx, ev, state_tx, stop_rx));
+        tokio::spawn(run(server, identity, token, assist, report, rx, ev, state_tx, stop_rx));
         Arc::new(Self { tx, events, state, stop })
     }
 
@@ -148,6 +159,7 @@ async fn run(
     identity: Identity,
     token: Option<String>,
     assist: Option<AssistParams>,
+    report: Option<AssistParams>,
     mut rx: mpsc::UnboundedReceiver<WsMsg>,
     events: broadcast::Sender<WsMsg>,
     state: watch::Sender<SignalState>,
@@ -159,7 +171,7 @@ async fn run(
             break;
         }
         let _ = state.send(SignalState::Connecting);
-        let r = session(&server, &identity, token.as_deref(), assist.as_ref(), &mut rx, &events, &state, &mut stop).await;
+        let r = session(&server, &identity, token.as_deref(), assist.as_ref(), report.as_ref(), &mut rx, &events, &state, &mut stop).await;
         if *stop.borrow() {
             break;
         }
@@ -188,6 +200,7 @@ async fn session(
     identity: &Identity,
     token: Option<&str>,
     assist: Option<&AssistParams>,
+    report: Option<&AssistParams>,
     rx: &mut mpsc::UnboundedReceiver<WsMsg>,
     events: &broadcast::Sender<WsMsg>,
     state: &watch::Sender<SignalState>,
@@ -202,6 +215,11 @@ async fn session(
     } else if token.is_some() {
         // 主控端连接：与同一设备上的被控服务各占一条，互不挤掉
         url.push_str("?role=client");
+    } else if let Some(r) = report {
+        url.push_str(&format!(
+            "?os_version={}&arch={}&app_version={}&update_channel={}",
+            enc(&r.os_version), enc(&r.arch), enc(&r.app_version), enc(&r.update_channel)
+        ));
     }
     let mut req = url.into_client_request()?;
     if let Some(t) = token {

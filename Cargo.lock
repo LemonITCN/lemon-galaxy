@@ -2022,17 +2022,20 @@ name = "galaxy-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "futures",
  "galaxy-client",
  "galaxy-crypto",
  "galaxy-host",
  "galaxy-net",
  "galaxy-proto",
+ "hex",
  "nix 0.29.0",
  "parking_lot 0.12.5",
  "rpassword",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2989,6 +2992,7 @@ dependencies = [
  "galaxy-proto",
  "gtk",
  "ksni",
+ "libc",
  "serde",
  "serde_json",
 ]

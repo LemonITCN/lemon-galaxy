@@ -5,6 +5,7 @@
 //! ```text
 //! lemon-galaxy-worker-gui          打开主界面（已在运行就切到前面）
 //! lemon-galaxy-worker-gui --tray   只显示托盘（登录后自启动用）
+//!   --restarted                    （内部）自动更新换了程序后原地重启成新版本
 //! ```
 
 // 消息类型与服务端共用一份源文件
@@ -19,6 +20,8 @@ mod i18n;
 mod app;
 #[cfg(target_os = "linux")]
 mod client;
+#[cfg(target_os = "linux")]
+mod selfupdate;
 #[cfg(target_os = "linux")]
 mod tray;
 #[cfg(target_os = "linux")]

@@ -16,6 +16,9 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
     if !has("devices", "macs")? {
         c.execute_batch("ALTER TABLE devices ADD COLUMN macs TEXT NOT NULL DEFAULT ''")?;
     }
+    if !has("devices", "update_channel")? {
+        c.execute_batch("ALTER TABLE devices ADD COLUMN update_channel TEXT NOT NULL DEFAULT ''")?;
+    }
     Ok(())
 }
 
@@ -87,7 +90,9 @@ CREATE TABLE IF NOT EXISTS devices (
   last_seen_at INTEGER NOT NULL DEFAULT 0,
   last_ip TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
-  macs TEXT NOT NULL DEFAULT ''
+  macs TEXT NOT NULL DEFAULT '',
+  -- 更新通道「组件/平台/架构」，被控端每次连上信令时报
+  update_channel TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS device_accounts (

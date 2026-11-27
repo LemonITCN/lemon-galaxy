@@ -92,17 +92,7 @@ pub fn install(dir: &Path) -> i32 {
         },
     };
     let _ = service.set_description(if galaxy_worker::zh() { "LemonGalaxy 被控端：远程终端、文件、桌面" } else { "LemonGalaxy worker: remote terminal, files and desktop" });
-    let _ = service.update_failure_actions(ServiceFailureActions {
-        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(86400)),
-        reboot_msg: None,
-        command: None,
-        actions: Some(vec![
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(3) },
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(10) },
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(30) },
-        ]),
-    });
-    let _ = service.set_failure_actions_on_non_crash_failures(true);
+    set_recovery(&service);
     // 程序旁边带了虚拟屏驱动包就顺带装上（测试签名包要开发标志，见 driver.rs）
     super::driver::install_with_service(&target_dir);
     // 允许服务发送 Ctrl+Alt+Del（远程解锁、登录界面要用）
@@ -119,6 +109,33 @@ pub fn install(dir: &Path) -> i32 {
             eprintln!("{}: {e}", t!("服务已安装但启动失败", "Service installed but failed to start"));
             1
         }
+    }
+}
+
+/// 出错自动重启：进程意外退出（含自动更新后的退出码 75：没报告「已停止」就退出，服务管理器按意外退出处理，
+/// XP 起都会执行恢复操作）后 3 秒、10 秒、30 秒重启，之后每次 30 秒（最后一项一直重复），一天后计数清零。
+/// Vista 起再让「报告了已停止但退出码不为 0」也执行恢复操作（XP 没有这个设置，不影响上面的意外退出）。
+fn set_recovery(service: &windows_service::service::Service) {
+    if let Err(e) = service.update_failure_actions(ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(86400)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(vec![
+            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(3) },
+            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(10) },
+            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(30) },
+        ]),
+    }) {
+        tracing::warn!("设置服务的恢复操作失败：{e}");
+    }
+    let _ = service.set_failure_actions_on_non_crash_failures(true);
+}
+
+/// 服务启动时核对一遍恢复操作（以前装的、被改过的服务也保证意外退出后会被拉起，自动更新靠它重启成新版本）。
+fn ensure_recovery() {
+    let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else { return };
+    if let Ok(s) = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG | ServiceAccess::CHANGE_CONFIG | ServiceAccess::START) {
+        set_recovery(&s);
     }
 }
 
@@ -152,6 +169,53 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
         let msg = String::from_utf8_lossy(&out.stdout).trim().to_string();
         Err(if msg.is_empty() { format!("sc.exe {}", out.status) } else { msg })
     }
+}
+
+/// 停止服务并等它停下（自动更新换回旧版本前用）。停不下来（新版本卡住）就结束进程。
+pub fn stop() -> bool {
+    let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else { return false };
+    let Ok(s) = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP) else { return false };
+    let st = s.query_status();
+    if st.as_ref().map(|st| st.current_state == ServiceState::Stopped).unwrap_or(false) {
+        return true;
+    }
+    let pid = st.ok().and_then(|st| st.process_id);
+    let _ = s.stop();
+    for _ in 0..150 {
+        std::thread::sleep(Duration::from_millis(200));
+        if s.query_status().map(|st| st.current_state == ServiceState::Stopped).unwrap_or(true) {
+            return true;
+        }
+    }
+    if let Some(pid) = pid {
+        tracing::warn!("服务 30 秒没停下，结束进程 {pid}");
+        unsafe {
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+            if let Ok(h) = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid) {
+                let _ = TerminateProcess(h, 1);
+                WaitForSingleObject(h, 10_000);
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+    s.query_status().map(|st| st.current_state == ServiceState::Stopped).unwrap_or(true)
+}
+
+/// 启动服务（已在运行也算成功）。刚被结束的服务可能还在「停止中」，多试几次。
+pub fn start() -> bool {
+    let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else { return false };
+    let Ok(s) = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::START) else { return false };
+    for _ in 0..30 {
+        if s.query_status().map(|st| matches!(st.current_state, ServiceState::Running | ServiceState::StartPending)).unwrap_or(false) {
+            return true;
+        }
+        if s.start::<&str>(&[]).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    false
 }
 
 /// 重启服务（更新后用）。
@@ -231,6 +295,7 @@ fn service_main(_args: Vec<OsString>) {
     set(ServiceState::Running, 0);
     // 让自动更新知道有服务管理器负责拉起
     std::env::set_var("LEMON_GALAXY_SUPERVISED", "1");
+    ensure_recovery();
     let dir = DATA_DIR.get().cloned().unwrap_or_else(|| WindowsOs.default_dir(true));
     let code = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt.block_on(galaxy_worker::run_host(Arc::new(WindowsOs), &dir, async move {

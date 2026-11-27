@@ -77,3 +77,7 @@ opusic-sys = { version = "0.7", features = ["no-simd"] }
 # XP / Vista / 没打 SP1 的 Win7 不支持，新 CPU 上一编码有声音的数据就是非法指令、整个进程崩掉（XP 虚拟机实测）。
 # 关掉运行时检测，只用编译时就确定的 SSE / SSE2（32 位目标是 pentium4）
 opusic-sys = { version = "0.7", features = ["no-runtime-feature-detection"] }
+
+[lints.rust]
+# Windows XP 兼容版构建时加 --cfg lemon_galaxy_xp（见 scripts/build-windows-legacy.sh）
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lemon_galaxy_xp)'] }

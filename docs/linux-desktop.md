@@ -134,7 +134,8 @@ Windows 被控端用同一套消息，走命名管道，鉴权按管道那头的
 
 - `.deb` / `.rpm`：`/usr/bin/lemon-galaxy-worker`、`/usr/bin/lemon-galaxy-worker-gui`、`/usr/lib/systemd/system/lemon-galaxy-worker.service`（装好即启用，数据 `/var/lib/lemon-galaxy-worker`）、`/usr/share/applications/cn.lemonit.galaxy.worker.desktop`、`/etc/xdg/autostart/lemon-galaxy-worker-gui.desktop`（`--tray`）、`/usr/share/polkit-1/actions/cn.lemonit.galaxy.worker.policy`、hicolor 图标。依赖 GTK 3 与 librsvg（托盘的 SVG 图标）。包内单元带 `LEMON_GALAXY_SUPERVISED=1`。
 - 桌面端（包管理器装的）在命令行运行 `install-service` / `uninstall-service` 只启用 / 停用包自带的服务，不再复制程序。
-- 自动更新：被控服务按发布签名下载新的 CLI（内核单文件）替换 `/usr/bin/lemon-galaxy-worker`（界面程序不随之更新，下次装新包时一起换；控制接口是 JSON，新旧版本互相兼容）。musl 精简版的平台名是 `linux-musl`，只会更新到精简版。
+- 自动更新：deb / rpm 装的由被控服务下载新的安装包（组件 `worker-desktop`，平台 `linux-deb` / `linux-rpm`），交给在单独 systemd 单元里运行的更新守护进程调 dpkg / rpm 装，postinst 重启服务，界面发现程序换了就原地换成新版本，新版本起不来或连不上服务器自动换回；只装了 CLI 的只换内核单文件。全程零交互，见 [auto-update.md](auto-update.md)。musl 精简版的平台名是 `linux-musl`，只会更新到精简版。
+- 包脚本：首次安装开机自启并启动服务；升级时不改用户设的开机自启，开着就重启成新版本，关了只在服务正在运行时重启。
 - 发布文件：`lemon-galaxy-worker_<版本>_amd64.deb` / `_arm64.deb`、`lemon-galaxy-worker-<版本>.x86_64.rpm` / `.aarch64.rpm`（桌面端）、`lemon-galaxy-worker-<版本>-linux-<架构>`（CLI，glibc 2.17 起）、`lemon-galaxy-worker-<版本>-linux-musl-<架构>`（CLI 精简版）。界面在 Debian 10 容器里编（glibc 2.28），内核用 cargo-zigbuild 按 glibc 2.17 编。
 
 ## 9. 图形界面

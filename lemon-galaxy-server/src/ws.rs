@@ -28,6 +28,8 @@ pub struct WsQuery {
     os_version: Option<String>,
     arch: Option<String>,
     app_version: Option<String>,
+    /// 更新通道「组件/平台/架构」（已登录的被控端每次连上都报，见 galaxy-client 的 SignalClient::start_device）
+    update_channel: Option<String>,
     /// client = 主控端（带用户会话）；缺省为被控端（设备身份）
     role: Option<String>,
 }
@@ -160,6 +162,25 @@ async fn run_ws(st: St, sock: WebSocket, ip: IpAddr, q: WsQuery) -> anyhow::Resu
         .unwrap_or_default();
 
     let client_role = q.role.as_deref() == Some("client") && !assist;
+    // 已登录的被控端每次连上都报版本号、系统与更新通道：升级后设备列表跟着变（以前只在登录时记一次）
+    if !client_role && !assist {
+        if let Some(ver) = q.app_version.clone().filter(|v| !v.is_empty() && v.len() <= 64) {
+            let clip = |s: Option<String>, n: usize| s.unwrap_or_default().chars().take(n).collect::<String>();
+            let (os, arch, channel, raw6) = (clip(q.os_version.clone(), 200), clip(q.arch.clone(), 32), clip(q.update_channel.clone(), 64), raw.clone());
+            let _ = st
+                .db
+                .call(move |c| {
+                    c.execute(
+                        "UPDATE devices SET app_version = ?1,
+                           os_version = CASE WHEN ?2 = '' THEN os_version ELSE ?2 END,
+                           arch = CASE WHEN ?3 = '' THEN arch ELSE ?3 END,
+                           update_channel = ?4 WHERE id = ?5",
+                        params![ver, os, arch, channel, raw6],
+                    )
+                })
+                .await;
+        }
+    }
     // 被控连接上报的网卡 MAC（远程开机用）
     if !client_role && !assist && !macs.is_empty() {
         let mut list: Vec<String> = macs.iter().filter_map(|m| galaxy_proto::normalize_mac(m)).collect();

@@ -442,6 +442,11 @@ impl Control {
         self.assist.lock().as_ref().map(|a| a.host.clone())
     }
 
+    /// 临时协助里有没有人连着（自动更新据此推迟重启）
+    pub(crate) fn assist_busy(&self) -> bool {
+        self.assist_host().is_some_and(|h| !h.status().sessions.is_empty())
+    }
+
     fn current_state(&self) -> HostState {
         match self.host() {
             Some(h) => h.state(),
@@ -904,10 +909,12 @@ impl Control {
                 Response::UpdateCheck { current: VERSION.into(), latest: latest.map(|i| UpdateAvailable { version: i.version, size: i.size, notes: i.notes }) }
             }
             Request::ApplyUpdate => {
+                // 用户点了「立即更新」：马上做（不等远程会话结束），下载、换整套、重启、出问题自动换回，全程不需要再点什么
                 self.check(c, Need::Manage).await?;
-                let v = crate::apply_update(self.os.as_ref(), &self.dir).await.map_err(|e| Response::err(ErrorCode::Failed, e))?;
-                let restarting = v.is_some() && self.mode != ServiceMode::Foreground;
-                if restarting {
+                tracing::info!("{} 要求立即更新", c.peer.name);
+                let supervised = self.mode != ServiceMode::Foreground;
+                let a = crate::upgrade::update_now(self.os.clone(), &self.dir, supervised).await.map_err(|e| Response::err(ErrorCode::Failed, e))?;
+                if a.as_ref().is_some_and(|a| a.exit) {
                     // 回复发出去后退出，由服务管理器拉起新版本（与自动更新相同）
                     let socket = self.socket.clone();
                     let dir = self.dir.clone();
@@ -917,12 +924,11 @@ impl Control {
                         let _ = std::fs::remove_file(socket);
                         #[cfg(not(unix))]
                         let _ = socket;
-                        let _ = std::fs::remove_file(dir.join("status.json"));
                         tracing::info!("已更新，重启服务");
-                        std::process::exit(75);
+                        crate::exit_for_update(&dir);
                     });
                 }
-                Response::Updated { version: v, restarting }
+                Response::Updated { restarting: a.as_ref().is_some_and(|a| a.restarting), version: a.map(|a| a.version) }
             }
             Request::ElevationKey => {
                 if self.rights(c).manage == ManageRight::Denied {

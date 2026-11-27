@@ -90,6 +90,7 @@ impl WorkerHost {
         let server = ServerAddr::parse(&st.server).map_err(|e| GalaxyError::Other { detail: e })?;
         let cfg = galaxy_host::HostConfig { server, data_dir: self.dir.clone(), meta: meta(), multi_account: true, file_helper: None };
         let h = galaxy_host::HostService::start(cfg, self.identity.clone()).await.map_err(|e| GalaxyError::Other { detail: format!("被控服务启动失败：{e}") })?;
+        crate::remote_update::register_host(&h);
         let w = HostService::wrap(h);
         *self.host.lock() = Some(w.clone());
         Ok(Some(w))

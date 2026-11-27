@@ -158,6 +158,13 @@ pub struct ClientDevice {
     /// 网卡 MAC（远程开机用）
     #[serde(default)]
     pub macs: Vec<String>,
+    /// 更新通道「组件/平台/架构」（如 worker/windowsxp/x86、control/macos/universal）：被控端连上信令时报上来，
+    /// 老版本没报时服务器按系统推断
+    #[serde(default)]
+    pub update_channel: String,
+    /// 服务器上有比 `app_version` 新的版本时是那个版本号（主控端在设备列表里标「可升级」），否则为空
+    #[serde(default)]
+    pub update_version: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -188,6 +188,9 @@ pub struct DeviceInfo {
     pub lan_seen: bool,
     pub last_seen_at: i64,
     pub is_self: bool,
+    /// 服务器上有比 `app_version` 新的版本时是那个版本号（设备列表标「可升级」、详情里可「升级被控端」），否则为空
+    #[uniffi(default = "")]
+    pub update_version: String,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]

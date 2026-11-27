@@ -129,3 +129,21 @@ pub trait SecretPrompt: Send + Sync {
     /// 首次连接或主机密钥变化时确认。`changed` 为真表示与记录的不一致（可能被冒充），界面应醒目警告。
     fn confirm_host_key(&self, host: String, port: u16, key_type: String, fingerprint: String, changed: bool) -> bool;
 }
+
+/// 远程升级请求（主控端在设备详情里点了「升级被控端」）：内核已查到新版本（发布签名已验），App 在后台走自己的
+/// 零交互升级（下载、核对、替换、以新版本重新打开）。必须立即返回，不能弹任何需要人点的东西。
+#[uniffi::export(with_foreign)]
+pub trait UpdateRequestHandler: Send + Sync {
+    fn on_update_requested(&self, info: crate::types::UpdateInfo);
+}
+
+/// 主控端远程升级一台被控端的进度（Client::upgrade_device）。
+#[uniffi::export(with_foreign)]
+pub trait UpgradeListener: Send + Sync {
+    /// 对方开始升级到 `version`（之后会断开、以新版本重新上线）
+    fn on_started(&self, version: String);
+    /// 对方已离线（正在替换、重启）
+    fn on_offline(&self);
+    /// 结束：成功时 `version` 是对方现在的版本（已是最新时也走这里，`error` 为空），失败时 `error` 是原因
+    fn on_finished(&self, version: Option<String>, error: Option<String>);
+}

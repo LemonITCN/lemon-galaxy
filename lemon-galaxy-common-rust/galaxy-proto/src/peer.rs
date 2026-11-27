@@ -178,6 +178,10 @@ pub enum MgmtReq {
     /// 由被控端经反向流（`ReverseOpen::ClipboardRead`）来读。需要剪贴板与文件权限，能力列表有 "clipboard_offer"。
     /// 放在最后，老版本的变体编号不变
     ClipboardOffer(ClipOffer),
+    /// 远程升级被控端（主控端设备详情里的「升级被控端」）：被控端查有没有新版本，有就回 `MgmtResp::Update` 后
+    /// 自己走完整个升级（下载、核对、替换、重启成新版本、重新上线），全程不要人点。需要控制权限，能力列表有
+    /// "remote_update"。放在最后，老版本的变体编号不变
+    ApplyUpdate,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -193,10 +197,16 @@ pub enum MgmtResp {
     Display(DisplayInfo),
     /// 应用操作的结果（应答 `ComputerUse`）：给模型看的文字 + 可选的窗口截图
     ComputerUse { text: String, image: Option<ImageData> },
+    /// 应答 `ApplyUpdate`：`version` 是要升级到的版本（被控端随后会断开、以新版本重新上线）；None 表示已是最新。
+    /// 放在最后，老版本的变体编号不变
+    Update { version: Option<String> },
 }
 
 /// AI 应用操作能力（docs/computer-use.md）
 pub const CAP_COMPUTER_USE: &str = "computer_use";
+
+/// 被控端能被远程升级（`MgmtReq::ApplyUpdate`）。没有这个能力的老被控端要先在本机升级一次。
+pub const CAP_REMOTE_UPDATE: &str = "remote_update";
 
 /// 被控端空闲时也每秒至少发一帧画面（保活）。主控端据此判断画面卡死：几秒没数据先要关键帧，再没有就结束画面重连。
 /// 不报这个能力的被控端（如 macOS 被控端画面不变时不发帧）主控端不做这个判断。

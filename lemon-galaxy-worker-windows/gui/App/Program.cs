@@ -14,6 +14,7 @@ namespace LemonGalaxy;
 ///   LemonGalaxyWorker.exe                      打开主窗口（已在运行就把窗口拉到前面）
 ///   LemonGalaxyWorker.exe --tray               登录后自启：只放托盘图标（本用户关了「登录后在托盘显示」时直接退出）
 ///   LemonGalaxyWorker.exe --replace            替换同一位置正在运行的旧实例（升级后用）
+///   LemonGalaxyWorker.exe --replace --background  同上，只放托盘不开窗口（被控服务自动更新换了界面后，没开窗口的旧实例这样换成新版本）
 ///   LemonGalaxyWorker.exe --selftest &lt;目录&gt; 离屏渲染各页面成 PNG、核对协议与语言包，跑完退出；退出码 0 成功
 ///       可选 --live：再连真的被控服务（环境变量 LEMON_GALAXY_CONTROL_SOCKET 指定管道）走一遍
 /// 以管理员身份运行的子命令（界面经 UAC 调用，见 Control/Elevation.cs、Setup/Setup.cs）：
@@ -67,9 +68,11 @@ internal static class Program
         if (Has("--uninstall")) return Uninstall(result, Has("--confirmed"), int.TryParse(Arg("--keep"), out var keep) ? keep : 0);
 
         var tray = Has("--tray");
+        var background = Has("--background");
         if (tray && !settings.TrayAtLogin) return 0;
         // 单实例（按程序位置区分：解压目录里的新版本与已安装的旧版本可以同时开，安装后由新的那份 --replace 接替）
-        var tag = Tag(AppInfo.ExePath);
+        // 装好的那份按安装位置算（自动更新时运行中的程序会被改名挪开，新旧两份要算出同一个）
+        var tag = Tag(AppInfo.RunningInstalled ? AppInfo.InstalledExe : AppInfo.ExePath);
         single = new Mutex(false, @"Local\LemonGalaxyWorkerUI." + tag);
         showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\LemonGalaxyWorkerUI.show." + tag);
         quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\LemonGalaxyWorkerUI.quit." + tag);
@@ -87,7 +90,7 @@ internal static class Program
             if (!mine)
             {
                 // 已经在运行：再打开一次就把窗口切到前面；登录自启的那份不打扰
-                if (!tray) showEvent.Set();
+                if (!tray && !background) showEvent.Set();
                 return 0;
             }
         }
@@ -113,7 +116,9 @@ internal static class Program
         var trayIcon = new Tray(model, window);
         Listen(showEvent, () => window.ShowPage());
         Listen(quitEvent, Exit);
-        if (!tray) window.ShowPage();
+        if (!tray && !background) window.ShowPage();
+        // 被控服务自动更新换了界面程序：以同样的方式换成新版本
+        SelfUpdate.Start(() => window?.IsVisible == true);
         var code = app.Run();
         trayIcon.Dispose();
         model.Client?.Dispose();
