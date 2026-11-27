@@ -85,13 +85,38 @@ pub fn app_version() -> &'static str {
     galaxy_proto::APP_VERSION
 }
 
-/// 已安装那份界面的版本（没装为 None）
+/// 已安装那份界面的版本（没装为 None，读不到版本为空串）
 pub fn installed_version() -> Option<String> {
     let p = installed_exe();
     if !p.exists() {
         return None;
     }
-    file_version(&p).or_else(|| Some(String::new()))
+    Some(installed_disk_version().unwrap_or_default())
+}
+
+/// 安装位置上界面程序文件现在的版本（读不到为 None）。
+/// 不能直接对安装位置调 GetFileVersionInfo：从这个路径启动的进程里，系统读版本时直接用已加载的映像，读到的永远是自己的版本，
+/// 自动更新把文件换掉后也看不出来（XP 虚拟机实测：本进程里读到的是自己，换个进程读才是磁盘上的新文件）。
+/// 文件的修改时间或大小变了，才复制到临时目录、对副本读一次。
+pub fn installed_disk_version() -> Option<String> {
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(std::time::SystemTime, u64, Option<String>)>> = const { std::cell::RefCell::new(None) };
+    }
+    let p = installed_exe();
+    let m = std::fs::metadata(&p).ok()?;
+    let (mtime, len) = (m.modified().ok()?, m.len());
+    if let Some(v) = LAST.with(|l| l.borrow().as_ref().filter(|x| x.0 == mtime && x.1 == len).map(|x| x.2.clone())) {
+        return v;
+    }
+    let tmp = std::env::temp_dir().join(format!("lg-ui-ver-{}.exe", std::process::id()));
+    let copied = std::fs::copy(&p, &tmp).is_ok();
+    let v = if copied { file_version(&tmp).filter(|v| !v.is_empty()) } else { None };
+    let _ = std::fs::remove_file(&tmp);
+    // 复制失败（正在换文件）不记，下次再读
+    if copied {
+        LAST.with(|l| *l.borrow_mut() = Some((mtime, len, v.clone())));
+    }
+    v
 }
 
 /// exe 的产品版本（版本信息资源里的 ProductVersion，去掉 + 后面的部分）

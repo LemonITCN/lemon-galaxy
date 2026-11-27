@@ -44,17 +44,42 @@ internal static class SelfUpdate
         t.Start();
     }
 
-    /// <summary>磁盘上现在那份界面程序的版本（换文件的一瞬间读不到时为 null）</summary>
+    // 上次读到的安装位置文件（修改时间、大小）与版本
+    private static DateTime lastWrite;
+    private static long lastLength = -1;
+    private static string? lastVersion;
+
+    /// <summary>
+    /// 磁盘上现在那份界面程序的版本（换文件的一瞬间读不到时为 null）。
+    /// 不能直接对安装位置调 FileVersionInfo.GetVersionInfo：本进程就是从这个路径加载的，系统读版本时直接用已加载的映像，
+    /// 读到的永远是自己的版本，看不出文件被换了（XP 虚拟机实测：在本进程里读到的是自己，换个进程读才是磁盘上的新文件）。
+    /// 文件的修改时间或大小变了，才复制到临时目录、对副本读一次。
+    /// </summary>
     private static string? DiskVersion()
     {
         try
         {
             // 按安装位置找（运行中的程序被改名挪开后，那个位置上就是新版本）
-            if (!File.Exists(AppInfo.InstalledExe)) return null;
-            var v = FileVersionInfo.GetVersionInfo(AppInfo.InstalledExe).ProductVersion ?? "";
+            var fi = new FileInfo(AppInfo.InstalledExe);
+            if (!fi.Exists) return null;
+            if (fi.LastWriteTimeUtc == lastWrite && fi.Length == lastLength) return lastVersion;
+            var tmp = Path.Combine(Path.GetTempPath(), $"lg-ui-ver-{Process.GetCurrentProcess().Id}.exe");
+            string v;
+            try
+            {
+                File.Copy(fi.FullName, tmp, true);
+                v = FileVersionInfo.GetVersionInfo(tmp).ProductVersion ?? "";
+            }
+            finally
+            {
+                try { File.Delete(tmp); } catch { }
+            }
             var plus = v.IndexOf('+');
             v = (plus > 0 ? v.Substring(0, plus) : v).Trim();
-            return v.Length > 0 ? v : null;
+            lastWrite = fi.LastWriteTimeUtc;
+            lastLength = fi.Length;
+            lastVersion = v.Length > 0 ? v : null;
+            return lastVersion;
         }
         catch { return null; }
     }

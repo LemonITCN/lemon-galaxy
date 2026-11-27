@@ -325,8 +325,8 @@ impl Gui {
             if st.2.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60)) {
                 return;
             }
-            // 按安装位置找（运行中的程序被改名挪开后，那个位置上就是新版本）
-            let disk = crate::setup::file_version(&crate::setup::installed_exe()).filter(|v| !v.is_empty());
+            // 按安装位置找（运行中的程序被改名挪开后，那个位置上就是新版本；读法见 installed_disk_version）
+            let disk = crate::setup::installed_disk_version();
             let Some(v) = disk.filter(|v| v != galaxy_proto::APP_VERSION) else {
                 *st = (None, 0, None);
                 return;
