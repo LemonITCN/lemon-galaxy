@@ -33,7 +33,6 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const CSIDL_COMMON_PROGRAMS: i32 = 0x17;
 const CSIDL_LOCAL_APPDATA: i32 = 0x1c;
-const CSIDL_COMMON_APPDATA: i32 = 0x23;
 const CSIDL_PROGRAM_FILES: i32 = 0x26;
 
 /// 系统文件夹（SHGetFolderPathW，XP 起都有）
@@ -62,9 +61,10 @@ pub fn installed_exe() -> PathBuf {
     install_dir().join("LemonGalaxyWorker.exe")
 }
 
-/// 被控服务的数据目录（账号、设置、日志），卸载时保留
+/// 被控服务的数据目录（账号、设置、日志），卸载时保留。与 lemon-galaxy-worker 的 default_dir 同一个算法：
+/// XP 没有 ProgramData 环境变量，被控服务用的是 C:\ProgramData（不是公共应用数据目录 All Users\Application Data）
 pub fn service_data_dir() -> PathBuf {
-    folder(CSIDL_COMMON_APPDATA).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData")).join("LemonGalaxy").join("worker")
+    std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData")).join("LemonGalaxy").join("worker")
 }
 
 /// 界面自己的设置与日志（每个 Windows 用户一份）
