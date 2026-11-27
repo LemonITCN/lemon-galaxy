@@ -13,6 +13,13 @@
 """
 import base64, hashlib, hmac, json, os, socket, ssl, struct, sys, time, urllib.error, urllib.request, uuid, zipfile
 
+# Windows 上的 Python 标准输出默认是系统代码页（GitHub 的 Windows 机器是 cp1252），打印中文会抛 UnicodeEncodeError
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def totp(secret_b32):
     s = secret_b32.strip().upper()
