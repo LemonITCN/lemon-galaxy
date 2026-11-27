@@ -69,6 +69,7 @@ POSTINST="#!/bin/sh
 set -e
 FIRST=
 [ \"\$1\" = configure ] && [ -z \"\$2\" ] && FIRST=1
+if [ -f /var/lib/lemon-galaxy-worker/.reinstall ]; then FIRST=1; rm -f /var/lib/lemon-galaxy-worker/.reinstall; fi
 $POSTINST_BODY
 exit 0"
 PRERM='#!/bin/sh
@@ -77,7 +78,9 @@ set -e
 case "$1" in remove|purge|0)
   if [ -d /run/systemd/system ]; then
     systemctl disable --now lemon-galaxy-worker.service >/dev/null 2>&1 || true
-  fi ;;
+  fi
+  # 卸载（不清配置）后再装，dpkg 调 postinst configure 时带着上次配置过的版本，看起来像升级；留个记号让它按首次安装开机自启并启动
+  [ -d /var/lib/lemon-galaxy-worker ] && touch /var/lib/lemon-galaxy-worker/.reinstall || true ;;
 esac
 exit 0'
 POSTRM='#!/bin/sh
@@ -144,6 +147,7 @@ cp -a "$R/." %{buildroot}/
 %post
 FIRST=
 [ "\$1" = 1 ] && FIRST=1
+rm -f /var/lib/lemon-galaxy-worker/.reinstall
 $POSTINST_BODY
 
 %preun
