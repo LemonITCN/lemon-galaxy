@@ -68,6 +68,9 @@ internal static class SelfTest
             // 复制粘贴文件下载到临时目录，不碰 %LOCALAPPDATA%；系统剪贴板 selftest 不读不写
             ClipFiles.RootOverride = IOPath.Combine(IOPath.GetDirectoryName(fakeHome)!, "clipboard-cache");
             CheckClipboardCacheCleanup();
+            // 在线更新的安装部分：临时目录里换文件、换回、恢复、改装到用户目录（不启动真的程序）
+            var updateGroups = UpdateSelfTest.Run(Problems);
+            Console.WriteLine($"selftest: 在线更新检查 {updateGroups} 组");
 
             var langs = Arg("--lang") is { } l ? new[] { l } : new[] { "zh-Hans", "en" };
             var themes = Arg("--theme") is { } t ? new[] { t } : new[] { "light", "dark" };
@@ -1107,6 +1110,8 @@ internal static class SelfTest
         ClearToast(app);
         app.Selection = null;
         app.Nav.Notify();
+        // 远程升级被控端：可升级标记、详情里的按钮、进行中、失败、成功
+        RenderUpgrade(app, root, prefix, zh);
 
         // 3. 终端
         app.OpenTerminal("dev-build");
@@ -1269,6 +1274,7 @@ internal static class SelfTest
             app.SelectHome(NavSection.Settings);
             Capture($"{prefix}-8{i}-settings-{pages[i].ToString().ToLowerInvariant()}", root);
         }
+        RenderUpdate(app, root, prefix, zh);
         var qr = new Border
         {
             Background = Th.Content, Padding = new Thickness(24),
@@ -1298,6 +1304,178 @@ internal static class SelfTest
         app.CloseAllTabs();
         app.Forwards.StopAll();
         Ui.Pump(50);
+    }
+
+    /// <summary>
+    /// 设置 → 关于里的更新：有新版本（后台已下载好）、点了「立即更新」正在下载、正在安装、上次没装上；侧栏「设置」上的标记。
+    /// 再核对更新前记下的界面状态（分区、设置页、标签页、终端会话）能存能读。
+    /// </summary>
+    private static void RenderUpdate(AppModel app, FrameworkElement root, string prefix, bool zh)
+    {
+        var u = app.Updater;
+        var info = new UpdateInfo("0.1.0.72", "LemonGalaxy-0.1.0.72-windows-x64.zip", 26_214_400, "9b1c0f2e7d4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e",
+            "/api/v1/updates/files/72", zh ? "- 在线更新改为一键完成\n- 修复若干问题" : "- One-click updates\n- Bug fixes");
+        app.SettingsPage = SettingsPage.About;
+        app.SelectHome(NavSection.Settings);
+        u.Fake(UpdateState.Downloaded, info);
+        Capture($"{prefix}-87-settings-update-ready", root);
+        if (!AllText(root).Any(t => t == L.T("update.now"))) Problems.Add("更新：已下载好时没有「立即更新」按钮");
+        u.Fake(UpdateState.Downloading, info, 9_437_184, requested: true);
+        Capture($"{prefix}-88-settings-update-downloading", root);
+        if (AllText(root).Any(t => t == L.T("update.now"))) Problems.Add("更新：点了「立即更新」下载中还显示按钮");
+        u.Fake(UpdateState.Installing, info);
+        Capture($"{prefix}-89-settings-update-installing", root);
+        u.LastFailure = new UpdateResult { Ok = false, Code = "startup", Sha256 = info.Sha256 };
+        u.Fake(UpdateState.Downloaded, info);
+        Capture($"{prefix}-8a-settings-update-last-failed", root);
+        u.LastFailure = null;
+        // 收起的侧栏上「设置」的新版本标记
+        app.Settings.SidebarCompact = true;
+        Capture($"{prefix}-8b-settings-update-compact", root);
+        app.Settings.SidebarCompact = false;
+        u.Fake(UpdateState.Idle, null);
+        ClearToast(app);
+
+        // 更新前记下的界面状态
+        var resume = UpdateResume.Capture(app);
+        var expected = app.Tabs.Count(t => !(t.DeviceId?.StartsWith("assist:", StringComparison.Ordinal) ?? false) && (t.DeviceId != null || t.SshHostId != null || t.Kind == TabKind.Sftp));
+        if (resume.Tabs.Count != expected || resume.Tabs.Count == 0) Problems.Add($"更新：记下的标签页数不对（{resume.Tabs.Count}，应为 {expected}）");
+        var path = IOPath.Combine(IOPath.GetTempPath(), "lemongalaxy-selftest-resume-" + Guid.NewGuid().ToString("N") + ".json");
+        resume.Save(path);
+        var back = UpdateResume.Take(path);
+        if (back == null || back.Section != "Settings" || back.SettingsPage != "About" || back.Tabs.Count != resume.Tabs.Count
+            || back.Tabs.Where(t => t.Kind == "Terminal" && t.Device != null).Any(t => string.IsNullOrEmpty(t.Session)))
+            Problems.Add("更新：记下的界面状态读回来不对");
+        if (File.Exists(path)) Problems.Add("更新：界面状态读过后没删");
+        app.Section = NavSection.Hosts;
+        back?.ApplyNav(app);
+        if (app.Section != NavSection.Settings || app.SettingsPage != SettingsPage.About) Problems.Add("更新：恢复分区与设置页不对");
+    }
+
+    /// <summary>
+    /// 远程升级被控端（设备详情的「升级被控端」）：哪些设备能升级、列表与概览上的「可升级」标记、离线时按钮不可用、点了不弹确认、
+    /// 失败原因就地显示、进行中（三步、按钮不可用、列表上「升级中」、离开详情再回来还在）、成功后版本与标记刷新、不在详情时弹提示。
+    /// </summary>
+    private static void RenderUpgrade(AppModel app, FrameworkElement root, string prefix, bool zh)
+    {
+        void Expect(bool ok, string what) { if (!ok) Problems.Add("远程升级：" + what); }
+        void Shot(string name)
+        {
+            Settle(root, WindowSize);
+            Capture(name, root);
+        }
+        bool Shows(string text) => AllText(root).Any(t => t == text);
+        if (app.Client is not MockClient mock)
+        {
+            Problems.Add("远程升级：不是模拟内核");
+            return;
+        }
+        var up = app.Upgrades;
+        DeviceInfo Dev(string id) => app.Device(id)!;
+        const string v = MockData.UpgradeVersion;
+
+        // 哪些设备能升级：被控端与 Mac 客户端；本机、手机、Windows 客户端（被控由系统服务负责）不能
+        Expect(UpgradeHub.HasUpdate(Dev("dev-build")) && UpgradeHub.HasUpdate(Dev("dev-imac")) && UpgradeHub.HasUpdate(Dev("dev-nas")), "有新版本的被控端没标「可升级」");
+        Expect(!UpgradeHub.HasUpdate(Dev("dev-gpu")), "没有新版本的被控端标了「可升级」");
+        Expect(!UpgradeHub.Upgradable(Dev("dev-self") with { UpdateVersion = v }) && !UpgradeHub.Upgradable(Dev("dev-phone") with { UpdateVersion = v }), "本机、手机不应能远程升级");
+        Expect(!UpgradeHub.HasUpdate(Dev("dev-office") with { UpdateVersion = v }), "Windows 客户端不应标「可升级」（它的被控由系统服务负责）");
+        Expect(UpgradeHub.HasUpdate(Dev("dev-office") with { Platform = Platform.Macos, UpdateVersion = v }), "Mac 客户端（带本机被控）应能远程升级");
+        Expect(!up.CanStart(Dev("dev-nas")), "离线设备不应能开始升级");
+
+        // 1. 列表与概览上的「可升级」标记
+        app.SelectHome(NavSection.Hosts);
+        app.Selection = null;
+        app.Nav.Notify();
+        Shot($"{prefix}-1a-hosts-upgrade-marks");
+        var marks = AllText(root).Count(t => t == L.T("upgrade.mark"));
+        Expect(marks >= 4, $"列表与概览上的「可升级」标记太少（{marks}）");
+
+        // 2. 离线设备：按钮不可用，提示要在线
+        app.Selection = "dev:dev-nas";
+        app.Nav.Notify();
+        Shot($"{prefix}-1b-hosts-upgrade-offline");
+        Expect(ButtonIn(root, "UpgradeCard", L.T("upgrade.action")) is { IsEnabled: false }, "离线设备的「升级被控端」应不可用");
+        Expect(AllText(root).Any(t => t.Contains(L.T("upgrade.needOnline"))), "离线设备没有提示要在线");
+
+        // 3. 在线设备：点了直接开始，不弹确认；对方拒绝时就地显示原因（正在看详情，不再弹提示）
+        app.Selection = "dev:dev-build";
+        app.Nav.Notify();
+        Shot($"{prefix}-1c-hosts-upgrade-available");
+        var start = ButtonIn(root, "UpgradeCard", L.T("upgrade.action"));
+        Expect(start is { IsEnabled: true }, "在线设备的「升级被控端」应可用");
+        Expect(Shows(L.T("upgrade.available", v)) && AllText(root).Any(t => t.StartsWith(L.T("upgrade.current", "0.1.0.68"), StringComparison.Ordinal)), "详情里没有当前版本与新版本");
+        var refusal = zh ? "对方的被控端不支持远程升级（版本太旧）" : "The host does not support remote updates (version too old)";
+        mock.UpgradeFailure = refusal;
+        start?.PerformClick();
+        Expect(app.Modal == null, "点了「升级被控端」不应再弹确认");
+        Expect(up.IsRunning("dev-build"), "点了之后没有进入升级中");
+        Wait("远程升级失败", () => up.Of("dev-build") is { Phase: UpgradePhase.Failed });
+        Shot($"{prefix}-1d-hosts-upgrade-failed");
+        Expect(Shows(refusal), "失败原因没有显示在详情里");
+        Expect(app.CurrentToast == null, "正在看这台设备的详情时不应再弹提示");
+        mock.UpgradeFailure = null;
+
+        // 4. 进行中：每一步停下来截图；按钮不可用，列表上显示「升级中」
+        var steps = new SemaphoreSlim(0);
+        mock.UpgradeSteps = steps;
+        var retry = ButtonIn(root, "UpgradeCard", L.T("upgrade.retry"));
+        Expect(retry is { IsEnabled: true }, "失败后没有可用的「重试」");
+        retry?.PerformClick();
+        Wait("对方开始升级", () => up.Of("dev-build") is { Phase: UpgradePhase.Started });
+        Shot($"{prefix}-1e-hosts-upgrade-started");
+        Expect(ButtonIn(root, "UpgradeCard", L.T("upgrade.running")) is { IsEnabled: false }, "升级进行中按钮应不可用");
+        Expect(Shows(L.T("upgrade.progress.title", v)) && Shows(L.T("upgrade.progress.started")), "进行中没有显示「正在升级到」");
+        Expect(Shows(L.T("upgrade.mark.running")), "列表上没有显示「升级中」");
+        steps.Release();
+        Wait("对方离线", () => up.Of("dev-build") is { Phase: UpgradePhase.Offline } && app.Device("dev-build") is { Online: false });
+        // 离开详情再回来，进度还在
+        app.SelectHome(NavSection.Settings);
+        Settle(root, WindowSize);
+        app.SelectHome(NavSection.Hosts);
+        Shot($"{prefix}-1f-hosts-upgrade-restarting");
+        Expect(Shows(L.T("upgrade.progress.offline")) && Shows(L.T("upgrade.step.restart")), "离开详情再回来没看到「正在替换并重启」");
+        Expect(!Shows(L.T("wake.action")), "升级中途离线（替换重启）时不应显示远程开机");
+        steps.Release();
+        Wait("以新版本重新上线", () => up.Of("dev-build") is { Phase: UpgradePhase.Done } && app.Device("dev-build") is { Online: true, UpdateVersion.Length: 0 });
+        mock.UpgradeSteps = null;
+        Shot($"{prefix}-1g-hosts-upgrade-done");
+        Expect(Dev("dev-build").AppVersion == v, "升级后设备列表里的版本没刷新");
+        Expect(Shows(L.T("upgrade.done", v)), "详情里没有显示「已升级到」");
+        Expect(app.CurrentToast == null, "正在看这台设备的详情时不应再弹提示");
+        up.Dismiss("dev-build");
+        Settle(root, WindowSize);
+        Expect(FindNamed<FrameworkElement>(root, "UpgradeCard") == null, "已是最新的设备收起结果后不应再显示升级卡片");
+
+        // 5. 不在看那台设备时结束：弹一条提示
+        app.Selection = null;
+        app.Nav.Notify();
+        up.Start("dev-imac");
+        Wait("后台升级完成", () => up.Of("dev-imac") is { Phase: UpgradePhase.Done });
+        var done = L.T("upgrade.toast.done", app.DeviceName("dev-imac"), v);
+        Expect(app.CurrentToast is { IsError: false } toast && toast.Text == done, "不在详情页时升级完成没有提示（" + app.CurrentToast?.Text + "）");
+        ClearToast(app);
+        app.Selection = null;
+        app.Nav.Notify();
+    }
+
+    /// <summary>按名字找到一块界面，再在里面找文字为 label 的按钮</summary>
+    private static Btn? ButtonIn(FrameworkElement root, string name, string label)
+    {
+        if (FindNamed<FrameworkElement>(root, name) is not { } scope) return null;
+        Btn? hit = null;
+        void Walk(DependencyObject d)
+        {
+            if (hit != null) return;
+            if (d is Btn b && AllText(b).Contains(label))
+            {
+                hit = b;
+                return;
+            }
+            var n = VisualTreeHelper.GetChildrenCount(d);
+            for (var i = 0; i < n; i++) Walk(VisualTreeHelper.GetChild(d, i));
+        }
+        Walk(scope);
+        return hit;
     }
 
     /// <summary>全部矢量图标一览（核对图标画得对不对）</summary>

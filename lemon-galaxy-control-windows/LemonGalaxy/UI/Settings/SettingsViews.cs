@@ -42,7 +42,8 @@ internal static class SettingsViews
                 var b = new Btn
                 {
                     Height = 34, CornerRadius = new CornerRadius(7), Padding = new Thickness(10, 0, 10, 0), Normal = sel ? Th.Selection : Brushes.Transparent, HoverBrush = sel ? Th.Selection : Th.Hover,
-                    Child = K.Row(10, K.Width(K.Center(K.Icon(Icon(p), 15, sel ? Th.Accent : Th.Secondary)), 20), K.Text(L.T("settings.page." + Key(p)), 13.5, Th.Text, sel ? FontWeights.SemiBold : FontWeights.Normal)),
+                    Child = K.Row(10, K.Width(K.Center(K.Icon(Icon(p), 15, sel ? Th.Accent : Th.Secondary)), 20), K.Grow(K.Text(L.T("settings.page." + Key(p)), 13.5, Th.Text, sel ? FontWeights.SemiBold : FontWeights.Normal)),
+                        p == SettingsPage.About && app.Updater.HasUpdate ? Sidebar.UpdateDot() : null),
                 };
                 b.UpdateLook();
                 var page = p;
@@ -50,7 +51,7 @@ internal static class SettingsViews
                 items.Add(b);
             }
             return K.Margin(K.Col(2, items), 8);
-        }).On(app.Nav);
+        }).On(app.Nav, app.Updater);
         var dock = new DockPanel();
         var top = K.Col(0, Shell.ColumnHeader(L.T("nav.settings")), K.HLine());
         DockPanel.SetDock(top, Dock.Top);
@@ -395,35 +396,47 @@ internal static class SettingsViews
         var u = app.Updater;
         var body = new Region(() =>
         {
-            var check = K.SecondaryButton(L.T("update.check"), u.Check, icon: "refresh");
-            check.IsEnabled = u.State is not (UpdateState.Checking or UpdateState.Downloading);
+            var check = K.SecondaryButton(L.T("update.check"), u.Check, icon: "refresh", enabled: !u.Busy);
             switch (u.State)
             {
                 case UpdateState.Checking:
                     return K.Row(8, K.Spinner(14), K.Text(L.T("update.checking"), 13, Th.Secondary), K.Spacer(), check);
                 case UpdateState.UpToDate:
                     return K.Row(8, K.Icon("checkCircle", 15, Th.Success), K.Text(L.T("update.upToDate", AppInfo.Version), 13, Th.Text), K.Spacer(), check);
-                case UpdateState.Failed:
+                case UpdateState.Failed when u.Info == null:
                     return K.Row(8, K.Icon("alertCircle", 15, Th.Danger), K.Grow(K.Text(u.Error ?? "", 13, Th.Danger, wrap: true)), check);
-                case UpdateState.Available or UpdateState.Downloading or UpdateState.Downloaded when u.Info is { } info:
+                case UpdateState.Available or UpdateState.Downloading or UpdateState.Downloaded or UpdateState.Installing or UpdateState.Failed when u.Info is { } info:
+                    // 「立即更新」一路自动：没下载好先下载，下载好就退出、替换、重新打开
                     var action = u.State switch
                     {
-                        UpdateState.Available => K.PrimaryButton(L.T("update.download"), u.Download, icon: "download"),
-                        UpdateState.Downloaded => K.PrimaryButton(L.T("update.install"), u.Install, icon: "refresh"),
-                        _ => null,
+                        UpdateState.Installing => null,
+                        UpdateState.Downloading when u.InstallRequested => null,
+                        _ => K.PrimaryButton(L.T("update.now"), u.InstallNow, icon: "refresh"),
+                    };
+                    var sub = u.State switch
+                    {
+                        UpdateState.Downloaded => L.T("update.ready", Fmt.Bytes(info.Size)),
+                        _ => $"{info.FileName} · {Fmt.Bytes(info.Size)}",
                     };
                     var col = new List<UIElement?>
                     {
-                        K.Row(8, K.Icon("sparkles", 15, Th.Accent), K.Grow(K.Col(2, K.Semi(L.T("update.available", info.Version), 13.5), K.Text($"{info.FileName} · {Fmt.Bytes(info.Size)}", 12, Th.Tertiary))), action),
+                        K.Row(8, K.Icon("sparkles", 15, Th.Accent), K.Grow(K.Col(2, K.Semi(L.T("update.available", info.Version), 13.5), K.Text(sub, 12, Th.Tertiary))), action),
                     };
                     if (u.State == UpdateState.Downloading)
-                        col.Add(K.Col(4, K.Progress(u.Total == 0 ? 0 : (double)u.Done / u.Total, Th.Accent, 5), K.Text($"{Fmt.Bytes(u.Done)} / {Fmt.Bytes(u.Total)}", 11.5, Th.Tertiary)));
+                        col.Add(K.Col(4, K.Progress(u.Total == 0 ? 0 : (double)u.Done / u.Total, Th.Accent, 5),
+                            K.Text((u.InstallRequested ? L.T("update.downloadingInstall") + " · " : "") + $"{Fmt.Bytes(u.Done)} / {Fmt.Bytes(u.Total)}", 11.5, Th.Tertiary)));
+                    if (u.State == UpdateState.Installing)
+                        col.Add(K.Row(8, K.Spinner(14), K.Grow(K.Text(L.T("update.installing"), 12.5, Th.Secondary, wrap: true))));
+                    if (u.State == UpdateState.Failed && u.Error is { Length: > 0 } err)
+                        col.Add(K.Row(8, K.Icon("alertCircle", 14, Th.Danger), K.Grow(K.Text(err, 12.5, Th.Danger, wrap: true))));
+                    else if (u.LastFailure is { } last && last.Sha256 == info.Sha256 && u.State != UpdateState.Installing)
+                        col.Add(K.Row(8, K.Icon("alertCircle", 14, Th.Warning), K.Grow(K.Text(L.T("update.lastFailed", L.T("update.fail." + (last.Code.Length > 0 ? last.Code : "other"))), 12.5, Th.Secondary, wrap: true))));
                     if (info.Notes.Trim().Length > 0) col.Add(K.Box(K.Text(info.Notes.Trim(), 12.5, Th.Secondary, wrap: true), Th.CodeBg, 7, null, 0, new Thickness(10, 8, 10, 8)));
                     return K.Col(10, col);
                 default:
                     return K.Row(8, K.Text(L.T("update.current", AppInfo.Version), 13, Th.Text), K.Spacer(), check);
             }
-        }).On(u);
+        }).On(u, u.Progress);
         return Section(L.T("update.title"), L.T("update.info"), body);
     }
 

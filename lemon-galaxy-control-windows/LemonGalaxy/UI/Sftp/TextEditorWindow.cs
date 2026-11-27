@@ -46,9 +46,16 @@ internal sealed class TextEditorModel : Observable
 
 internal static class TextEditorWindow
 {
+    /// <summary>开着的编辑窗口（在线更新前要确认没有没保存的）</summary>
+    private static readonly List<TextEditorModel> Opened = new();
+
+    /// <summary>有没保存改动的文件名</summary>
+    public static string[] Unsaved => Opened.Where(m => m.Dirty).Select(m => m.Path.Split('/', '\\').LastOrDefault(x => x.Length > 0) ?? m.Path).ToArray();
+
     public static void Open(AppModel app, IFileSource source, string path, string title)
     {
         var model = new TextEditorModel(source, path);
+        Opened.Add(model);
         var win = new Window
         {
             Title = title + " - LemonGalaxy", Width = 820, Height = 600, Background = Th.Content, WindowStartupLocation = WindowStartupLocation.CenterOwner,
@@ -62,6 +69,7 @@ internal static class TextEditorWindow
             if (r == MessageBoxResult.Cancel) e.Cancel = true;
             else if (r == MessageBoxResult.Yes) Ui.Run(model.Save);
         };
+        win.Closed += (_, _) => Opened.Remove(model);
         win.Show();
         Ui.Run(model.Load);
     }

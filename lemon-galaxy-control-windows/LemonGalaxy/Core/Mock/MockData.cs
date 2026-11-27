@@ -5,17 +5,21 @@ internal static class MockData
 {
     public static long Now => Clock.NowMs;
 
+    /// <summary>服务器上被控端的新版本（可升级的设备的 UpdateVersion）</summary>
+    public const string UpgradeVersion = "0.1.0.72";
+
     public static DeviceInfo[] Devices(bool zh)
     {
         var t = Now;
         return new[]
         {
             new DeviceInfo("dev-self", DeviceKind.Control, Platform.Windows, "ALICE-WORKSTATION", "Windows 11 24H2", "x86_64", "0.1.0", true, true, t, true),
-            new DeviceInfo("dev-build", DeviceKind.Worker, Platform.Linux, "build-server-01", "Ubuntu 24.04.1 LTS", "x86_64", "0.1.0", true, false, t, false),
+            // 可升级：构建服务器（在线）、Design-iMac（在线）、家里 NAS（离线，详情里的「升级被控端」不可用）
+            new DeviceInfo("dev-build", DeviceKind.Worker, Platform.Linux, "build-server-01", "Ubuntu 24.04.1 LTS", "x86_64", "0.1.0.68", true, false, t, false, UpgradeVersion),
             new DeviceInfo("dev-gpu", DeviceKind.Worker, Platform.Linux, "gpu-node-02", "Debian GNU/Linux 12", "x86_64", "0.1.0", true, false, t, false),
             new DeviceInfo("dev-office", DeviceKind.Control, Platform.Windows, "OFFICE-PC-07", "Windows 11 23H2", "x86_64", "0.1.0", true, true, t, false),
-            new DeviceInfo("dev-imac", DeviceKind.Worker, Platform.Macos, "Design-iMac", "macOS 14.7", "arm64", "0.1.0", true, true, t, false),
-            new DeviceInfo("dev-nas", DeviceKind.Worker, Platform.Linux, "nas", "Debian GNU/Linux 12", "aarch64", "0.1.0", false, false, t - 3_600_000L * 26, false),
+            new DeviceInfo("dev-imac", DeviceKind.Worker, Platform.Macos, "Design-iMac", "macOS 14.7", "arm64", "0.1.0.68", true, true, t, false, UpgradeVersion),
+            new DeviceInfo("dev-nas", DeviceKind.Worker, Platform.Linux, "nas", "Debian GNU/Linux 12", "aarch64", "0.1.0.61", false, false, t - 3_600_000L * 26, false, UpgradeVersion),
             new DeviceInfo("dev-reception", DeviceKind.Worker, Platform.Windows, "RECEPTION", "Windows 10 22H2", "x86_64", "0.1.0", false, false, t - 3_600_000L * 72, false),
             new DeviceInfo("dev-phone", DeviceKind.Mobile, Platform.Android, "Pixel 8", "Android 15", "aarch64", "0.1.0", true, false, t, false),
         };

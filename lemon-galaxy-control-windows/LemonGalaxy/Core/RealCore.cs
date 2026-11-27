@@ -32,6 +32,7 @@ internal sealed class RealClient : ICoreClient
 
     public bool CanWake(string deviceId) => c.CanWake(deviceId);
     public Task<string[]> WakeDevice(string deviceId) => c.WakeDevice(deviceId);
+    public void UpgradeDevice(string deviceId, UpgradeListener listener) => c.UpgradeDevice(deviceId, listener);
 
     public async Task<ICorePeer> Connect(string deviceId) => new RealPeer(await c.Connect(deviceId));
     public async Task<ICorePeer> ConnectAssist(string deviceCode, string verificationCode) => new RealPeer(await c.ConnectAssist(deviceCode, verificationCode));

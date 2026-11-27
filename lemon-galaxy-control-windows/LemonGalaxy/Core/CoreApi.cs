@@ -37,6 +37,12 @@ internal interface ICoreClient
     /// <summary>远程开机：本机或同一网络里在线的设备代发唤醒包，返回代发设备名（空字符串表示本机）</summary>
     Task<string[]> WakeDevice(string deviceId);
 
+    /// <summary>
+    /// 远程升级被控端（设备详情的「升级被控端」，不用先连远程）：立即返回；内核连上对方发请求，对方自己走完零交互升级，
+    /// 内核接着等它以新版本重新上线（最多 10 分钟）。listener 在内核线程回调。
+    /// </summary>
+    void UpgradeDevice(string deviceId, UpgradeListener listener);
+
     Task<ICorePeer> Connect(string deviceId);
     Task<ICorePeer> ConnectAssist(string deviceCode, string verificationCode);
     Task<ICoreSsh> ConnectSsh(string hostId, SecretPrompt prompt);

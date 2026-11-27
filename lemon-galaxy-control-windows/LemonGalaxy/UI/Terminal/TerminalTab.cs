@@ -37,6 +37,16 @@ internal sealed class TerminalTab : TabModel
 
     public TerminalTheme Theme => TerminalTheme.Named(themeOverride ?? App.Settings.TerminalTheme);
 
+    /// <summary>被控端的终端会话 ID（更新重启后接回去用）；没连上时为 null</summary>
+    public string? SessionId
+    {
+        get
+        {
+            try { return channel?.SessionId() ?? attach?.Id; }
+            catch { return attach?.Id; }
+        }
+    }
+
     private void ApplyAppearance()
     {
         var s = App.Settings;

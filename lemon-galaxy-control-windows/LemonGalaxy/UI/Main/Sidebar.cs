@@ -36,7 +36,7 @@ internal static class Sidebar
             {
                 Width = compact ? 58 : 200, Background = Th.Sidebar, Padding = new Thickness(compact ? 7 : 10, 0, compact ? 7 : 10, 10), Child = col,
             };
-        }).On(app.Nav, app.Data, s, app.Worker.Changed, app.Forwards.Changed, app.Mcp.Changed);
+        }).On(app.Nav, app.Data, s, app.Worker.Changed, app.Forwards.Changed, app.Mcp.Changed, app.Updater);
     }
 
     private static FrameworkElement Item(AppModel app, NavSection sec, bool compact)
@@ -53,6 +53,15 @@ internal static class Sidebar
             bubble.VerticalAlignment = VerticalAlignment.Top;
             bubble.Margin = new Thickness(0, -6, -9, 0);
             icon = new Grid { Width = 22, Children = { icon, bubble } };
+        }
+        // 收起的侧栏：有新版本时「设置」图标右上角一个小点
+        if (compact && sec == NavSection.Settings && app.Updater.HasUpdate)
+        {
+            var dot = UpdateDot();
+            dot.HorizontalAlignment = HorizontalAlignment.Right;
+            dot.VerticalAlignment = VerticalAlignment.Top;
+            dot.Margin = new Thickness(0, -3, -5, 0);
+            icon = new Grid { Width = 22, Children = { icon, dot } };
         }
         var content = new List<UIElement?> { icon };
         if (!compact)
@@ -93,6 +102,11 @@ internal static class Sidebar
             var n = app.Forwards.RunningCount;
             return n > 0 ? K.Text(n.ToString(), 11.5, Th.Success, FontWeights.Medium) : null;
         }
+        if (sec == NavSection.Settings)
+        {
+            // 有新版本（后台已检查到或已下载好）
+            return app.Updater.HasUpdate ? UpdateDot() : null;
+        }
         if (sec == NavSection.Local)
         {
             return app.Worker.State switch
@@ -104,6 +118,9 @@ internal static class Sidebar
         }
         return null;
     }
+
+    /// <summary>有新版本的小圆点</summary>
+    public static FrameworkElement UpdateDot() => new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, Fill = Th.Accent, IsHitTestVisible = false };
 
     /// <summary>醒目的数字角标（待批准）</summary>
     private static Border CountBubble(int n, double size)

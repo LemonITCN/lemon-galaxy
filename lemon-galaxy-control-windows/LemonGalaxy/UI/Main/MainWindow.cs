@@ -36,6 +36,13 @@ internal sealed class MainWindow : Window
         MinWidth = 900;
         MinHeight = 560;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        // 上次的位置（还在屏幕上才用；更新后重新打开也回到原处）
+        if (s.WindowLeft != int.MinValue && s.WindowTop != int.MinValue && OnScreen(s.WindowLeft, s.WindowTop, Width, Height))
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            Left = s.WindowLeft;
+            Top = s.WindowTop;
+        }
         if (AppIcon is { } icon) Icon = icon;
         WindowChrome.SetWindowChrome(this, new WindowChrome
         {
@@ -96,6 +103,16 @@ internal sealed class MainWindow : Window
             {
                 s.WindowWidth = (int)ActualWidth;
                 s.WindowHeight = (int)ActualHeight;
+                s.WindowLeft = (int)Left;
+                s.WindowTop = (int)Top;
+            }
+            else if (RestoreBounds is { IsEmpty: false } rb && !double.IsInfinity(rb.Left))
+            {
+                // 最大化 / 最小化时记还原后的位置（最大化在哪块屏幕上，下次就在哪块屏幕上最大化）
+                s.WindowLeft = (int)rb.Left;
+                s.WindowTop = (int)rb.Top;
+                s.WindowWidth = (int)rb.Width;
+                s.WindowHeight = (int)rb.Height;
             }
             app.CloseAllTabs();
             app.Forwards.StopAll();
@@ -233,6 +250,16 @@ internal sealed class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);
+
+    /// <summary>窗口标题栏一带落在虚拟屏幕（所有显示器）里</summary>
+    private static bool OnScreen(double left, double top, double width, double height)
+    {
+        var vl = SystemParameters.VirtualScreenLeft;
+        var vt = SystemParameters.VirtualScreenTop;
+        var vr = vl + SystemParameters.VirtualScreenWidth;
+        var vb = vt + SystemParameters.VirtualScreenHeight;
+        return left + width - 80 > vl && left + 80 < vr && top >= vt - 8 && top + 40 < vb && height > 0;
+    }
 
     protected override void OnSourceInitialized(EventArgs e)
     {

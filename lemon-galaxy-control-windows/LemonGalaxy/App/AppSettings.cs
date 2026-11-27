@@ -93,6 +93,13 @@ internal sealed class AppSettings : Observable
     public int WindowWidth { get => I("windowWidth", 1280); set => Set("windowWidth", value); }
     public int WindowHeight { get => I("windowHeight", 800); set => Set("windowHeight", value); }
     public bool WindowMaximized { get => B("windowMaximized", false); set => Set("windowMaximized", value); }
+    /// <summary>窗口位置（还原状态下的左上角）；int.MinValue 表示没记过（居中）</summary>
+    public int WindowLeft { get => I("windowLeft", int.MinValue); set => Set("windowLeft", value); }
+    public int WindowTop { get => I("windowTop", int.MinValue); set => Set("windowTop", value); }
+
+    // 更新
+    /// <summary>已经提示过「新版本已下载好」的版本（同一个版本只提示一次）</summary>
+    public string UpdateAnnounced { get => S("updateAnnounced", ""); set => Set("updateAnnounced", value); }
 
     public AiMode AiMode
     {

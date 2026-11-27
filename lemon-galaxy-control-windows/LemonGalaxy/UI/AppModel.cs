@@ -85,6 +85,8 @@ internal sealed class AppModel
     public readonly WorkerServiceModel Worker;
     public readonly Updater Updater;
     public readonly PortForwardHub Forwards;
+    /// <summary>远程升级被控端的进度（设备详情的「升级被控端」）</summary>
+    public readonly UpgradeHub Upgrades;
 
     private readonly Dictionary<string, Task<PeerConnection>> connecting = new();
     private readonly Dictionary<string, PeerConnection> peers = new();
@@ -110,6 +112,7 @@ internal sealed class AppModel
         Ai = new AiHub(this);
         Mcp = new McpHub(this);
         Forwards = new PortForwardHub(this);
+        Upgrades = new UpgradeHub(this);
         Worker = new WorkerServiceModel(this);
         Updater = new Updater(this);
         if (!selfTest && Client.Restore()) DidLogin();
@@ -161,6 +164,7 @@ internal sealed class AppModel
         Forwards.StopAll();
         try { await Client.Logout(); } catch { }
         Mcp.OnLogout();
+        Upgrades.Clear();
         LoggedIn = false;
         builtInHostOff = false;
         User = null;
@@ -195,6 +199,7 @@ internal sealed class AppModel
         CloseAllTabs();
         Forwards.StopAll();
         Mcp.OnLogout();
+        Upgrades.Clear();
         LoggedIn = false;
         PhaseChanged.Notify();
         ShowToast(L.T("login.revoked"), true);

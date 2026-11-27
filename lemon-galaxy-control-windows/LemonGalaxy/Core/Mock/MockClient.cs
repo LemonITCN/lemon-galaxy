@@ -246,6 +246,57 @@ internal sealed class MockClient : ICoreClient
         return via;
     }
 
+    // ---------- 远程升级被控端 ----------
+
+    /// <summary>selftest：设为非空时对方拒绝升级（还没开始就结束，error 为这段文字）</summary>
+    public volatile string? UpgradeFailure;
+    /// <summary>selftest：设了就在「开始升级」与「对方已离线」之后各停一次，等 Release 一次再往下走（截进行中的图）</summary>
+    public volatile SemaphoreSlim? UpgradeSteps;
+
+    /// <summary>与内核一样立即返回、在别的线程回调：开始 → 离线（替换、重启）→ 以新版本上线</summary>
+    public void UpgradeDevice(string deviceId, UpgradeListener progress)
+    {
+        _ = Task.Run(async () =>
+        {
+            try { await RunUpgrade(deviceId, progress); }
+            catch (Exception e) { progress.OnFinished(null, e.Message); }
+        });
+    }
+
+    private async Task RunUpgrade(string deviceId, UpgradeListener progress)
+    {
+        await Delay(800);
+        var d = Device(deviceId);
+        if (d == null) { progress.OnFinished(null, Z("找不到这台设备", "Device not found")); return; }
+        if (!d.Online) { progress.OnFinished(null, Z("设备离线", "The device is offline")); return; }
+        if (UpgradeFailure is { } failure) { progress.OnFinished(null, failure); return; }
+        var target = d.UpdateVersion;
+        // 对方查了一遍已是最新：不开始升级，直接结束
+        if (target.Length == 0) { progress.OnFinished(d.AppVersion, null); return; }
+        progress.OnStarted(target);
+        // 对方下载、核对新版本
+        await UpgradeStep(12000);
+        var lan = d.LanSeen;
+        UpdateDevice(deviceId, x => x with { Online = false, LanSeen = false, LastSeenAt = MockData.Now });
+        progress.OnOffline();
+        // 替换文件、重启、重新连上服务器
+        await UpgradeStep(10000);
+        UpdateDevice(deviceId, x => x with { Online = true, LanSeen = lan, AppVersion = target, UpdateVersion = "", LastSeenAt = MockData.Now });
+        progress.OnFinished(target, null);
+    }
+
+    private Task UpgradeStep(int ms) => UpgradeSteps is { } s ? s.WaitAsync() : Delay(ms);
+
+    private void UpdateDevice(string deviceId, Func<DeviceInfo, DeviceInfo> change)
+    {
+        lock (lk)
+        {
+            var i = devices.FindIndex(x => x.Id == deviceId);
+            if (i >= 0) devices[i] = change(devices[i]);
+        }
+        queue.Post(listener.OnDevicesChanged);
+    }
+
     // ---------- 连接 ----------
 
     /// <summary>selftest：设为非空时连哪台设备都失败（模拟一直连不上，重连放弃）</summary>

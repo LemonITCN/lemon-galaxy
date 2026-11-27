@@ -154,6 +154,7 @@ internal static class HostsViews
             if (n.Tags.Length > 0) trailing.Add(K.TagChip(n.Tags[0]));
             if (n.Favorite) trailing.Add(K.Icon("star", 11, Th.Warning));
             if (n.Device?.IsSelf == true) trailing.Add(K.TagChip(L.T("device.thisMac")));
+            if (n.Device is { } dev) trailing.Add(UpgradeMark(app, dev));
         }
         var row = K.Row(7, new UIElement?[] { chevron, NodeIcon(n), K.Grow(text) }.Concat(trailing).ToArray());
         var b = new Btn
@@ -322,7 +323,7 @@ internal static class HostsViews
             NodeKind.Rdp => K.ProtocolBadge("RDP", Th.P.Info, 38, 11),
             _ => new Border { Width = 38, Height = 38, CornerRadius = new CornerRadius(8), Background = Th.Elevated, Child = K.Center(K.Icon("folderFill", 17, n.Color != null ? Th.Hex(n.Color) : Th.Secondary)) },
         };
-        var titleRow = K.Row(6, K.Grow(K.Semi(n.Title, 13.5)), n.Device != null ? K.StatusDot(K.DotOf(n.Device), 7, Th.Card) : null);
+        var titleRow = K.Row(6, K.Grow(K.Semi(n.Title, 13.5)), n.Device is { } dev ? UpgradeMark(app, dev) : null, n.Device != null ? K.StatusDot(K.DotOf(n.Device), 7, Th.Card) : null);
         var b = new Btn
         {
             Padding = new Thickness(12), CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(1),
@@ -405,13 +406,15 @@ internal static class HostsViews
         else if (d.Kind == DeviceKind.Mobile) col.Add(K.Text(L.T("device.mobileHint"), 13, Th.Secondary, wrap: true));
         else
         {
-            // 离线且能远程开机：连接方式上面放一条远程开机
-            if (app.CanWake(id)) col.Add(WakeCard(app, d));
+            // 离线且能远程开机：连接方式上面放一条远程开机（远程升级中途离线是在替换重启，不显示）
+            if (app.CanWake(id) && !app.Upgrades.IsRunning(id)) col.Add(WakeCard(app, d));
             col.Add(K.Row(12,
                 ActionTile("display", L.T("connect.desktop"), connectable && gui, () => app.OpenRemoteDesktop(id)),
                 ActionTile("terminal", L.T("connect.terminal"), connectable, () => app.OpenTerminalAsking(id)),
                 ActionTile("folder", L.T("connect.files"), connectable, () => app.OpenSftp(id)),
                 ActionTile("sparkles", L.T("connect.ai"), connectable && app.AiEnabled, () => app.OpenAi(new AgentTarget(AgentTargetKind.Device, id)))));
+            // 有新版本（或正在升级、刚升级完）：版本与「升级被控端」，不用先连远程
+            if (UpgradeHub.HasUpdate(d) || (UpgradeHub.Upgradable(d) && app.Upgrades.Of(id) != null)) col.Add(UpgradeCard(app, d));
         }
         string status;
         if (d.Online) status = d.LanSeen ? L.T("device.onlineLan") : L.T("device.online");
@@ -444,6 +447,99 @@ internal static class HostsViews
             K.Grow(K.Col(3, K.Row(5, K.Text(L.T("device.offline"), 13.5, Th.Text, FontWeights.Medium), K.Info(L.T("wake.info"))),
                 K.Text(L.T("device.lastSeen") + " " + Fmt.Relative(d.LastSeenAt), 12, Th.Secondary))),
             button), 14);
+    }
+
+    // ---------- 远程升级被控端 ----------
+
+    /// <summary>设备列表、概览卡片上的「可升级」小标记；正在升级时换成转圈 +「升级中」</summary>
+    private static FrameworkElement? UpgradeMark(AppModel app, DeviceInfo d)
+    {
+        if (app.Upgrades.IsRunning(d.Id))
+            return K.Tip(K.Row(4, K.Spinner(10), K.Text(L.T("upgrade.mark.running"), 10.5, Th.Accent, FontWeights.Medium)),
+                L.T("upgrade.progress.title", app.Upgrades.Of(d.Id)?.Target ?? d.UpdateVersion));
+        if (!UpgradeHub.HasUpdate(d)) return null;
+        var mark = new Border
+        {
+            Background = Th.B(Th.P.Accent, 0.12), CornerRadius = new CornerRadius(4), Padding = new Thickness(4, 1, 6, 2),
+            Child = K.Row(3, K.Icon("arrowUp", 9.5, Th.Accent, 2.4), K.Text(L.T("upgrade.mark"), 10.5, Th.Accent, FontWeights.Medium)),
+        };
+        return K.Tip(mark, L.T("upgrade.mark.tip", d.UpdateVersion));
+    }
+
+    /// <summary>
+    /// 设备详情里的远程升级（docs/auto-update.md）：当前版本、新版本、「升级被控端」与就地进度。
+    /// 点了直接开始，不再确认；离线时按钮不可用；正在升级时按钮不可用并显示三步进度。
+    /// </summary>
+    private static FrameworkElement UpgradeCard(AppModel app, DeviceInfo d)
+    {
+        var p = app.Upgrades.Of(d.Id);
+        var canStart = app.Upgrades.CanStart(d);
+        string iconName = "upCircle", title;
+        Brush iconBrush = Th.Accent, subBrush = Th.Secondary;
+        string? sub;
+        UIElement? action;
+        FrameworkElement? steps = null;
+        switch (p?.Phase)
+        {
+            case UpgradePhase.Requesting or UpgradePhase.Started or UpgradePhase.Offline:
+                title = L.T("upgrade.progress.title", p.Target);
+                sub = L.T(p.Phase switch
+                {
+                    UpgradePhase.Requesting => "upgrade.progress.requesting",
+                    UpgradePhase.Started => "upgrade.progress.started",
+                    _ => "upgrade.progress.offline",
+                });
+                action = K.PrimaryButton(L.T("upgrade.running"), () => { }, icon: "upCircle", enabled: false);
+                steps = UpgradeSteps(p.Phase);
+                break;
+            case UpgradePhase.Done:
+                iconName = "checkCircle";
+                iconBrush = Th.Success;
+                title = p.AlreadyLatest ? L.T("upgrade.latest", p.Version ?? p.FromVersion) : L.T("upgrade.done", p.Version ?? p.Target);
+                sub = p.AlreadyLatest ? null : L.T("upgrade.done.from", p.FromVersion);
+                action = K.IconButton("close", L.T("common.close"), () => app.Upgrades.Dismiss(d.Id), size: 13);
+                break;
+            case UpgradePhase.Failed:
+                iconName = "alertCircle";
+                iconBrush = Th.Danger;
+                title = L.T("upgrade.failed");
+                sub = p.Error;
+                subBrush = Th.Danger;
+                action = K.Row(6,
+                    UpgradeHub.HasUpdate(d) ? K.PrimaryButton(L.T("upgrade.retry"), () => app.Upgrades.Start(d.Id), icon: "refresh", enabled: canStart) : null,
+                    K.IconButton("close", L.T("common.close"), () => app.Upgrades.Dismiss(d.Id), size: 13));
+                break;
+            default:
+                title = L.T("upgrade.available", d.UpdateVersion);
+                sub = L.T("upgrade.current", d.AppVersion) + (d.Online ? "" : " · " + L.T("upgrade.needOnline"));
+                action = K.PrimaryButton(L.T("upgrade.action"), () => app.Upgrades.Start(d.Id), icon: "upCircle", enabled: canStart);
+                break;
+        }
+        var tile = new Border { Width = 36, Height = 36, CornerRadius = new CornerRadius(9), Background = Th.Elevated, Child = K.Center(K.Icon(iconName, 17, iconBrush)) };
+        var text = K.Col(3,
+            K.Row(5, K.Text(title, 13.5, Th.Text, FontWeights.Medium), K.Info(L.T("upgrade.info"))),
+            sub is { Length: > 0 } ? K.Text(sub, 12, subBrush, wrap: true) : null);
+        var card = K.Card(K.Col(12,
+            K.Row(12, tile, K.Grow(text), action),
+            steps != null ? K.Margin(steps, 48, 0, 0, 0) : null), 14);
+        card.Name = "UpgradeCard";
+        return card;
+    }
+
+    /// <summary>三步进度：下载新版本 → 替换并重启 → 以新版本上线（正在做的那步转圈）</summary>
+    private static FrameworkElement UpgradeSteps(UpgradePhase phase)
+    {
+        var current = phase == UpgradePhase.Offline ? 1 : 0;
+        var keys = new[] { "upgrade.step.download", "upgrade.step.restart", "upgrade.step.online" };
+        var items = new List<UIElement?>();
+        for (var i = 0; i < keys.Length; i++)
+        {
+            if (i > 0) items.Add(K.Width(K.HLine(i <= current ? Th.B(Th.P.Accent, 0.5) : Th.Separator), 20));
+            FrameworkElement mark = i < current ? K.Icon("checkCircle", 13, Th.Success) : i == current ? K.Spinner(13) : K.Icon("circle", 13, Th.Tertiary);
+            var label = K.Text(L.T(keys[i]), 12, i == current ? Th.Text : i < current ? Th.Secondary : Th.Tertiary, i == current ? FontWeights.Medium : FontWeights.Normal);
+            items.Add(K.Row(5, mark, label));
+        }
+        return K.Row(8, items);
     }
 
     private static FrameworkElement SshDetail(AppModel app, VaultEntry e)
