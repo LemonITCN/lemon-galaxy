@@ -350,6 +350,7 @@ struct HostRow: View {
             if node.kind == .folder {
                 Text("\(node.children.count)").font(.system(size: 11).monospacedDigit()).foregroundStyle(p.tertiaryText)
             } else {
+                if let d = node.device { UpgradeBadge(device: d) }
                 if let t = node.tags.first, hover == false { TagChip(text: t) }
                 if node.favorite { Image(systemName: "star.fill").font(.system(size: 9.5)).foregroundStyle(p.warning) }
                 if node.device?.isSelf == true { TagChip(text: loc("device.thisMac")) }

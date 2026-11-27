@@ -207,6 +207,26 @@ final class UnattendedController: ObservableObject {
     // MARK: 连上后台服务时（连接线程上）
 
     private nonisolated static let restartOnce = OnceFlag()
+    private nonisolated static let relaunchOnce = OnceFlag()
+
+    /// 每次连上后台服务、打招呼之前：磁盘上的应用已经换成别的版本（后台服务刚自动更新完，或新版本没起来又换回了旧版本，
+    /// 或用户自己拖了新版本进来），本界面是过时的程序——重新打开自己（新程序再连上时版本一致；后台服务若是旧的由新界面让它重启）。
+    /// 返回 true 表示正在重新打开，不用这条连接
+    nonisolated static func relaunchIfStale() -> Bool {
+        guard let disk = AppUpdate.diskBuild(), disk != AppInfo.build else { return false }
+        if relaunchOnce.fire() {
+            NSLog("LemonGalaxy: 磁盘上的应用已是 %@（本界面 %@），重新打开", disk, AppInfo.build)
+            DispatchQueue.main.async { MainActor.assumeIsolated { relaunchSelf() } }
+        }
+        return true
+    }
+
+    /// 本进程退出后由脱离出去的 sh 等它退出再 open -n 打开磁盘上的应用；退出被卡住时 10 秒后直接结束
+    static func relaunchSelf() {
+        AppUpdate.relaunchAfterExit()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10) { exit(0) }
+        NSApp.terminate(nil)
+    }
 
     /// 版本不一致（应用更新后后台服务还是旧程序）就让它重启；后台服务是新的、本机有旧数据就移交（只有管理员能做）。
     /// 返回 true 表示后台服务马上重启，这条连接会断

@@ -13,12 +13,17 @@ final class DaemonService: @unchecked Sendable {
         var cacheDir = Unattended.daemonCacheDir
         /// 用模拟内核（自检与开发用，不连网络）
         var mock = false
+        /// 模拟内核预置演示账号（开发时走一遍检查更新、自动更新用）
+        var mockAccounts = false
         /// 写 /Library/LaunchAgents、在已登录会话里加载会话代理（只在以 root 运行时）
         var installAgents = false
         /// 会话代理报的 uid 必须与套接字对端一致（自检里一个进程模拟多个会话时关掉）
         var checkAgentUid = true
         /// 导入数据、要求重启时怎么做；默认退出进程由 launchd 重启
         var restart: (@Sendable () -> Void)? = nil
+        /// 自动更新替换哪个应用（默认本程序所在的包）、怎么打开新版本（默认由 launchd 重启）；自检时换成临时目录
+        var updateTarget: URL? = nil
+        var updateLaunch = "none"
     }
 
     final class Client: @unchecked Sendable {
@@ -39,6 +44,7 @@ final class DaemonService: @unchecked Sendable {
     let coreVersion: String
     let workerDir: URL
     let keyStore: FileSecureStore
+    let updater: DaemonUpdater
     private let lock = NSLock()
     private var service: HostService?
     private var clients: [Int: Client] = [:]
@@ -59,7 +65,7 @@ final class DaemonService: @unchecked Sendable {
         keyStore = FileSecureStore(dir: workerDir.appendingPathComponent("keys", isDirectory: true))
         isMock = opts.mock || !WorkerCore.realCoreAvailable
         if isMock {
-            worker = MockWorkerHost(options: MockWorkerOptions(latencyScale: 0, presetAccounts: false))
+            worker = MockWorkerHost(options: MockWorkerOptions(latencyScale: 0, presetAccounts: opts.mockAccounts))
             coreVersion = MockWorkerHost.version
         } else {
             #if LEMONGALAXY_REAL_CORE
@@ -67,15 +73,26 @@ final class DaemonService: @unchecked Sendable {
             worker = WorkerHost(store: PrefixedSecureStore(base: keyStore, prefix: "worker."))
             coreVersion = LemonGalaxyWorker.coreVersion()
             #else
-            worker = MockWorkerHost(options: MockWorkerOptions(latencyScale: 0, presetAccounts: false))
+            worker = MockWorkerHost(options: MockWorkerOptions(latencyScale: 0, presetAccounts: opts.mockAccounts))
             coreVersion = MockWorkerHost.version
             #endif
         }
         // 内核日志目录也只给 root
         chmod(opts.dataRoot.appendingPathComponent("logs").path, 0o700)
+        // 自动更新：本程序的签名要求趁包还没被换掉先取好
+        _ = AppUpdateCodeSign.own
+        var uo = DaemonUpdater.Options(stateDir: opts.dataRoot.appendingPathComponent("update", isDirectory: true),
+                                       downloadDir: opts.cacheDir.appendingPathComponent("updates", isDirectory: true))
+        if let t = opts.updateTarget { uo.target = t }
+        uo.launch = opts.updateLaunch
+        updater = DaemonUpdater(worker: worker, opts: uo)
+        // 远程升级回调：交给 AppUpdateEntry，本进程里转给上面的 DaemonUpdater（模拟内核不登记；Model/RemoteUpdateHandler.swift）
+        RemoteUpdateRequestHandler.register(isMock: isMock, selfTest: false)
         listener.owner = self
         platform.expectedBuild = AppInfo.build
         platform.onAgentsChanged = { [weak self] in self?.broadcastInfo() }
+        updater.onChange = { [weak self] in self?.broadcastInfo() }
+        updater.restart = { [weak self] in self?.restartSoon() }
     }
 
     // MARK: 启动
@@ -84,6 +101,8 @@ final class DaemonService: @unchecked Sendable {
         let s = try IPCServer(path: opts.socketPath, mode: 0o666)
         server = s
         s.start { [weak self] conn in self?.accept(conn) }
+        // 监听 5 秒后还在：报告启动成功（自动更新后助手在等它，等不到就换回旧版本）
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self] in self?.updater.launched() }
         Task { [weak self] in
             guard let self else { return }
             do { _ = try await self.worker.start() } catch { NSLog("LemonGalaxy: 被控服务启动失败：%@", String(describing: error)) }
@@ -129,7 +148,7 @@ final class DaemonService: @unchecked Sendable {
         DaemonInfo(version: AppInfo.version, build: AppInfo.build, coreVersion: coreVersion, deviceId: worker.deviceId(),
                    server: worker.server(), hasService: currentService != nil, claimed: claimed,
                    peerAdmin: auth.isAdmin, peerConsole: auth.isConsole, peerUser: auth.userName,
-                   agents: platform.summaries(), isMock: isMock)
+                   agents: platform.summaries(), isMock: isMock, update: updater.status)
     }
 
     // MARK: 连接
@@ -156,7 +175,10 @@ final class DaemonService: @unchecked Sendable {
         guard CodeIdentity.peerMatches(auditToken: conn.peer.auditToken) else {
             NSLog("LemonGalaxy: 拒绝会话代理（进程 %d）：代码签名与后台服务不一致", conn.peer.pid)
             platform.noteRejected()
-            conn.close()
+            // 多半是应用刚更新、这个代理还是旧程序（旧包已删，签名对不上）：让它退出，launchd 用包里的新程序重启它。
+            // 冒充的程序收到这条也没有用处
+            conn.notify(IPCMethod.agentExit, PBool(value: true))
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { conn.close() }
             return
         }
         if opts.checkAgentUid && hello.uid != conn.peer.uid {
@@ -271,6 +293,12 @@ final class DaemonService: @unchecked Sendable {
                 let dest = dir.appendingPathComponent(name.isEmpty ? "LemonGalaxyWorker-update.dmg" : name).path
                 worker.downloadUpdate(info: d.info, dest: dest, listener: DaemonDownloadListener(token: d.token, path: dest, conn: client.conn))
                 reply.ok()
+            case IPCMethod.updateRequest:
+                // 预先下载 / 立即更新：进度经概况推送（DaemonInfo.update）
+                let u = try m.decode(CUpdateRequest.self)
+                try updater.request(u.info, install: u.install)
+                NSLog("LemonGalaxy: %@ 要求%@ %@", auth.userName, u.install ? "立即更新到" : "预先下载", u.info.version)
+                reply.ok()
 
             default:
                 try handleService(client, m, reply)
@@ -383,7 +411,7 @@ final class DaemonService: @unchecked Sendable {
         NSLog("LemonGalaxy: 无人值守已关闭%@，等待注销", wipe ? "（已删除后台服务的数据）" : "")
     }
 
-    private func restartSoon() {
+    func restartSoon() {
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { [opts] in
             if let r = opts.restart { r() } else { exit(0) }
         }
@@ -462,7 +490,7 @@ final class DaemonDownloadListener: TransferListener, @unchecked Sendable {
 
 // MARK: - 入口
 
-/// --daemon [--socket 路径] [--data-dir 目录] [--mock]
+/// --daemon [--socket 路径] [--data-dir 目录] [--mock [--mock-accounts]]
 /// 由 launchd 以 root 启动（包内 Contents/Library/LaunchDaemons/cn.lemonit.galaxy.worker.daemon.plist，SMAppService 登记）。
 /// 开发时可以不用 root：指定 --socket 与 --data-dir 到自己能写的地方（不写 /Library/LaunchAgents）。
 enum DaemonMain {
@@ -474,6 +502,7 @@ enum DaemonMain {
             o.cacheDir = o.dataRoot.appendingPathComponent("cache", isDirectory: true)
         }
         o.mock = args.contains("--mock")
+        o.mockAccounts = args.contains("--mock-accounts")
         o.installAgents = getuid() == 0 && Unattended.arg(args, "--data-dir") == nil
         if getuid() != 0 && Unattended.arg(args, "--data-dir") == nil {
             FileHandle.standardError.write(Data("后台服务需要以 root 运行（由 launchd 启动）；开发时请用 --socket 与 --data-dir 指定自己能写的位置。\n".utf8))

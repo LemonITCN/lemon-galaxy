@@ -76,6 +76,8 @@ final class WorkerModel: ObservableObject {
         let remote = !selfTest && !forceMock && !CommandLine.arguments.contains("--mock")
             && ProcessInfo.processInfo.environment["LEMONGALAXY_MOCK"] != "1" && UnattendedController.clientModeAtLaunch()
         core = WorkerCore.make(locale: Localization.shared.strings.pack.coreLocale, forceMock: forceMock, mockOptions: mockOptions, remote: remote)
+        // 远程升级回调：内核在本进程时登记（开了无人值守时内核在后台服务里，由后台服务登记；Model/RemoteUpdateHandler.swift）
+        RemoteUpdateRequestHandler.register(isMock: core.isMock || core.isRemote, selfTest: selfTest)
         unattended = UnattendedController(clientMode: remote, selfTest: selfTest)
         updater = WorkerUpdater()
         updater.model = self
@@ -85,6 +87,7 @@ final class WorkerModel: ObservableObject {
             r.onInfo = { [weak self] info in
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.daemonInfo(info) } }
             }
+            r.staleCheck = { UnattendedController.relaunchIfStale() }
             r.prepare = { [weak self] info, c in
                 UnattendedController.prepare(info, c, migrating: {
                     DispatchQueue.main.async { MainActor.assumeIsolated { self?.unattended.phase = .migrating } }
@@ -100,6 +103,7 @@ final class WorkerModel: ObservableObject {
     /// 后台服务连上、重连或概况变化（无人值守下）
     private func daemonInfo(_ info: DaemonInfo?) {
         unattended.received(info)
+        updater.daemonStatus(info?.update)
         guard info != nil else { refresh(); return }
         if let s = worker.service() {
             attach(s)
@@ -441,7 +445,7 @@ final class WorkerModel: ObservableObject {
         let live = Set(s.sessions.map(\.id))
         aiActivity = aiActivity.filter { live.contains($0.key) }
         UIHooks.update(self)
-        // 上线后每天最多自动检查一次更新
+        // 上线后每 6 小时最多自动检查一次更新
         if s.online && hasActiveAccount { updater.autoCheckIfDue() }
     }
 

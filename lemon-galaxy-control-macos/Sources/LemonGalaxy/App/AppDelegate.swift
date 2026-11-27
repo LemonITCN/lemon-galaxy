@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Localization.shared.apply(setting: settings.language)
         settings.applyAppearance()
         app = AppModel(settings: settings, selfTest: false)
+        // 自动更新：报告启动成功、定时检查（App/UpdateModel.swift）
+        app.update.start()
         // 远程桌面复制粘贴文件下载到缓存目录：一天前的在后台删掉
         let clipRoot = ClipboardFiles.cacheRoot
         DispatchQueue.global(qos: .utility).async { ClipboardFiles.cleanStale(in: clipRoot) }
@@ -223,6 +225,17 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             i.isEnabled = false
             menu.addItem(i)
         }
+        // 有新版本：点了就一路自动做完（下载、核对、替换、关闭并重新打开），远程控制这台 Mac 时也能直接点
+        if let u = app.update.available {
+            menu.addItem(.separator())
+            if app.update.isInstalling {
+                let i = NSMenuItem(title: L("menu.updating", u.version), action: nil, keyEquivalent: "")
+                i.isEnabled = false
+                menu.addItem(i)
+            } else if app.update.blocker == nil {
+                menu.addItem(make(L("menu.updateNow", u.version), #selector(updateNow)))
+            }
+        }
         menu.addItem(.separator())
         menu.addItem(make(L("status.openMain"), #selector(openMain)))
         if app.core.isMock, let mock = (app.client as? MockGalaxyClient)?.mockHost {
@@ -251,6 +264,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     @objc private func stopAi() { app?.host.stopAi() }
     @objc private func toggleRemote() { guard let h = app?.host else { return }; h.setRemoteEnabled(!h.status.remoteEnabled) }
     @objc private func openMain() { (NSApp.delegate as? AppDelegate)?.showMainWindow() }
+    @objc private func updateNow() { app?.update.installNow() }
 
     /// 菜单栏图标：模板图（跟随菜单栏深浅），被控 / AI 操作时右下角加彩色圆点
     static func icon(state: IconState) -> NSImage {

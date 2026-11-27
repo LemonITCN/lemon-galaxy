@@ -72,6 +72,8 @@ enum SelfTest {
         defer { pasteboard.releaseGlobally() }
         // 粘贴时才传的组件自检（自己换私有剪贴板，结束后换回上面这个）
         problems += LazyPasteSelfTest.run(verbose: false)
+        // 自动安装更新：临时目录里的应用副本走一遍核对、换包、助手打开新版本 / 换回旧版本（不碰「应用程序」）
+        problems += AppUpdateSelfTest.run(verbose: false)
         problems += checkModifierSync()
         checkClipboardCacheCleanup()
         RemoteVideoNSView.snapshotMode = true
@@ -791,6 +793,9 @@ enum SelfTest {
         app.toast = nil
         app.selection = nil
 
+        // 远程升级被控端（SelfTest/UpgradeSelfTest.swift）
+        checkUpgrade(prefix: prefix, zh: zh, app: app, window: window, host: host)
+
         // 3. 终端
         app.openTerminal(deviceId: "dev-build")
         if let t = app.activeTab as? TerminalTabModel {
@@ -1081,10 +1086,23 @@ enum SelfTest {
         if let info = app.update.available {
             app.update.state = .downloading(info, done: info.size * 37 / 100, total: info.size)
             shot("\(prefix)-88-update-downloading", app, window: window, host: host)
-            app.update.state = .downloaded(info, path: "/Users/alice/Downloads/" + info.fileName)
-            shot("\(prefix)-89-update-downloaded", app, window: window, host: host)
+            app.update.state = .ready(info, path: "/Users/alice/Library/Caches/cn.lemonit.galaxy.control/updates/" + info.fileName)
+            shot("\(prefix)-89-update-ready", app, window: window, host: host)
+            app.update.state = .installing(info, .replacing)
+            shot("\(prefix)-89b-update-installing", app, window: window, host: host)
+            app.update.blocker = .notWritable("/Applications/LemonGalaxy.app")
+            app.update.state = .available(info)
+            shot("\(prefix)-89c-update-blocked", app, window: window, host: host)
+            app.update.blocker = nil
+            // 零交互升级的入口（主控端远程要求升级「本机被控」时内核在别的线程调）：回到主线程交给更新模型
+            AppUpdateEntry.register(app.update)
+            let remoteInfo = UpdateInfo(version: "999.0.0.1", fileName: "x.dmg", size: 1, sha256: "", url: "", notes: "")
+            DispatchQueue.global().async { AppUpdateEntry.startUpdateNow(info: remoteInfo) }
+            wait("远程要求升级交给更新模型") { app.update.available?.version == "999.0.0.1" }
+            app.update.available = info
         }
         app.modal = nil
+        app.update.state = .idle
         app.update.reset()
 
         // 10. 文本编辑器窗口、紧凑侧栏

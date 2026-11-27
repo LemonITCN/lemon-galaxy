@@ -213,12 +213,21 @@ struct HostKeyCard: View {
     }
 }
 
-/// 新版本：版本号、更新说明、下载进度；下载完打开 DMG，提示拖进「应用程序」替换
+/// 新版本：版本号、更新说明、下载与安装进度。「立即更新」之后一路自动做完（下载、核对、替换、关闭并重新打开），
+/// 中间没有要点的东西；应用所在位置不能自动替换时说明原因
 struct UpdateCard: View {
     @ObservedObject var model: UpdateModel
     @EnvironmentObject var app: AppModel
     @Environment(\.palette) var p
     @Environment(\.loc) var loc
+
+    static func stepText(_ s: AppUpdate.Step, _ loc: Strings) -> String {
+        switch s {
+        case .verifying: return loc("update.step.verifying")
+        case .replacing: return loc("update.step.replacing")
+        case .restarting: return loc("update.step.restarting")
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -232,7 +241,7 @@ struct UpdateCard: View {
                     }
                 }
                 Spacer()
-                if !model.busy { IconButton(icon: "xmark", size: 11) { close() } }
+                if !model.isInstalling { IconButton(icon: "xmark", size: 11) { close() } }
             }
             if let info {
                 VStack(alignment: .leading, spacing: 6) {
@@ -251,6 +260,12 @@ struct UpdateCard: View {
                 }
             }
             status
+            if let b = model.blocker {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "info.circle").foregroundStyle(p.warning)
+                    Text(b.message).font(.system(size: 12.5)).foregroundStyle(p.secondaryText).fixedSize(horizontal: false, vertical: true)
+                }
+            }
             HStack {
                 Spacer()
                 buttons
@@ -261,7 +276,7 @@ struct UpdateCard: View {
 
     private var info: UpdateInfo? {
         switch model.state {
-        case .available(let i), .downloading(let i, _, _), .downloaded(let i, _): return i
+        case .available(let i), .downloading(let i, _, _), .ready(let i, _), .installing(let i, _): return i
         default: return model.available
         }
     }
@@ -272,14 +287,19 @@ struct UpdateCard: View {
         case .downloading(_, let done, let total):
             VStack(alignment: .leading, spacing: 6) {
                 ProgressView(value: total == 0 ? 0 : min(1, Double(done) / Double(total)))
-                Text(loc("update.downloading", Fmt.bytes(done), Fmt.bytes(total)))
+                Text(loc("update.downloading", Fmt.bytes(done), Fmt.bytes(total))
+                     + (model.installWhenReady ? " · " + loc("update.installWhenReady") : ""))
                     .font(.system(size: 11.5).monospacedDigit()).foregroundStyle(p.secondaryText)
             }
-        case .downloaded(_, let path):
+        case .ready:
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(p.success)
-                Text(loc("update.downloaded", (path as NSString).lastPathComponent))
-                    .font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+                Text(loc("update.ready")).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+            }
+        case .installing(_, let step):
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(Self.stepText(step, loc)).font(.system(size: 12.5))
             }
         case .failed(let msg):
             HStack(alignment: .top, spacing: 8) {
@@ -294,18 +314,21 @@ struct UpdateCard: View {
     @ViewBuilder
     private var buttons: some View {
         switch model.state {
-        case .available:
+        case .available, .ready:
             Button(loc("update.later")) { close() }.buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
-            Button(loc("update.download")) { model.download() }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
+            Button(loc("update.installNow")) { model.installNow() }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
+                .disabled(model.blocker != nil)
         case .downloading:
             Button(loc("update.background")) { app.modal = nil }.buttonStyle(SecondaryButtonStyle())
-        case .downloaded:
-            Button(loc("update.reveal")) { model.revealDownloaded() }.buttonStyle(SecondaryButtonStyle())
-            Button(loc("update.done")) { close() }.buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
+            if !model.installWhenReady {
+                Button(loc("update.installNow")) { model.installNow() }.buttonStyle(PrimaryButtonStyle()).disabled(model.blocker != nil)
+            }
+        case .installing:
+            EmptyView()
         case .failed:
             Button(loc("common.close")) { close() }.buttonStyle(SecondaryButtonStyle()).keyboardShortcut(.cancelAction)
-            if model.available != nil {
-                Button(loc("common.retry")) { model.reset(); model.download() }.buttonStyle(PrimaryButtonStyle())
+            if model.available != nil && model.blocker == nil {
+                Button(loc("common.retry")) { model.reset(); model.installNow() }.buttonStyle(PrimaryButtonStyle())
             }
         default:
             Button(loc("common.close")) { close() }.buttonStyle(SecondaryButtonStyle())
@@ -314,7 +337,6 @@ struct UpdateCard: View {
 
     private func close() {
         app.modal = nil
-        if case .downloaded = model.state { return }
         model.reset()
     }
 }

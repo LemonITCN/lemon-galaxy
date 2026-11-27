@@ -351,20 +351,45 @@ struct AboutPage: View {
 
 // MARK: - 软件更新卡片
 
+/// 检查、立即更新（一路自动做完：下载、核对、替换、关闭并重新打开；无人值守时由后台服务做）、进度、自动更新开关、
+/// 不能自动替换时的原因
 struct UpdateCard: View {
     @ObservedObject var updater: WorkerUpdater
     @EnvironmentObject var model: WorkerModel
+    @EnvironmentObject var settings: WorkerSettings
     @Environment(\.palette) var p
     @Environment(\.loc) var loc
 
     var body: some View {
         Card {
-            switch updater.state {
-            case .available(let info): available(info)
-            case .downloading(let info, let done, let total): downloading(info, done: done, total: total)
-            case .downloaded(let info, _): downloaded(info)
-            default: summary
+            VStack(alignment: .leading, spacing: 12) {
+                switch updater.state {
+                case .available(let info): available(info)
+                case .downloading(let info, let done, let total): downloading(info, done: done, total: total)
+                case .ready(let info): ready(info)
+                case .installing(let info, let step): installing(info, step)
+                default: summary
+                }
+                if let b = updater.blocker {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "info.circle").foregroundStyle(p.warning)
+                        Text(b.message).font(.system(size: 12)).foregroundStyle(p.secondaryText).fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button(loc("update.releases")) { NSWorkspace.shared.open(AppInfo.releasesURL) }.buttonStyle(.plain)
+                            .font(.system(size: 12)).foregroundStyle(p.accent)
+                    }
+                }
+                Rectangle().fill(p.separator).frame(height: 1)
+                ToggleRow(label: loc("update.auto"), isOn: $settings.autoUpdate, info: loc("update.auto.info"))
             }
+        }
+    }
+
+    static func stepText(_ s: AppUpdate.Step, _ loc: Strings) -> String {
+        switch s {
+        case .verifying: return loc("update.step.verifying")
+        case .replacing: return loc("update.step.replacing")
+        case .restarting: return loc("update.step.restarting")
         }
     }
 
@@ -384,6 +409,9 @@ struct UpdateCard: View {
             if updater.state == .checking { ProgressView().controlSize(.small) }
             Button(loc("update.releases")) { NSWorkspace.shared.open(AppInfo.releasesURL) }.buttonStyle(.plain)
                 .font(.system(size: 12)).foregroundStyle(p.accent)
+            if isFailed && updater.available != nil && updater.blocker == nil {
+                Button(loc("common.retry")) { updater.reset(); updater.installNow() }.buttonStyle(PrimaryButtonStyle())
+            }
             Button(loc("update.check")) { Task { await updater.check(manual: true) } }
                 .buttonStyle(SecondaryButtonStyle())
                 .disabled(updater.busy || !model.hasActiveAccount)
@@ -426,27 +454,35 @@ struct UpdateCard: View {
                 Text(loc("update.versions", AppInfo.version, info.version)).font(.system(size: 12).monospacedDigit()).foregroundStyle(p.secondaryText)
             }
             Spacer()
-            Text(Fmt.bytes(info.size)).font(.system(size: 11.5).monospacedDigit()).foregroundStyle(p.tertiaryText)
+            if info.size > 0 { Text(Fmt.bytes(info.size)).font(.system(size: 11.5).monospacedDigit()).foregroundStyle(p.tertiaryText) }
         }
+    }
+
+    private func notes(_ info: UpdateInfo) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(loc("update.notes")).font(.system(size: 11.5, weight: .medium)).foregroundStyle(p.secondaryText)
+            Text(info.notes.isEmpty ? loc("update.noNotes") : info.notes)
+                .font(.system(size: 12.5)).foregroundStyle(info.notes.isEmpty ? p.tertiaryText : p.text)
+                .fixedSize(horizontal: false, vertical: true).lineLimit(12).textSelection(.enabled)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(p.elevated))
+    }
+
+    private var installButton: some View {
+        Button(loc("update.installNow")) { updater.installNow() }.buttonStyle(PrimaryButtonStyle()).disabled(updater.blocker != nil)
     }
 
     private func available(_ info: UpdateInfo) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             header(info)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(loc("update.notes")).font(.system(size: 11.5, weight: .medium)).foregroundStyle(p.secondaryText)
-                Text(info.notes.isEmpty ? loc("update.noNotes") : info.notes)
-                    .font(.system(size: 12.5)).foregroundStyle(info.notes.isEmpty ? p.tertiaryText : p.text)
-                    .fixedSize(horizontal: false, vertical: true).lineLimit(12).textSelection(.enabled)
-            }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 8).fill(p.elevated))
+            notes(info)
             HStack(spacing: 8) {
                 Label(loc("update.verified"), systemImage: "checkmark.shield").font(.system(size: 11.5)).foregroundStyle(p.success)
                 Spacer()
                 Button(loc("update.recheck")) { Task { await updater.check(manual: true) } }.buttonStyle(SecondaryButtonStyle())
-                Button(loc("update.download")) { updater.download() }.buttonStyle(PrimaryButtonStyle())
+                installButton
             }
         }
     }
@@ -455,21 +491,35 @@ struct UpdateCard: View {
         VStack(alignment: .leading, spacing: 12) {
             header(info)
             ProgressView(value: Double(done), total: Double(max(total, 1))).progressViewStyle(.linear).tint(p.accent)
-            Text(loc("update.downloading", Fmt.bytes(done), Fmt.bytes(total))).font(.system(size: 11.5).monospacedDigit()).foregroundStyle(p.secondaryText)
+            HStack {
+                Text(loc("update.downloading", Fmt.bytes(done), Fmt.bytes(total))
+                     + (updater.installWhenReady ? " · " + loc("update.installWhenReady") : ""))
+                    .font(.system(size: 11.5).monospacedDigit()).foregroundStyle(p.secondaryText)
+                Spacer()
+                if !updater.installWhenReady { installButton }
+            }
         }
     }
 
-    private func downloaded(_ info: UpdateInfo) -> some View {
+    private func ready(_ info: UpdateInfo) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             header(info)
+            notes(info)
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(p.success)
-                Text(loc("update.downloaded", info.fileName)).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
-            }
-            HStack {
+                Text(loc(model.core.isRemote ? "update.ready.unattended" : "update.ready")).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
                 Spacer()
-                Button(loc("update.reveal")) { updater.revealDownloaded() }.buttonStyle(SecondaryButtonStyle())
-                Button(loc("update.done")) { updater.reset() }.buttonStyle(PrimaryButtonStyle())
+                installButton
+            }
+        }
+    }
+
+    private func installing(_ info: UpdateInfo, _ step: AppUpdate.Step) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header(info)
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(Self.stepText(step, loc)).font(.system(size: 12.5))
             }
         }
     }

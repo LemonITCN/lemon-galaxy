@@ -119,7 +119,7 @@ signature = Ed25519(account_sign_key, "lemon-galaxy/device-cert/v1" || postcard(
 - 协议解析：所有帧有长度上限；反序列化失败即断开；对解析入口做模糊测试（cargo-fuzz）。
 - 依赖：`cargo-deny` / `cargo-audit` 进 CI；锁定版本。
 - Actions：第三方 Action 固定到提交哈希；默认只读权限；签名密钥只放在发布环境的 Secrets。
-- 发布：每个发布文件附 SHA-256，并用 LemonGalaxy 发布签名密钥（Ed25519）签名；客户端内置公钥，自动更新必须验签通过才安装。
+- 发布：每个发布文件附 SHA-256，并用 LemonGalaxy 发布签名密钥（Ed25519）签名；客户端内置公钥，自动更新必须验签通过才安装。Mac 两端安装前还要用当前应用自己的指定要求严格核对新应用的代码签名、版本必须更新，新版本起不来自动换回旧版本（[spec.md](spec.md)「Mac 自动更新」）。
 
 ## 9. AI 相关
 

@@ -163,6 +163,7 @@ struct HostCard: View {
                 Text(node.subtitle).font(.system(size: 11.5)).foregroundStyle(p.secondaryText).lineLimit(1)
             }
             Spacer(minLength: 0)
+            if let d = node.device { UpgradeBadge(device: d) }
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 10).fill(hover ? p.elevated : p.card))
@@ -296,6 +297,10 @@ struct DeviceDetail: View {
                             app.openAI(targets: [AgentTarget(kind: .device, id: id)])
                         }
                     }
+                }
+                if UpgradeCard.shown(device, app: app) {
+                    // 版本与「升级被控端」：不用先连远程，点了对方自己升级并以新版本重新上线
+                    UpgradeCard(device: device)
                 }
                 InfoGrid(rows: [
                     (loc("device.status"), statusText),

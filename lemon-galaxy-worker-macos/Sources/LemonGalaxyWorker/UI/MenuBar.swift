@@ -84,6 +84,12 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         if let u = m.updater.available {
             menu.addItem(.separator())
             menu.addItem(make(L("menu.updateAvailable", u.version), #selector(openUpdate)))
+            // 点了就一路自动做完（下载、核对、替换、重新打开），远程控制时也能直接点
+            if m.updater.isInstalling {
+                menu.addItem(disabled(L("menu.updating", u.version)))
+            } else if m.updater.blocker == nil {
+                menu.addItem(make(L("menu.updateNow", u.version), #selector(updateNow)))
+            }
         }
         menu.addItem(.separator())
         let settings = make(L("menu.settings"), #selector(openSettings))
@@ -124,6 +130,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         m.disconnect(s)
     }
     @objc private func openUpdate() { model?.page = .about; delegate?.showSettings() }
+    @objc private func updateNow() { model?.updater.installNow() }
     @objc private func stopAi() { model?.stopAi() }
     @objc private func toggleRemote() { guard let m = model else { return }; m.setRemoteEnabled(!m.status.remoteEnabled) }
     @objc private func allowAssist() { model?.respond(true) }

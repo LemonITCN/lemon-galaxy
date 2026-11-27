@@ -14,6 +14,7 @@ public func coreInit(config: CoreConfig) {}
 public func coreSetLocale(locale: String) {}
 public func coreLogPath() -> String { "" }
 public func mcpDefaultPort() -> UInt16 { 47821 }
+public func setUpdateRequestHandler(handler: UpdateRequestHandler) {}
 public func mcpStdioBridge(dataDir: String) -> Int32 {
     FileHandle.standardError.write("这个版本没有接入 Rust 内核，不能做 MCP 桥接\n".data(using: .utf8)!)
     return 1
@@ -453,10 +454,17 @@ public struct DeviceInfo: Equatable, Hashable {
     public var lanSeen: Bool
     public var lastSeenAt: Int64
     public var isSelf: Bool
+    /**
+     * 服务器上有比 `app_version` 新的版本时是那个版本号（设备列表标「可升级」、详情里可「升级被控端」），否则为空
+     */
+    public var updateVersion: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, kind: DeviceKind, platform: Platform, hostname: String, osVersion: String, arch: String, appVersion: String, online: Bool, lanSeen: Bool, lastSeenAt: Int64, isSelf: Bool) {
+    public init(id: String, kind: DeviceKind, platform: Platform, hostname: String, osVersion: String, arch: String, appVersion: String, online: Bool, lanSeen: Bool, lastSeenAt: Int64, isSelf: Bool, 
+        /**
+         * 服务器上有比 `app_version` 新的版本时是那个版本号（设备列表标「可升级」、详情里可「升级被控端」），否则为空
+         */updateVersion: String = "") {
         self.id = id
         self.kind = kind
         self.platform = platform
@@ -468,6 +476,7 @@ public struct DeviceInfo: Equatable, Hashable {
         self.lanSeen = lanSeen
         self.lastSeenAt = lastSeenAt
         self.isSelf = isSelf
+        self.updateVersion = updateVersion
     }
 
     
@@ -2448,6 +2457,12 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
     
     func totpVerify(code: String) async throws 
     
+    /**
+     * 远程升级被控端（设备详情里的「升级被控端」，不用先开远程桌面）：连上对方发请求，对方自己走完整个零交互升级；
+     * 这里接着轮询设备列表，直到它以新版本重新上线（最多 10 分钟）。进度经 listener，立即返回。
+     */
+    func upgradeDevice(deviceId: String, listener: UpgradeListener) 
+    
     func vault()  -> [VaultEntry]
     
     func vaultDelete(id: String) async throws 
@@ -2928,6 +2943,31 @@ public protocol TransferListener: AnyObject, Sendable {
     
 }
 
+public protocol UpdateRequestHandler: AnyObject, Sendable {
+    
+    func onUpdateRequested(info: UpdateInfo) 
+    
+}
+
+public protocol UpgradeListener: AnyObject, Sendable {
+    
+    /**
+     * 对方开始升级到 `version`（之后会断开、以新版本重新上线）
+     */
+    func onStarted(version: String) 
+    
+    /**
+     * 对方已离线（正在替换、重启）
+     */
+    func onOffline() 
+    
+    /**
+     * 结束：成功时 `version` 是对方现在的版本（已是最新时也走这里，`error` 为空），失败时 `error` 是原因
+     */
+    func onFinished(version: String?, error: String?) 
+    
+}
+
 public protocol VideoSink: AnyObject, Sendable {
     
     func onConfig(codec: VideoCodec, width: UInt32, height: UInt32) 
@@ -3129,6 +3169,7 @@ open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
     open func totpDisable(code: String) async throws { bridgeUnimplemented() }
     open func totpSetup() async throws  -> TotpSetup { bridgeUnimplemented() }
     open func totpVerify(code: String) async throws { bridgeUnimplemented() }
+    open func upgradeDevice(deviceId: String, listener: UpgradeListener) { bridgeUnimplemented() }
     open func vault()  -> [VaultEntry] { bridgeUnimplemented() }
     open func vaultDelete(id: String) async throws { bridgeUnimplemented() }
     open func vaultSave(entry: VaultEntry) async throws  -> VaultEntry { bridgeUnimplemented() }

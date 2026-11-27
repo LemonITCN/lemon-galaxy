@@ -52,31 +52,12 @@ enum Unattended {
     }
 
     /// 另一个进程的启动参数（sysctl KERN_PROCARGS2；只能读同一用户的进程）
-    static func arguments(of pid: pid_t) -> [String]? {
-        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
-        var size = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return nil }
-        var buf = [UInt8](repeating: 0, count: size)
-        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > 4 else { return nil }
-        let argc = Int(buf.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) })
-        var i = 4
-        // 跳过可执行文件路径与后面的填充 0
-        while i < size && buf[i] != 0 { i += 1 }
-        while i < size && buf[i] == 0 { i += 1 }
-        var args: [String] = []
-        while i < size && args.count < argc {
-            let start = i
-            while i < size && buf[i] != 0 { i += 1 }
-            args.append(String(decoding: buf[start..<i], as: UTF8.self))
-            i += 1
-        }
-        return args
-    }
+    static func arguments(of pid: pid_t) -> [String]? { AppUpdateProcess.arguments(of: pid) }
 
-    /// 是不是本应用的会话代理 / 后台服务进程（界面的「只跑一份」检查要跳过它们）
+    /// 是不是本应用的会话代理 / 后台服务 / 更新助手进程（界面的「只跑一份」检查要跳过它们）
     static func isHelperProcess(_ pid: pid_t) -> Bool {
         guard let a = arguments(of: pid) else { return false }
-        return a.contains("--session-agent") || a.contains("--daemon")
+        return a.contains("--session-agent") || a.contains("--daemon") || a.contains("--update-helper") || a.contains("--update-probe")
     }
 }
 

@@ -53,6 +53,9 @@ enum SelfTest {
         SystemPermissions.fake = (screen: false, accessibility: true)
         Clock.frozenMs = 1_795_225_692_000      // 2026-11-21 09:48:12（北京时间）
 
+        // 自动安装更新：临时目录里的应用副本走一遍核对、换包、助手打开新版本 / 换回旧版本（不碰「应用程序」）
+        problems += AppUpdateSelfTest.run(verbose: false)
+
         let langs = (arg("--lang").map { [$0] }) ?? ["zh-Hans", "en"]
         let themes = (arg("--theme").map { [$0] }) ?? ["light", "dark"]
         for lang in langs {
@@ -304,9 +307,22 @@ enum SelfTest {
             model.updater.state = .downloading(info, done: info.size * 2 / 5, total: info.size)
             shot("\(prefix)-17b-about-downloading", window: window, host: host)
             model.updater.state = .available(info)
-            model.updater.download()
-            wait("模拟下载完成") { if case .downloaded = model.updater.state { return true }; return false }
-            shot("\(prefix)-17c-about-downloaded", window: window, host: host)
+            model.updater.download(install: false)
+            wait("模拟下载完成") { if case .ready = model.updater.state { return true }; return false }
+            shot("\(prefix)-17c-about-ready", window: window, host: host)
+            model.updater.state = .installing(info, .replacing)
+            shot("\(prefix)-17d-about-installing", window: window, host: host)
+            model.updater.blocker = .notWritable("/Applications/LemonGalaxyWorker.app")
+            model.updater.state = .available(info)
+            shot("\(prefix)-17e-about-blocked", window: window, host: host)
+            model.updater.blocker = nil
+            // 零交互升级的入口（主控端远程要求升级时内核在别的线程调）：回到主线程交给更新模型
+            AppUpdateEntry.register(model.updater)
+            let remoteInfo = UpdateInfo(version: "999.0.0.1", fileName: "x.dmg", size: 1, sha256: "", url: "", notes: "")
+            DispatchQueue.global().async { AppUpdateEntry.startUpdateNow(info: remoteInfo) }
+            wait("远程要求升级交给更新模型") { model.updater.available?.version == "999.0.0.1" }
+            model.updater.available = info
+            model.updater.state = .idle
             model.updater.reset()
         }
         // 断开单个会话

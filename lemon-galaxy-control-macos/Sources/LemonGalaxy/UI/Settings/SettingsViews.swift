@@ -544,10 +544,11 @@ struct AboutSettings: View {
     ]
 }
 
-/// 关于页的「软件更新」：检查、有新版本时打开更新卡片、下载进度
+/// 关于页的「软件更新」：检查、立即更新（一路自动做完）、下载 / 安装进度、自动更新开关、不能自动替换时的原因
 struct UpdateSection: View {
     @ObservedObject var model: UpdateModel
     @EnvironmentObject var app: AppModel
+    @EnvironmentObject var settings: AppSettings
     @Environment(\.palette) var p
     @Environment(\.loc) var loc
 
@@ -557,14 +558,21 @@ struct UpdateSection: View {
                 statusIcon
                 VStack(alignment: .leading, spacing: 2) {
                     Text(statusText).font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(isFailed ? p.danger : p.text)
+                        .fixedSize(horizontal: false, vertical: true)
                     if let t = model.lastChecked {
                         Text(loc("update.lastChecked", Fmt.time(Int64(t.timeIntervalSince1970 * 1000))))
                             .font(.system(size: 11.5)).foregroundStyle(p.tertiaryText)
                     }
                 }
                 Spacer()
-                if let a = model.available, !model.busy {
-                    Button(loc("update.view", a.version)) { app.modal = .update }.buttonStyle(PrimaryButtonStyle())
+                if let a = model.available, !model.isInstalling {
+                    Button(loc("update.view", a.version)) { app.modal = .update }.buttonStyle(SecondaryButtonStyle())
+                    if !model.installWhenReady {
+                        Button(loc("update.installNow")) { model.installNow() }
+                            .buttonStyle(PrimaryButtonStyle())
+                            .disabled(model.blocker != nil)
+                    }
                 }
                 Button(loc("update.check")) { Task { await model.check(manual: true) } }
                     .buttonStyle(SecondaryButtonStyle())
@@ -573,13 +581,22 @@ struct UpdateSection: View {
             if case .downloading(_, let done, let total) = model.state {
                 ProgressView(value: total == 0 ? 0 : min(1, Double(done) / Double(total)))
             }
+            if let b = model.blocker {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "info.circle").foregroundStyle(p.warning)
+                    Text(b.message).font(.system(size: 12)).foregroundStyle(p.secondaryText).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            ToggleRow(label: loc("update.auto"), isOn: $settings.autoUpdate, info: loc("update.auto.info"))
         }
     }
+
+    private var isFailed: Bool { if case .failed = model.state { return true }; return false }
 
     @ViewBuilder
     private var statusIcon: some View {
         switch model.state {
-        case .checking: ProgressView().controlSize(.small).frame(width: 18)
+        case .checking, .installing: ProgressView().controlSize(.small).frame(width: 18)
         case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(p.danger).frame(width: 18)
         case .upToDate: Image(systemName: "checkmark.circle.fill").foregroundStyle(p.success).frame(width: 18)
         default:
@@ -596,8 +613,11 @@ struct UpdateSection: View {
         case .checking: return loc("update.checking")
         case .upToDate: return loc("update.upToDate", AppInfo.version)
         case .failed(let m): return m
-        case .downloading(let i, let d, let t): return loc("update.downloadingShort", i.version, t == 0 ? 0 : Int(Double(d) * 100 / Double(t)))
-        case .downloaded(let i, _): return loc("update.downloadedShort", i.version)
+        case .downloading(let i, let d, let t):
+            let s = loc("update.downloadingShort", i.version, t == 0 ? 0 : Int(Double(d) * 100 / Double(t)))
+            return model.installWhenReady ? s + " · " + loc("update.installWhenReady") : s
+        case .ready(let i, _): return loc("update.readyShort", i.version)
+        case .installing(let i, let step): return loc("update.installingShort", i.version) + " · " + UpdateCard.stepText(step, loc)
         case .available(let i): return loc("update.availableShort", i.version)
         case .idle: return model.available.map { loc("update.availableShort", $0.version) } ?? loc("update.idle", AppInfo.version)
         }

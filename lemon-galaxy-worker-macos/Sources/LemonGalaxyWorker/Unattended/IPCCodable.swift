@@ -424,8 +424,21 @@ struct DaemonInfo: Codable, Equatable {
     var peerUser: String
     var agents: [AgentSummary]
     var isMock: Bool
+    /// 后台服务这一侧的更新进度（无人值守下由后台服务下载并替换应用）；老版本的后台服务没有这一项
+    var update: DaemonUpdateStatus? = nil
 
     var activeAgent: AgentSummary? { agents.first { $0.active } }
+}
+
+/// 无人值守下的自动更新进度（DaemonUpdater），界面照着显示
+struct DaemonUpdateStatus: Codable, Equatable {
+    /// downloading / ready / installing / restarting / failed / rolledBack（新版本没起来，已换回）/ updated（已换成新版本）
+    var phase: String
+    var version: String
+    var done: UInt64 = 0
+    var total: UInt64 = 0
+    /// installing：步骤（verifying / replacing / restarting）；failed：原因；rolledBack：换回到的版本
+    var message: String? = nil
 }
 
 struct CLogin: Codable {
@@ -442,6 +455,8 @@ struct CInfo: Codable { var info: DaemonInfo }
 struct CUpdateCheck: Codable { var platform: String; var current: String }
 struct CUpdateInfo: Codable { var info: UpdateInfo? }
 struct CDownload: Codable { var token: String; var info: UpdateInfo }
+/// 预先下载（install 为假）或立即更新（下载完接着核对、替换、重启）
+struct CUpdateRequest: Codable { var info: UpdateInfo; var install: Bool }
 struct CDownloadEvent: Codable { var token: String; var done: UInt64; var total: UInt64; var finished: Bool; var error: String?; var path: String? }
 struct CLimit: Codable { var limit: UInt32 }
 struct CEvents: Codable { var events: [HostEvent] }
@@ -519,6 +534,7 @@ enum IPCMethod {
     static let start = "w.start"
     static let checkUpdate = "w.checkUpdate"
     static let downloadUpdate = "w.downloadUpdate"
+    static let updateRequest = "w.update"
     static let status = "s.status"
     static let events = "s.events"
     static let lockOnEnd = "s.lockOnEnd"

@@ -19,6 +19,8 @@ final class WorkerSettings: ObservableObject {
     @Published var lastUsername: String = "" { didSet { save("lastUsername", lastUsername) } }
     /// 上次自动检查更新的时间（秒）
     @Published var lastUpdateCheck: Double = 0 { didSet { save("lastUpdateCheck", lastUpdateCheck) } }
+    /// 自动更新：有新版本时在后台先下载好（安装仍要用户点「立即更新」，点了之后一路自动做完）
+    @Published var autoUpdate: Bool = true { didSet { save("autoUpdate", autoUpdate) } }
 
     /// 界面配色固定为 galaxy（与主控端默认一致）；被控端不提供换配色
     let palette = "galaxy"
@@ -36,6 +38,7 @@ final class WorkerSettings: ObservableObject {
         lastServer = s("lastServer") ?? lastServer
         lastUsername = s("lastUsername") ?? lastUsername
         lastUpdateCheck = defaults.object(forKey: "lastUpdateCheck") as? Double ?? lastUpdateCheck
+        autoUpdate = b("autoUpdate") ?? autoUpdate
     }
 
     private func save(_ key: String, _ value: Any) {

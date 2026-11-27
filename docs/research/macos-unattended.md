@@ -185,6 +185,7 @@ F. 授权提示（macOS 15 起）
 G. 更新
 
 18. 用更高构建号的包替换 `/Applications` 里的应用并打开：日志里后台服务因版本不同重启、会话代理退出后重启；`--unattended-status` 显示新版本。
+18b. 自动更新（还没在真机上验证）：先 `sfltool dumpbtm | grep -B2 -A12 lemonit` 记下后台服务条目；在菜单栏菜单或关于页点「立即更新」（也从另一台主控端远程点一次）。预期：不弹任何窗口；`/Library/Application Support/LemonGalaxy/update/update.log` 依次有「开始安装」「已换成」「新版本 … 已启动」「更新完成」；`--unattended-status` 显示新版本、会话代理是新版本；主控端看到设备重新上线后能再连；登录项里仍是已允许，`sfltool dumpbtm` 里的条目没有变成需要批准；重启 Mac 后后台服务照常起来。要验证回滚可以拿一个启动即退出的测试包：日志里有「换回」，旧版本照常在线。如果登录项变成需要批准或后台服务不被 launchd 拉起，记下 macOS 版本与 `log show --predicate 'subsystem == "com.apple.backgroundtaskmanagement" OR process == "launchd"' --last 10m`。
 
 H. 关闭
 

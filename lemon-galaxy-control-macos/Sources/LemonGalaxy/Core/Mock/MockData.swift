@@ -14,7 +14,7 @@ enum MockData {
             DeviceInfo(id: "dev-self", kind: .control, platform: .macos, hostname: "Alice-MacBook-Pro", osVersion: "macOS 15.3",
                        arch: "arm64", appVersion: "0.1.0", online: true, lanSeen: true, lastSeenAt: t, isSelf: true),
             DeviceInfo(id: "dev-build", kind: .worker, platform: .linux, hostname: "build-server-01", osVersion: "Ubuntu 24.04.1 LTS",
-                       arch: "x86_64", appVersion: "0.1.0", online: true, lanSeen: false, lastSeenAt: t, isSelf: false),
+                       arch: "x86_64", appVersion: "0.1.0", online: true, lanSeen: false, lastSeenAt: t, isSelf: false, updateVersion: "0.2.0"),
             DeviceInfo(id: "dev-gpu", kind: .worker, platform: .linux, hostname: "gpu-node-02", osVersion: "Debian GNU/Linux 12",
                        arch: "x86_64", appVersion: "0.1.0", online: true, lanSeen: false, lastSeenAt: t, isSelf: false),
             DeviceInfo(id: "dev-office", kind: .control, platform: .windows, hostname: "OFFICE-PC-07", osVersion: "Windows 11 23H2",
@@ -24,7 +24,8 @@ enum MockData {
             DeviceInfo(id: "dev-nas", kind: .worker, platform: .linux, hostname: "nas", osVersion: "Debian GNU/Linux 12",
                        arch: "aarch64", appVersion: "0.1.0", online: false, lanSeen: false, lastSeenAt: t - 3_600_000 * 26, isSelf: false),
             DeviceInfo(id: "dev-reception", kind: .worker, platform: .windows, hostname: "RECEPTION", osVersion: "Windows 10 22H2",
-                       arch: "x86_64", appVersion: "0.1.0", online: false, lanSeen: false, lastSeenAt: t - 3_600_000 * 72, isSelf: false),
+                       arch: "x86_64", appVersion: "0.1.0", online: false, lanSeen: false, lastSeenAt: t - 3_600_000 * 72, isSelf: false,
+                       updateVersion: "0.2.0"),
             DeviceInfo(id: "dev-phone", kind: .mobile, platform: .android, hostname: "Pixel 8", osVersion: "Android 15",
                        arch: "aarch64", appVersion: "0.1.0", online: true, lanSeen: false, lastSeenAt: t, isSelf: false),
         ]
@@ -97,6 +98,10 @@ enum MockData {
     static let wakeRelays: [String: String] = [
         "dev-reception": "OFFICE-PC-07",
     ]
+
+    /// 远程升级：版本太旧、还不支持远程升级的设备（前台电脑；远程开机后再点「升级被控端」会失败）。
+    /// 「可升级」的设备是构建服务器（在线，能走完整个升级）与前台电脑（离线）
+    static let remoteUpgradeTooOld: Set<String> = ["dev-reception"]
 
     /// 模拟 SSH 主机的主机密钥指纹（加密库里的 known_host 与模拟连接时报出的一致）
     static let knownFingerprints: [String: String] = [

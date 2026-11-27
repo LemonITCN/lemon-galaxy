@@ -51,8 +51,10 @@ final class AppSettings: ObservableObject {
     /// 切到终端、远程桌面等会话标签时自动收起中间列表，回到首页再出现
     @Published var autoHideList: Bool = true { didSet { save("autoHideList", autoHideList) } }
     @Published var welcomedHost: Bool = false { didSet { save("welcomedHost", welcomedHost) } }
-    /// 上次自动检查更新的时间（秒），每天最多自动检查一次
+    /// 上次自动检查更新的时间（秒），每 6 小时最多自动检查一次
     @Published var lastUpdateCheck: Double = 0 { didSet { save("lastUpdateCheck", lastUpdateCheck) } }
+    /// 自动更新：有新版本时在后台先下载好（安装仍要用户点「立即更新」，点了之后一路自动做完）
+    @Published var autoUpdate: Bool = true { didSet { save("autoUpdate", autoUpdate) } }
 
     private var loading = false
 
@@ -95,6 +97,7 @@ final class AppSettings: ObservableObject {
         autoHideList = b("autoHideList") ?? autoHideList
         welcomedHost = b("welcomedHost") ?? welcomedHost
         lastUpdateCheck = d("lastUpdateCheck") ?? lastUpdateCheck
+        autoUpdate = b("autoUpdate") ?? autoUpdate
     }
 
     private func save(_ key: String, _ value: Any) {

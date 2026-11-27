@@ -21,6 +21,8 @@ final class RemoteWorkerHost: WorkerHost, @unchecked Sendable {
     var prepare: (@Sendable (DaemonInfo, IPCConnection) -> Bool)?
     /// 后台服务概况变化（连上、代理增减、服务启动），任意线程
     var onInfo: (@Sendable (DaemonInfo?) -> Void)?
+    /// 连上之后、打招呼之前：本界面程序已过时（磁盘上的应用换了版本）时重新打开自己并返回 true，这条连接不用
+    var staleCheck: (@Sendable () -> Bool)?
 
     init(socketPath: String = Unattended.socketPath) {
         self.socketPath = socketPath
@@ -62,6 +64,9 @@ final class RemoteWorkerHost: WorkerHost, @unchecked Sendable {
                         onClose: { closed.signal() })
                 let locale = Localization.shared.strings.pack.coreLocale
                 if socketPath == Unattended.defaultSocket && c.peer.uid != 0 {
+                    c.close()
+                } else if staleCheck?() == true {
+                    // 旧界面的签名可能已对不上新后台服务（旧包已删），打招呼会被拒绝：先换成新程序
                     c.close()
                 } else if let m = try? c.call(IPCMethod.hello, ControlHello(version: AppInfo.version, build: AppInfo.build, locale: locale), timeout: 5),
                           let info = try? m.decode(DaemonInfo.self) {

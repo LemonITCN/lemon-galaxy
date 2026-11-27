@@ -154,6 +154,8 @@ final class AppModel: ObservableObject {
     var forwardsAutoStarted = false
     /// 正在发送唤醒包的设备
     @Published private(set) var waking: Set<String> = []
+    /// 远程升级被控端的进度（设备 id → 状态；UI/Hosts/DeviceUpgrade.swift），离开详情再回来还能看到
+    @Published var upgrades: [String: DeviceUpgrade] = [:]
 
     private var peers: [String: PeerConnection] = [:]
     private var assistNames: [String: String] = [:]
@@ -173,7 +175,10 @@ final class AppModel: ObservableObject {
         let config = CoreConfig(dataDir: AppModel.dataDir.path, cacheDir: AppModel.cacheDir.path, logLevel: "info", platform: .macos,
                                 deviceKind: .control, appVersion: AppInfo.version, osVersion: AppInfo.osVersion,
                                 hostname: AppInfo.computerName, locale: Localization.shared.strings.pack.coreLocale)
-        core = CoreProvider.make(config: config, store: store, listener: adapter, forceMock: forceMock, mockOptions: mockOptions)
+        let ctx = CoreProvider.make(config: config, store: store, listener: adapter, forceMock: forceMock, mockOptions: mockOptions)
+        core = ctx
+        // 被控一侧的远程升级回调：内核初始化后、本机被控服务启动前登记（App/RemoteUpdateHandler.swift）
+        RemoteUpdateRequestHandler.register(isMock: ctx.isMock, selfTest: selfTest)
         host = LocalHostModel(selfTest: selfTest)
         ai = AIHubModel()
         mcp = MCPModel()
@@ -238,6 +243,7 @@ final class AppModel: ObservableObject {
         server = nil
         devices = []
         vault = []
+        upgrades = [:]
     }
 
     func handleState(_ s: ClientState) {

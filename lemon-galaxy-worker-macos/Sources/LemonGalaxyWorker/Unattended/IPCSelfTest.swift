@@ -61,6 +61,8 @@ enum IPCSelfTest {
         o.installAgents = false
         o.checkAgentUid = false
         o.restart = { restarts.add() }
+        // 自动更新的替换目标放在临时目录（不是应用包：「立即更新」应被拒绝，什么都不动）
+        o.updateTarget = tmp.appendingPathComponent("Apps/NotAnApp.app", isDirectory: true)
         let svc = DaemonService(o, locale: "zh-CN")
         let console = Box<uid_t?>(nil)
         svc.platform.consoleUid = { console.value }
@@ -252,14 +254,19 @@ enum IPCSelfTest {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", "(cat \"$0\"; sleep 4) | /usr/bin/nc -U \"$1\"", file.path, sock]
-        p.standardOutput = FileHandle.nullDevice
+        let out = Pipe()
+        p.standardOutput = out
         p.standardError = FileHandle.nullDevice
         let before = svc.platform.rejectedAgents
         guard (try? p.run()) != nil else { check("启动 nc", false); return }
         let rejected = wait(5) { svc.platform.rejectedAgents > before }
         let registered = !svc.platform.summaries().isEmpty
         if p.isRunning { p.terminate() }
+        p.waitUntilExit()
+        let reply = out.fileHandleForReading.readDataToEndOfFile()
         check("别的程序（nc）冒充会话代理被拒绝（签名核对）", rejected && !registered)
+        // 应用更新后还是旧程序的代理（旧包已删、签名对不上）也走这里：要让它退出、由 launchd 用新程序重启
+        check("签名对不上的代理被要求退出重启", reply.range(of: Data(IPCMethod.agentExit.utf8)) != nil)
     }
 
     // MARK: 平台层转发
@@ -495,6 +502,34 @@ enum IPCSelfTest {
                 r.downloadUpdate(info: up, dest: dest, listener: dl)
                 check("下载更新：进度与完成", wait(10) { dl.finished } && dl.progress > 0 && dl.error == nil, dl.error ?? "")
                 check("下载更新：拷到当前用户的位置", FileManager.default.contents(atPath: dest) == Data("dmg".utf8))
+
+                // 无人值守的自动更新：预先下载（已在后台服务的下载位置就直接就绪），进度经概况推给界面
+                _ = try await r.call(IPCMethod.updateRequest, CUpdateRequest(info: up, install: false), timeout: 10)
+                check("自动更新：预先下载后界面收到「已下载」", wait(5) { r.info?.update?.phase == "ready" && r.info?.update?.version == up.version },
+                      "\(String(describing: r.info?.update))")
+                // 「立即更新」：替换目标不是应用包，应被拒绝并说明原因，什么都不动
+                do {
+                    _ = try await r.call(IPCMethod.updateRequest, CUpdateRequest(info: up, install: true), timeout: 10)
+                    check("自动更新：不能替换的位置拒绝「立即更新」", false)
+                } catch {
+                    check("自动更新：不能替换的位置拒绝「立即更新」并说明原因", describeError(error) == AppUpdateBlocker.notBundled.message, describeError(error))
+                }
+                check("自动更新：被拒绝后没有起助手、没有待完成的更新", svc.updater.state.pending == nil && !svc.updater.state.helperAlive && svc.updater.status?.phase != "restarting")
+                // 换回过的版本不再自动预先下载
+                svc.updater.state.addFailed(up.version)
+                try? FileManager.default.removeItem(at: svc.updater.file(for: up))
+                _ = try await r.call(IPCMethod.updateRequest, CUpdateRequest(info: up, install: false), timeout: 10)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                check("自动更新：换回过的版本不再自动下载", r.info?.update?.phase == "ready")
+                // 零交互升级的入口在后台服务进程里交给 DaemonUpdater：替换目标不是应用包，报失败原因、不起助手
+                AppUpdateEntry.startUpdateNow(info: up)
+                check("自动更新：后台服务进程里的升级入口交给后台服务（不能替换时报原因）",
+                      wait(5) { r.info?.update?.phase == "failed" && r.info?.update?.message?.contains(AppUpdateBlocker.notBundled.message) == true }
+                      && svc.updater.state.pending == nil, "\(String(describing: r.info?.update))")
+                // 后台服务模拟内核下载不写文件：下载完却没有文件时报错，不会去装
+                try? FileManager.default.removeItem(at: svc.updater.state.failedURL)
+                _ = try await r.call(IPCMethod.updateRequest, CUpdateRequest(info: up, install: false), timeout: 10)
+                check("自动更新：下载完没有文件时报失败", wait(10) { r.info?.update?.phase == "failed" }, "\(String(describing: r.info?.update))")
             }
             try await r.logout(userId: acct?.userId ?? 0)
             check("退出账号", wait { r.remote.accounts().isEmpty })

@@ -30,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Localization.shared.apply(setting: settings.language)
         settings.applyAppearance()
         model = WorkerModel(settings: settings, selfTest: false)
+        // 自动更新：报告启动成功、定时检查（Model/WorkerUpdater.swift）
+        model.updater.start()
         Notifier.install(model)
         buildMainMenu()
         StatusMenu.shared.install(model: model)

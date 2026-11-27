@@ -123,6 +123,7 @@ public func coreInit(config: CoreConfig) {}
 public func coreSetLocale(locale: String) {}
 public func coreLogPath() -> String { "" }
 public func mcpDefaultPort() -> UInt16 { 47821 }
+public func setUpdateRequestHandler(handler: UpdateRequestHandler) {}
 public func mcpStdioBridge(dataDir: String) -> Int32 {
     FileHandle.standardError.write("这个版本没有接入 Rust 内核，不能做 MCP 桥接\\n".data(using: .utf8)!)
     return 1
