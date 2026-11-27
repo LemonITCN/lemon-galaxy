@@ -224,34 +224,45 @@ async fn download(dir: &Path, mut found: Found) -> Result<(Found, PathBuf), Stri
 /// 跑一下新程序的 `version`：起不来（缺系统函数、架构不对、文件坏了）或报的版本不对就不装。
 fn try_run(exe: &Path, version: &str) -> Result<(), String> {
     let mut c = Command::new(exe);
-    c.arg("version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).env("LEMON_GALAXY_LANG", "en");
+    c.arg("version").stdin(Stdio::null()).env("LEMON_GALAXY_LANG", "en");
+    let name = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    // Windows：输出经临时文件取（XP 上标准库建不了子进程管道，见 galaxy_host::win::output_no_pipe）
     #[cfg(windows)]
-    {
+    let (status, text) = {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let name = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let mut child = c.spawn().map_err(|e| format!("{}（{name}）：{e}", t!("新版本程序起不来", "The new program cannot start")))?;
-    let t0 = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) if t0.elapsed() > Duration::from_secs(60) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(t!("新版本程序没有响应", "The new program does not respond").into());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => return Err(e.to_string()),
+        match galaxy_host::win::output_no_pipe(&mut c, Some(Duration::from_secs(60))) {
+            Ok(o) => (o.status, format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(t!("新版本程序没有响应", "The new program does not respond").into()),
+            Err(e) => return Err(format!("{}（{name}）：{e}", t!("新版本程序起不来", "The new program cannot start"))),
         }
     };
-    let mut text = String::new();
-    if let Some(mut o) = child.stdout.take() {
-        let _ = std::io::Read::read_to_string(&mut o, &mut text);
-    }
-    if let Some(mut o) = child.stderr.take() {
-        let _ = std::io::Read::read_to_string(&mut o, &mut text);
-    }
+    #[cfg(not(windows))]
+    let (status, text) = {
+        c.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = c.spawn().map_err(|e| format!("{}（{name}）：{e}", t!("新版本程序起不来", "The new program cannot start")))?;
+        let t0 = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break s,
+                Ok(None) if t0.elapsed() > Duration::from_secs(60) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(t!("新版本程序没有响应", "The new program does not respond").into());
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(e) => return Err(e.to_string()),
+            }
+        };
+        let mut text = String::new();
+        if let Some(mut o) = child.stdout.take() {
+            let _ = std::io::Read::read_to_string(&mut o, &mut text);
+        }
+        if let Some(mut o) = child.stderr.take() {
+            let _ = std::io::Read::read_to_string(&mut o, &mut text);
+        }
+        (status, text)
+    };
     if !status.success() {
         return Err(format!("{}（{status}）：{}", t!("新版本程序起不来", "The new program cannot start"), text.trim()));
     }

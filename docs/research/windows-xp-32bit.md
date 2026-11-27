@@ -174,3 +174,10 @@
 - 0.1.0.74 在 XP 虚拟机里端到端（Mac 上的临时服务器与 `galaxy-dev`）【已核实】：登录、装成服务并连上服务器；能力列表有声音、隐私屏、虚拟屏（上限 2）；远程截图、看画面（静止时 13 帧 / 秒）；文件上传下载一致；终端断线接续；加 1470x956 虚拟屏 0.19 秒、5 秒收到 62 帧、删屏 0.18 秒；**隐私屏开着时远程截图是正常桌面，同时 XP 本地带 CAPTUREBLT 截屏非黑像素 0%（本地屏幕全黑），关掉后恢复**。声音与 exec 中文的修正在 0.1.0.76 起，还没在 XP 上复测。
 - 老系统桌面端：XP 虚拟机里没装任何 .NET，原来的 WPF 界面（.NET 4.0）打不开。改成原生界面（`lemon-galaxy-worker-windows/gui-native`，Rust + Win32），0.1.0.77 起随兼容版发布，导入表核对通过；还没在 XP 上运行过。
 - 装服务时顺带装驱动报 0xE000022B（ERROR_DI_DONT_INSTALL）：当时刚卸过一次驱动、显示设备还等着重启，【推测】是显示类安装程序因此拒绝；重启后再测。
+
+### 9.3 0.1.0.79 复测与子进程输出（2026-11-27）
+
+- 声音【已核实】：XP 桌面上放 440 Hz 测试音，远端收到 7.9 秒、估算频率 445 Hz、均方根 0.053；停掉后均方根 0；服务没有崩。exec 中文输出正常（`ver`、`echo 中文测试`、`dir` 的「卷」都对）。
+- **原生桌面端安装失败**【已核实】：`LemonGalaxyWorker.exe --install` 复制好文件后调 `lemon-galaxy-worker.exe install-service` 取输出，报 ERROR_INVALID_NAME（123）。根因【已核实，读标准库源码 `library/std/src/sys/process/windows/child_pipe.rs`】：Rust 标准库给子进程建管道（`Command::output()`、`Stdio::piped()`，tokio 的 process 也一样）是打开 `\Device\NamedPipe\` 后用 NtCreateNamedPipeFile 建**空名字**的无名管道，XP 的命名管道文件系统不支持，返回 STATUS_OBJECT_NAME_INVALID，进程根本没启动。不取输出（`Stdio::null()`、继承、文件）的 `spawn` / `status` 不受影响；被控端自己的终端与 exec 用 CreatePipe 建管道，也不受影响。
+- 同一原因还会让 XP 上：自动更新与远程升级「先试跑新程序 version」永远判成起不来（升级装不上）；账号用户目录（以前调 `reg query`）查不到；「开机自启」开关（`sc config`）报错。另外收紧数据目录权限用的 `icacls` 是 Vista 起才有的命令，XP 上数据目录（账号令牌在里面）一直没收紧。
+- 修法：`galaxy_host::win::output_no_pipe`——标准输出、错误先写进临时目录里独占新建的文件，进程结束后读回删掉，要取子进程输出的一次性命令都改用它（原生界面的 `run_hidden` 同样做法）；用户目录直接读注册表；数据目录用 SetNamedSecurityInfoW（SDDL `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`），各版本一致。

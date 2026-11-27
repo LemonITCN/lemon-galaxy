@@ -561,13 +561,35 @@ pub fn clean_old_files() {
     }
 }
 
-/// 不弹窗口运行，返回 (退出码, 标准输出 + 标准错误)
+/// 不弹窗口运行，返回 (退出码, 标准输出 + 标准错误)。
+/// 输出经临时文件取，不用 `output()`：Rust 标准库给子进程建管道是在 `\Device\NamedPipe\` 下建空名字的无名管道，
+/// XP 不支持（ERROR_INVALID_NAME），程序根本起不来（同 galaxy_host::win::output_no_pipe）。
 pub fn run_hidden(exe: &Path, args: &[&str]) -> (i32, String) {
-    let out = std::process::Command::new(exe).args(args).env("LEMON_GALAXY_LANG", crate::i18n::lang_tag()).current_dir(exe.parent().unwrap_or(Path::new("."))).creation_flags(CREATE_NO_WINDOW).output();
-    match out {
-        Ok(o) => {
-            let text = format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)).trim().to_string();
-            let code = o.status.code().unwrap_or(1);
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tag = format!("lg-ui-{}-{nanos}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
+    let tmp = std::env::temp_dir();
+    let (po, pe) = (tmp.join(format!("{tag}.out")), tmp.join(format!("{tag}.err")));
+    let new_file = |p: &Path| std::fs::OpenOptions::new().write(true).create_new(true).open(p);
+    let r = (|| -> std::io::Result<(i32, String)> {
+        let (fo, fe) = (new_file(&po)?, new_file(&pe)?);
+        let status = std::process::Command::new(exe)
+            .args(args)
+            .env("LEMON_GALAXY_LANG", crate::i18n::lang_tag())
+            .current_dir(exe.parent().unwrap_or(Path::new(".")))
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(fo)
+            .stderr(fe)
+            .status()?;
+        let read = |p: &Path| String::from_utf8_lossy(&std::fs::read(p).unwrap_or_default()).to_string();
+        Ok((status.code().unwrap_or(1), format!("{}\n{}", read(&po), read(&pe)).trim().to_string()))
+    })();
+    let _ = std::fs::remove_file(&po);
+    let _ = std::fs::remove_file(&pe);
+    match r {
+        Ok((code, text)) => {
             log_info(&format!("{} {} → {code} {text}", exe.display(), args.join(" ")));
             (code, text)
         }

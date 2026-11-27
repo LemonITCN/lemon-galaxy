@@ -233,14 +233,101 @@ pub fn profile_dir(sid: &str) -> Option<String> {
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
         return Some(format!("{root}\\System32\\config\\systemprofile"));
     }
-    let out = std::process::Command::new("reg")
-        .args(["query", &format!("HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\{sid}"), "/v", "ProfileImagePath"])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).to_string();
-    let line = s.lines().find(|l| l.contains("ProfileImagePath"))?;
-    let v = line.split("REG_EXPAND_SZ").nth(1).or_else(|| line.split("REG_SZ").nth(1))?.trim().to_string();
-    Some(expand_env(&v))
+    // 直接读注册表（以前调 reg.exe 取输出：XP 上取不到子进程输出，见 output_no_pipe；中文用户名还会按控制台代码页乱码）
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE};
+    let key = wide(&format!("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\{sid}"));
+    let name = wide("ProfileImagePath");
+    let mut h = HKEY::default();
+    unsafe {
+        RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key.as_ptr()), None, KEY_QUERY_VALUE, &mut h).ok().ok()?;
+        let mut buf = vec![0u16; 1024];
+        let mut len = (buf.len() * 2) as u32;
+        let r = RegQueryValueExW(h, PCWSTR(name.as_ptr()), None, None, Some(buf.as_mut_ptr() as *mut u8), Some(&mut len));
+        let _ = RegCloseKey(h);
+        r.ok().ok()?;
+        let n = ((len as usize) / 2).min(buf.len());
+        let s = String::from_utf16_lossy(&buf[..n]);
+        let v = s.trim_end_matches('\0').trim();
+        (!v.is_empty()).then(|| expand_env(v))
+    }
+}
+
+/// 跑一次性命令并取输出，代替 `Command::output()`（Windows 上要取子进程输出的地方都用它）。
+/// Rust 标准库给子进程建管道是在 `\Device\NamedPipe\` 下用 NtCreateNamedPipeFile 建空名字的无名管道，XP 不支持，
+/// 返回 ERROR_INVALID_NAME（123），程序根本起不来。这里标准输出、错误先写进临时目录里独占新建的文件（名字带进程号、
+/// 时间与序号），进程结束后读回并删掉。`timeout` 到了还没结束就结束它并报超时。
+pub fn output_no_pipe(cmd: &mut std::process::Command, timeout: Option<std::time::Duration>) -> io::Result<std::process::Output> {
+    use std::process::Stdio;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    struct Rm(Vec<std::path::PathBuf>);
+    impl Drop for Rm {
+        fn drop(&mut self) {
+            for p in &self.0 {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tag = format!("lg-out-{}-{nanos}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
+    let dir = std::env::temp_dir();
+    let (po, pe) = (dir.join(format!("{tag}.out")), dir.join(format!("{tag}.err")));
+    let new_file = |p: &std::path::Path| std::fs::OpenOptions::new().write(true).create_new(true).open(p);
+    let fo = new_file(&po)?;
+    let _rm = Rm(vec![po.clone()]);
+    let fe = new_file(&pe)?;
+    let _rm2 = Rm(vec![pe.clone()]);
+    cmd.stdin(Stdio::null()).stdout(fo).stderr(fe);
+    let spawned = cmd.spawn();
+    // 交出去的文件句柄别留在 Command 里（之后才能删）
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child = spawned?;
+    let status = match timeout {
+        None => child.wait()?,
+        Some(t) => {
+            let t0 = std::time::Instant::now();
+            loop {
+                if let Some(s) = child.try_wait()? {
+                    break s;
+                }
+                if t0.elapsed() > t {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    };
+    Ok(std::process::Output { status, stdout: std::fs::read(&po).unwrap_or_default(), stderr: std::fs::read(&pe).unwrap_or_default() })
+}
+
+/// 目录只给 SYSTEM 与管理员组完全控制，不继承上级（子目录、文件跟着改）。直接调 SetNamedSecurityInfoW，
+/// XP 起都能用（以前用 icacls，XP 没有这个命令，数据目录在 XP 上就没收紧）。
+pub fn restrict_to_system_and_admins(dir: &std::path::Path) -> io::Result<()> {
+    use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+    let sddl = wide("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+    let path: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, null_mut()) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let (mut present, mut defaulted) = (0, 0);
+        let mut dacl: *mut ACL = null_mut();
+        let r = if GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            match SetNamedSecurityInfoW(path.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, null_mut(), null_mut(), dacl, null()) {
+                0 => Ok(()),
+                e => Err(io::Error::from_raw_os_error(e as i32)),
+            }
+        };
+        LocalFree(sd as _);
+        r
+    }
 }
 
 fn expand_env(s: &str) -> String {

@@ -196,12 +196,11 @@ impl WorkerOs for WindowsOs {
 
     fn secure_data_dir(&self, dir: &Path) {
         let _ = std::fs::create_dir_all(dir);
-        // 系统数据目录只给 SYSTEM 与管理员组（用 SID，与系统语言无关）
+        // 系统数据目录（账号令牌在里面）只给 SYSTEM 与管理员组
         if galaxy_host::sysuser::is_admin() && dir.starts_with(self.default_dir(true)) {
-            let _ = std::process::Command::new("icacls")
-                .arg(dir)
-                .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/q"])
-                .output();
+            if let Err(e) = galaxy_host::win::restrict_to_system_and_admins(dir) {
+                tracing::warn!("收紧数据目录权限失败（{}）：{e}", dir.display());
+            }
         }
     }
 

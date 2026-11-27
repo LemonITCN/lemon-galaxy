@@ -158,11 +158,10 @@ pub fn autostart() -> Option<bool> {
 pub fn set_autostart(on: bool) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Windows"));
-    let out = std::process::Command::new(root.join("System32").join("sc.exe"))
-        .args(["config", SERVICE_NAME, "start=", if on { "auto" } else { "demand" }])
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .output()
-        .map_err(|e| e.to_string())?;
+    let mut c = std::process::Command::new(root.join("System32").join("sc.exe"));
+    c.args(["config", SERVICE_NAME, "start=", if on { "auto" } else { "demand" }]).creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    // 不用 output()：XP 上标准库建不了子进程管道
+    let out = galaxy_host::win::output_no_pipe(&mut c, Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(())
     } else {
