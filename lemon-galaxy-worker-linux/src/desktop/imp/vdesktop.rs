@@ -323,9 +323,10 @@ pub fn ensure(user: &str, w: u32, h: u32) -> Result<GuiSession, String> {
         chown(&dir.join(name), &u);
         Stdio::from(f)
     });
-    // Xvfb
+    // Xvfb。-noreset：默认最后一个客户端断开时 X 服务器会重置一次，桌面会话脚本（startxfce4 等）启动时先连一下 X 又断开，
+    // 画面代理刚好在重置时连上就被「连接重置」（CI 的远程桌面端到端偶发失败就是这个）
     let mut cmd = Command::new(&xvfb);
-    cmd.args([&display, "-screen", "0", &format!("{w}x{h}x24"), "-nolisten", "tcp", "-auth", &xauth.to_string_lossy(), "-dpi", "96", "+extension", "RANDR", "+extension", "GLX"]);
+    cmd.args([&display, "-screen", "0", &format!("{w}x{h}x24"), "-nolisten", "tcp", "-noreset", "-auth", &xauth.to_string_lossy(), "-dpi", "96", "+extension", "RANDR", "+extension", "GLX"]);
     cmd.env_clear().envs(galaxy_host::sysuser::child_env(&u)).current_dir(&u.home).stdin(Stdio::null()).stdout(log("xvfb.log").unwrap_or(Stdio::null())).stderr(Stdio::null());
     galaxy_host::sysuser::prepare_command(&mut cmd, &u, false);
     let mut xchild = cmd.spawn().map_err(|e| format!("启动 Xvfb 失败：{e}"))?;
