@@ -211,6 +211,62 @@ final class MockGalaxyClient: GalaxyClient, @unchecked Sendable {
         return via
     }
 
+    // MARK: 远程升级被控端
+
+    /// 模拟 docs/ffi.md 5.0 的 upgrade_device：立即返回，回调在后台线程。对方开始升级 → 断开（替换、重启）→ 以新版本重新上线。
+    /// 时间按 latencyScale 缩放（测试里为 0，一口气走完）；离线、不能被控、版本太旧（MockData.remoteUpgradeTooOld）的直接报错
+    override func upgradeDevice(deviceId: String, listener: UpgradeListener) {
+        let zh = zh, scale = options.latencyScale
+        func pause(_ ms: Double) { if scale > 0 { Thread.sleep(forTimeInterval: ms * scale / 1000) } }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            pause(700)
+            guard let d = self.device(deviceId) else {
+                listener.onFinished(version: nil, error: zh ? "找不到这台设备" : "Device not found")
+                return
+            }
+            guard d.online || d.lanSeen else {
+                listener.onFinished(version: nil, error: zh ? "设备离线" : "The device is offline")
+                return
+            }
+            guard DeviceUpgrade.supported(d) else {
+                listener.onFinished(version: nil, error: zh ? "这台设备不能被控制" : "This device cannot be controlled")
+                return
+            }
+            if MockData.remoteUpgradeTooOld.contains(deviceId) {
+                listener.onFinished(version: nil, error: zh ? "对方版本太旧，不支持远程升级，需要先在那台设备上升级一次"
+                                                        : "The device's version is too old for remote upgrade; update it on that device once first")
+                return
+            }
+            let target = d.updateVersion
+            guard !target.isEmpty else {
+                listener.onFinished(version: d.appVersion, error: nil)
+                return
+            }
+            listener.onStarted(version: target)
+            pause(2500)
+            self.mockUpdateDevice(deviceId) { $0.online = false; $0.lanSeen = false }
+            listener.onOffline()
+            pause(4000)
+            self.mockUpdateDevice(deviceId) {
+                $0.online = true
+                $0.appVersion = target
+                $0.updateVersion = ""
+                $0.lastSeenAt = MockData.now
+            }
+            listener.onFinished(version: target, error: nil)
+        }
+    }
+
+    /// 改一台模拟设备并通知设备列表变化（远程升级、测试用）
+    func mockUpdateDevice(_ id: String, _ change: (inout DeviceInfo) -> Void) {
+        lock.locked {
+            if let i = _devices.firstIndex(where: { $0.id == id }) { change(&_devices[i]) }
+        }
+        let l = listener
+        queue.async { l?.onDevicesChanged() }
+    }
+
     // MARK: 连接
 
     func device(_ id: String) -> DeviceInfo? { devices().first { $0.id == id } }

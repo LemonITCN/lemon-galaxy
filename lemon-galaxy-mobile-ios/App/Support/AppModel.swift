@@ -75,6 +75,16 @@ final class AppModel: ObservableObject {
             self.tab = .hosts
         }
         account.onSessionRevoked = { [weak self] in self?.showToast(L("login.revoked"), error: true) }
+        // 远程升级被控端结束（设备详情里点的，详情可能已经关了）：提示一下；本来就最新的不提示
+        account.onUpgradeFinished = { [weak self] id, result in
+            guard let self else { return }
+            let name = self.account.deviceName(id)
+            switch result {
+            case .done(let v): self.showToast(L("upgrade.toast.done", name, v))
+            case .failed(let e): self.showToast(L("upgrade.toast.failed", name, e), error: true)
+            default: break
+            }
+        }
         transfers.onFinished = { [weak self] item in
             guard let self else { return }
             switch item.status {

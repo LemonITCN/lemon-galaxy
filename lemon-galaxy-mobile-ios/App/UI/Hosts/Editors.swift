@@ -402,6 +402,9 @@ struct DeviceEditor: View {
             if account.canWake(deviceId) {
                 WakeSection(deviceId: deviceId)
             }
+            if let d = account.device(deviceId), DeviceUpgrade.supported(d), !d.updateVersion.isEmpty || account.upgrades[d.id] != nil {
+                UpgradeSection(device: d)
+            }
             if let d = account.device(deviceId) {
                 Section {
                     LabeledContent(loc("device.hostname"), value: d.hostname)
@@ -480,6 +483,88 @@ private struct WakeSection: View {
         let icon: String = ok ? "checkmark.circle" : "exclamationmark.triangle"
         let color: Color = ok ? p.success : p.danger
         return Label(text, systemImage: icon).font(.callout).foregroundStyle(color)
+    }
+}
+
+/// 设备详情里的版本与「升级被控端」：不用先连远程，点了直接开始（不再确认），对方自己升级并以新版本重新上线。
+/// 进度存在 GalaxyAccount.upgrades 里，就地显示；关掉详情再打开还能看到
+private struct UpgradeSection: View {
+    let device: DeviceInfo
+    @EnvironmentObject var account: GalaxyAccount
+    @Environment(\.palette) private var p
+    @Environment(\.loc) private var loc
+
+    var body: some View {
+        let state = account.upgrades[device.id]
+        let hasUpdate = !device.updateVersion.isEmpty
+        Section {
+            HStack(spacing: 12) {
+                PlatformBadge(symbol: iconName(state), tint: iconColor(state), size: 30)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(hasUpdate ? loc("upgrade.available", device.updateVersion) : loc("upgrade.currentTitle", device.appVersion))
+                        .font(.body.weight(.medium)).foregroundStyle(p.text)
+                    if hasUpdate {
+                        Text(loc("upgrade.current", device.appVersion)).font(.caption).foregroundStyle(p.secondaryText)
+                    }
+                }
+                Spacer(minLength: 8)
+                InfoButton(text: loc("upgrade.info"))
+            }
+            if hasUpdate || state?.inProgress == true {
+                Button { account.upgradeDevice(device.id) } label: {
+                    if case .failed = state {
+                        Label(loc("upgrade.retry"), systemImage: "arrow.clockwise")
+                    } else {
+                        Label(loc("upgrade.action"), systemImage: "arrow.up.circle")
+                    }
+                }
+                .disabled(!account.canStartUpgrade(device))
+            }
+            statusRow(state, hasUpdate: hasUpdate)
+        }
+    }
+
+    @ViewBuilder private func statusRow(_ s: DeviceUpgrade?, hasUpdate: Bool) -> some View {
+        switch s {
+        case .requesting(let v), .installing(let v):
+            progressRow(v.isEmpty ? loc("upgrade.installingPlain") : loc("upgrade.installing", v))
+        case .restarting:
+            progressRow(loc("upgrade.restarting"))
+        case .done(let v):
+            Label(loc("upgrade.done", v), systemImage: "checkmark.circle.fill").font(.callout).foregroundStyle(p.success)
+        case .upToDate(let v):
+            Label(v.isEmpty ? loc("upgrade.upToDatePlain") : loc("upgrade.upToDate", v), systemImage: "checkmark.circle")
+                .font(.callout).foregroundStyle(p.secondaryText)
+        case .failed(let e):
+            Label(loc("upgrade.failed", e), systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(p.danger)
+        case nil:
+            // 离线时按钮不可用：说明要在线
+            if hasUpdate && !device.online {
+                Label(loc("upgrade.needOnline"), systemImage: "powersleep").font(.callout).foregroundStyle(p.secondaryText)
+            }
+        }
+    }
+
+    private func progressRow(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView()
+            Text(text).font(.callout).foregroundStyle(p.secondaryText)
+        }
+    }
+
+    private func iconName(_ s: DeviceUpgrade?) -> String {
+        switch s {
+        case .done, .upToDate: return "checkmark.circle"
+        default: return "arrow.up.circle"
+        }
+    }
+
+    private func iconColor(_ s: DeviceUpgrade?) -> Color {
+        switch s {
+        case .done: return p.success
+        case .upToDate: return p.secondaryText
+        default: return p.accent
+        }
     }
 }
 

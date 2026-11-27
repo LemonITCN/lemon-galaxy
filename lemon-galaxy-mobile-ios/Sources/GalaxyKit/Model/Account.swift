@@ -42,6 +42,8 @@ public final class GalaxyAccount: ObservableObject {
     @Published public private(set) var refreshing = false
     /// 进行中的 RDP 端口转发
     @Published public internal(set) var rdpForwards: [RdpForward] = []
+    /// 远程升级被控端的进度（设备 id → 状态；Logic/DeviceUpgrade.swift），离开详情再回来还能看到
+    @Published public private(set) var upgrades: [String: DeviceUpgrade] = [:]
 
     /// 服务器吊销了本机会话（回登录页，界面提示一下）
     public var onSessionRevoked: (() -> Void)?
@@ -49,6 +51,8 @@ public final class GalaxyAccount: ObservableObject {
     public var onLoggedIn: (() -> Void)?
     /// 登出或被吊销：界面关掉所有会话
     public var onLoggedOut: (() -> Void)?
+    /// 远程升级结束（设备 id、结束状态）：界面弹提示
+    public var onUpgradeFinished: ((String, DeviceUpgrade) -> Void)?
 
     private var peers: [String: PeerConnection] = [:]
     private var sshSessions: [String: SshConnection] = [:]
@@ -119,6 +123,7 @@ public final class GalaxyAccount: ObservableObject {
         server = nil
         devices = []
         vault = []
+        upgrades = [:]
         clientState = client.state()
     }
 
@@ -187,6 +192,50 @@ public final class GalaxyAccount: ObservableObject {
     /// 远程开机：返回代发设备名（空字符串表示本机）
     public func wake(_ id: String) async throws -> [String] {
         try await client.wakeDevice(deviceId: id)
+    }
+
+    // MARK: 远程升级被控端
+
+    /// 设备列表上标「可升级」：能被控，且服务器上有比它新的版本
+    public func hasUpgrade(_ d: DeviceInfo) -> Bool { DeviceUpgrade.supported(d) && !d.updateVersion.isEmpty }
+
+    /// 详情里能不能点「升级被控端」：能被控、在线、没有正在进行的升级
+    public func canStartUpgrade(_ d: DeviceInfo) -> Bool {
+        DeviceUpgrade.supported(d) && d.online && upgrades[d.id]?.inProgress != true
+    }
+
+    /// 让对方升级到服务器上的最新版本（不再确认）：立即返回，进度经 upgrades；
+    /// 内核连上对方发请求，再等它以新版本重新上线（最多 10 分钟）。结束后刷新设备列表并调 onUpgradeFinished
+    public func upgradeDevice(_ id: String) {
+        guard let d = device(id), canStartUpgrade(d) else { return }
+        upgrades[id] = .requesting(d.updateVersion)
+        let l = UpgradeListenerAdapter()
+        l.started = { [weak self] v in onMain { self?.upgrades[id] = .installing(v) } }
+        l.offline = { [weak self] in onMain { self?.upgradeWentOffline(id) } }
+        l.finished = { [weak self] v, e in onMain { self?.upgradeFinished(id, version: v, error: e) } }
+        client.upgradeDevice(deviceId: id, listener: l)
+    }
+
+    private func upgradeWentOffline(_ id: String) {
+        upgrades[id] = .restarting(upgrades[id]?.targetVersion ?? device(id)?.updateVersion ?? "")
+    }
+
+    private func upgradeFinished(_ id: String, version: String?, error: String?) {
+        let prev = upgrades[id]
+        let result: DeviceUpgrade
+        if let error, !error.isEmpty {
+            result = .failed(error)
+        } else if prev?.started == true {
+            result = .done(version ?? prev?.targetVersion ?? "")
+        } else {
+            result = .upToDate(version ?? "")
+        }
+        upgrades[id] = result
+        reloadDevices()
+        onUpgradeFinished?(id, result)
+        // 内核等对方上线时已刷新过；再要一次，列表里的「可升级」跟着服务器更新（结果经 on_devices_changed 回来）
+        let c = client
+        Task { try? await c.refreshDevices() }
     }
 
     public func device(_ id: String) -> DeviceInfo? { devices.first { $0.id == id } }

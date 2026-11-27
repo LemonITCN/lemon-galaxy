@@ -346,6 +346,7 @@ struct HostRow: View {
     let item: HostItem
     var depth = 0
     var path: String?
+    @EnvironmentObject var account: GalaxyAccount
     @Environment(\.palette) private var p
     @Environment(\.loc) private var loc
 
@@ -356,6 +357,7 @@ struct HostRow: View {
                 HStack(spacing: 6) {
                     Text(item.title).font(.body.weight(.medium)).foregroundStyle(p.text).lineLimit(1)
                     if item.favorite { Image(systemName: "star.fill").font(.caption2).foregroundStyle(p.warning) }
+                    if case .device(let d, _) = item { upgradeChip(d) }
                 }
                 HStack(spacing: 6) {
                     if case .device = item { StatusDot(color: statusColor, size: 6) }
@@ -378,6 +380,20 @@ struct HostRow: View {
     private var dimmed: Bool {
         if case .device(let d, _) = item { return !(d.online || d.lanSeen) }
         return false
+    }
+
+    /// 有新版本时「可升级」，远程升级进行中「升级中」（详情里点「升级被控端」）
+    @ViewBuilder private func upgradeChip(_ d: DeviceInfo) -> some View {
+        let busy = account.upgrades[d.id]?.inProgress == true
+        if busy || account.hasUpgrade(d) {
+            Text(loc(busy ? "upgrade.badge.busy" : "upgrade.badge"))
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(p.accent)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1.5)
+                .background(Capsule().fill(p.accent.opacity(0.12)))
+                .fixedSize()
+        }
     }
 
     private var symbol: String {

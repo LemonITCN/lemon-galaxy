@@ -14,6 +14,9 @@ public func coreInit(config: CoreConfig) {}
 public func coreLogPath() -> String { "" }
 public func coreSetLocale(locale: String) {}
 public func coreVersion() -> String { "0.0.0-mirror" }
+public func mcpDefaultPort() -> UInt16 { bridgeUnimplemented() }
+public func mcpStdioBridge(dataDir: String) -> Int32 { bridgeUnimplemented() }
+public func setUpdateRequestHandler(handler: UpdateRequestHandler) {}
 
 // MARK: - 记录与枚举
 
@@ -189,6 +192,58 @@ public struct CaptureStarted: Equatable, Hashable {
 
 #if compiler(>=6)
 extension CaptureStarted: Sendable {}
+#endif
+
+public struct ClipOfferEntry: Equatable, Hashable {
+    public var path: String
+    public var isDir: Bool
+    public var size: UInt64
+    /**
+     * 修改时间（Unix 秒，不知道时为 0）
+     */
+    public var mtime: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, isDir: Bool, size: UInt64, 
+        /**
+         * 修改时间（Unix 秒，不知道时为 0）
+         */mtime: Int64) {
+        self.path = path
+        self.isDir = isDir
+        self.size = size
+        self.mtime = mtime
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ClipOfferEntry: Sendable {}
+#endif
+
+public struct ClipOfferInfo: Equatable, Hashable {
+    public var id: UInt64
+    public var entries: [ClipOfferEntry]
+    public var totalBytes: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: UInt64, entries: [ClipOfferEntry], totalBytes: UInt64) {
+        self.id = id
+        self.entries = entries
+        self.totalBytes = totalBytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ClipOfferInfo: Sendable {}
 #endif
 
 public struct ComputerUseReply: Equatable, Hashable {
@@ -397,10 +452,17 @@ public struct DeviceInfo: Equatable, Hashable {
     public var lanSeen: Bool
     public var lastSeenAt: Int64
     public var isSelf: Bool
+    /**
+     * 服务器上有比 `app_version` 新的版本时是那个版本号（设备列表标「可升级」、详情里可「升级被控端」），否则为空
+     */
+    public var updateVersion: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, kind: DeviceKind, platform: Platform, hostname: String, osVersion: String, arch: String, appVersion: String, online: Bool, lanSeen: Bool, lastSeenAt: Int64, isSelf: Bool) {
+    public init(id: String, kind: DeviceKind, platform: Platform, hostname: String, osVersion: String, arch: String, appVersion: String, online: Bool, lanSeen: Bool, lastSeenAt: Int64, isSelf: Bool, 
+        /**
+         * 服务器上有比 `app_version` 新的版本时是那个版本号（设备列表标「可升级」、详情里可「升级被控端」），否则为空
+         */updateVersion: String = "") {
         self.id = id
         self.kind = kind
         self.platform = platform
@@ -412,6 +474,7 @@ public struct DeviceInfo: Equatable, Hashable {
         self.lanSeen = lanSeen
         self.lastSeenAt = lastSeenAt
         self.isSelf = isSelf
+        self.updateVersion = updateVersion
     }
 
     
@@ -773,6 +836,138 @@ public struct ImageData: Equatable, Hashable {
 
 #if compiler(>=6)
 extension ImageData: Sendable {}
+#endif
+
+public struct McpClientInfo: Equatable, Hashable {
+    /**
+     * 归类键（客户端名规整后），mcp_decide 等用它指定客户端
+     */
+    public var key: String
+    public var name: String
+    public var version: String
+    public var lastActiveMs: Int64
+    /**
+     * 正在执行工具
+     */
+    public var running: Bool
+    /**
+     * 等用户批准的步骤数
+     */
+    public var pendingApprovals: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 归类键（客户端名规整后），mcp_decide 等用它指定客户端
+         */key: String, name: String, version: String, lastActiveMs: Int64, 
+        /**
+         * 正在执行工具
+         */running: Bool, 
+        /**
+         * 等用户批准的步骤数
+         */pendingApprovals: UInt32) {
+        self.key = key
+        self.name = name
+        self.version = version
+        self.lastActiveMs = lastActiveMs
+        self.running = running
+        self.pendingApprovals = pendingApprovals
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension McpClientInfo: Sendable {}
+#endif
+
+public struct McpConfig: Equatable, Hashable {
+    /**
+     * 0 表示用默认端口
+     */
+    public var port: UInt16
+    public var mode: AiMode
+    /**
+     * 完全信任档的时限（分钟），到时回到危险操作确认
+     */
+    public var trustMinutes: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 0 表示用默认端口
+         */port: UInt16, mode: AiMode, 
+        /**
+         * 完全信任档的时限（分钟），到时回到危险操作确认
+         */trustMinutes: UInt32?) {
+        self.port = port
+        self.mode = mode
+        self.trustMinutes = trustMinutes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension McpConfig: Sendable {}
+#endif
+
+public struct McpStatus: Equatable, Hashable {
+    /**
+     * 这个平台能不能开 MCP 服务（手机为 false）
+     */
+    public var supported: Bool
+    public var running: Bool
+    /**
+     * 例如 http://127.0.0.1:47821/mcp
+     */
+    public var url: String
+    public var port: UInt16
+    public var token: String
+    /**
+     * stdio 桥接读的端点文件
+     */
+    public var endpointFile: String
+    public var mode: AiMode?
+    public var error: String?
+    public var clients: [McpClientInfo]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 这个平台能不能开 MCP 服务（手机为 false）
+         */supported: Bool, running: Bool, 
+        /**
+         * 例如 http://127.0.0.1:47821/mcp
+         */url: String, port: UInt16, token: String, 
+        /**
+         * stdio 桥接读的端点文件
+         */endpointFile: String, mode: AiMode?, error: String?, clients: [McpClientInfo]) {
+        self.supported = supported
+        self.running = running
+        self.url = url
+        self.port = port
+        self.token = token
+        self.endpointFile = endpointFile
+        self.mode = mode
+        self.error = error
+        self.clients = clients
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension McpStatus: Sendable {}
 #endif
 
 public struct PathInfo: Equatable, Hashable {
@@ -2027,6 +2222,34 @@ public protocol ClientListener: AnyObject, Sendable {
     
 }
 
+public protocol ClipReaderProtocol: AnyObject, Sendable {
+    
+    /**
+     * 不读了（取消）。不叫 close：Kotlin 绑定给每个对象自动生成 close() 释放资源，同名会编不过
+     */
+    func cancel() 
+    
+    /**
+     * 读最多 `max` 字节；返回空表示读完了。出错（断线、对方取消）报错。
+     */
+    func read(max: UInt32) throws  -> Data
+    
+    /**
+     * 文件现在的大小（可能和清单里的不同：复制后文件又变了）
+     */
+    func size()  -> UInt64
+    
+}
+
+public protocol ClipSourceProtocol: AnyObject, Sendable {
+    
+    /**
+     * 打开清单第 `index` 项（文件）从 `offset` 读到末尾。会阻塞到主控端应答：在后台线程里调用。
+     */
+    func `open`(index: UInt32, offset: UInt64) throws  -> ClipReader
+    
+}
+
 public protocol ClipboardTransferProtocol: AnyObject, Sendable {
     
     func cancel() 
@@ -2232,6 +2455,12 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
     
     func totpVerify(code: String) async throws 
     
+    /**
+     * 远程升级被控端（设备详情里的「升级被控端」，不用先开远程桌面）：连上对方发请求，对方自己走完整个零交互升级；
+     * 这里接着轮询设备列表，直到它以新版本重新上线（最多 10 分钟）。进度经 listener，立即返回。
+     */
+    func upgradeDevice(deviceId: String, listener: UpgradeListener) 
+    
     func vault()  -> [VaultEntry]
     
     func vaultDelete(id: String) async throws 
@@ -2246,6 +2475,45 @@ public protocol GalaxyClientProtocol: AnyObject, Sendable {
      * 返回代发设备的名字，空字符串表示本机。目标要在主板 / 网卡设置里开启网络唤醒。
      */
     func wakeDevice(deviceId: String) async throws  -> [String]
+    
+    func mcpDecide(clientKey: String, callId: String, decision: ApprovalDecision) 
+    
+    /**
+     * 某个客户端最近的操作记录（界面打开时补齐）。
+     */
+    func mcpHistory(clientKey: String)  -> [AgentMessage]
+    
+    /**
+     * 回应 request_secret：内容直接送到设备，不经过外部智能体。
+     */
+    func mcpProvideSecret(clientKey: String, requestId: String, secret: String) 
+    
+    /**
+     * 换一个新令牌（已配置的外部客户端要更新配置）；服务开着时随即用新令牌重启。
+     */
+    func mcpRegenerateToken() async throws  -> McpStatus
+    
+    /**
+     * 调整档位：立即作用于所有客户端。
+     */
+    func mcpSetMode(mode: AiMode, trustMinutes: UInt32?) 
+    
+    /**
+     * 开启（或按新设置重启）本机 MCP 服务。
+     */
+    func mcpStart(config: McpConfig, listener: McpListener) async throws  -> McpStatus
+    
+    func mcpStatus()  -> McpStatus
+    
+    /**
+     * 关闭服务；正在等批准的步骤一律拒绝，正在跑的命令停止。
+     */
+    func mcpStop() 
+    
+    /**
+     * 停下某个客户端：拒绝它等批准的步骤、停止正在跑的命令（之后的新调用照常）。
+     */
+    func mcpStopClient(clientKey: String) 
     
 }
 
@@ -2304,6 +2572,12 @@ public protocol HostPlatform: AnyObject, Sendable {
     func clipboardGet()  -> ClipboardData?
     
     func clipboardSet(data: ClipboardData) 
+    
+    /**
+     * 复制粘贴文件（docs/protocol.md 8.4.1）：主控端复制的文件清单，延迟放进本机剪贴板，有人粘贴时才用 `source` 按项读。
+     * 清单内核已校验过。成功返回 None，不支持或失败返回原因。支持时在 capabilities 里报 "clipboard_offer"。
+     */
+    func clipboardSetOffer(offer: ClipOfferInfo, source: ClipSource)  -> String?
     
     /**
      * 隐私屏：本机屏幕黑掉、本地键鼠失效，远端照常看到和操作。返回是否做到了（不支持返回 false）。
@@ -2412,6 +2686,20 @@ public protocol HostServiceProtocol: AnyObject, Sendable {
     
 }
 
+public protocol McpListener: AnyObject, Sendable {
+    
+    /**
+     * 服务状态、客户端列表、待批准数变化
+     */
+    func onStatus(status: McpStatus) 
+    
+    /**
+     * 某个客户端的智能体事件：工具卡片、需要批准、输出、结果、请求输入密码等（与 AI 对话的事件相同）
+     */
+    func onEvent(clientKey: String, event: AgentEvent) 
+    
+}
+
 public protocol PeerListener: AnyObject, Sendable {
     
     func onPathChanged(path: PathInfo) 
@@ -2431,6 +2719,13 @@ public protocol PeerSessionProtocol: AnyObject, Sendable {
     func clipboardGet() async throws  -> ClipboardData?
     
     /**
+     * 复制粘贴文件，本机复制 → 远端粘贴（docs/protocol.md 8.4.1）：把本机复制的文件 / 文件夹展开成清单放到被控端剪贴板，
+     * 只发清单，对方粘贴时才经反向流来读（内核自己应答，界面不用管）。被控端能力列表要有 "clipboard_offer"，
+     * 没有时改用 clipboard_push_files。需要剪贴板与文件权限。
+     */
+    func clipboardOfferFiles(localPaths: [String]) async throws  -> ClipOfferInfo
+    
+    /**
      * 复制粘贴文件（远端 → 本机）：把远端剪贴板里的文件（clipboard_get 得到的路径）下载到 `local_dir`。
      * 完成后 ClipboardTransfer.paths() 是本机上的顶层路径，界面把本机剪贴板设成它们。
      */
@@ -2441,6 +2736,12 @@ public protocol PeerSessionProtocol: AnyObject, Sendable {
      * 进度与结果经 listener；超过 4 GB 或 1 万个文件时报错（请改用文件管理）。需要剪贴板与文件权限。
      */
     func clipboardPushFiles(localPaths: [String], listener: TransferListener)  -> ClipboardTransfer
+    
+    /**
+     * 复制粘贴文件，远端复制 → 本机粘贴：把远端剪贴板里的文件（clipboard_get 的 Files）展开成清单，不下载内容。
+     * 本机有人粘贴时用返回对象的 open 按项读（老被控端也行，用的是文件读取）。需要文件权限。
+     */
+    func clipboardRemoteOffer(remotePaths: [String]) async throws  -> RemoteClipOffer
     
     func clipboardSet(data: ClipboardData) async throws 
     
@@ -2504,6 +2805,17 @@ public protocol PortForwardProtocol: AnyObject, Sendable {
     func localPort()  -> UInt16
     
     func stop() 
+    
+}
+
+public protocol RemoteClipOfferProtocol: AnyObject, Sendable {
+    
+    func info()  -> ClipOfferInfo
+    
+    /**
+     * 打开第 `index` 项（文件）从 `offset` 读到末尾。会阻塞到对方应答：在后台线程里调用，不要在主线程。
+     */
+    func `open`(index: UInt32, offset: UInt64) throws  -> ClipReader
     
 }
 
@@ -2629,6 +2941,31 @@ public protocol TransferListener: AnyObject, Sendable {
     
 }
 
+public protocol UpdateRequestHandler: AnyObject, Sendable {
+    
+    func onUpdateRequested(info: UpdateInfo) 
+    
+}
+
+public protocol UpgradeListener: AnyObject, Sendable {
+    
+    /**
+     * 对方开始升级到 `version`（之后会断开、以新版本重新上线）
+     */
+    func onStarted(version: String) 
+    
+    /**
+     * 对方已离线（正在替换、重启）
+     */
+    func onOffline() 
+    
+    /**
+     * 结束：成功时 `version` 是对方现在的版本（已是最新时也走这里，`error` 为空），失败时 `error` 是原因
+     */
+    func onFinished(version: String?, error: String?) 
+    
+}
+
 public protocol VideoSink: AnyObject, Sendable {
     
     func onConfig(codec: VideoCodec, width: UInt32, height: UInt32) 
@@ -2728,6 +3065,22 @@ open class AudioPlayback: AudioPlaybackProtocol, @unchecked Sendable {
     open func stop() { bridgeUnimplemented() }
 }
 
+open class ClipReader: ClipReaderProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func cancel() { bridgeUnimplemented() }
+    open func read(max: UInt32) throws  -> Data { bridgeUnimplemented() }
+    open func size()  -> UInt64 { bridgeUnimplemented() }
+}
+
+open class ClipSource: ClipSourceProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func `open`(index: UInt32, offset: UInt64) throws  -> ClipReader { bridgeUnimplemented() }
+}
+
 open class ClipboardTransfer: ClipboardTransferProtocol, @unchecked Sendable {
     public struct NoHandle { public init() {} }
     public init(noHandle: NoHandle) {}
@@ -2815,10 +3168,20 @@ open class GalaxyClient: GalaxyClientProtocol, @unchecked Sendable {
     open func totpDisable(code: String) async throws { bridgeUnimplemented() }
     open func totpSetup() async throws  -> TotpSetup { bridgeUnimplemented() }
     open func totpVerify(code: String) async throws { bridgeUnimplemented() }
+    open func upgradeDevice(deviceId: String, listener: UpgradeListener) { bridgeUnimplemented() }
     open func vault()  -> [VaultEntry] { bridgeUnimplemented() }
     open func vaultDelete(id: String) async throws { bridgeUnimplemented() }
     open func vaultSave(entry: VaultEntry) async throws  -> VaultEntry { bridgeUnimplemented() }
     open func wakeDevice(deviceId: String) async throws  -> [String] { bridgeUnimplemented() }
+    open func mcpDecide(clientKey: String, callId: String, decision: ApprovalDecision) { bridgeUnimplemented() }
+    open func mcpHistory(clientKey: String)  -> [AgentMessage] { bridgeUnimplemented() }
+    open func mcpProvideSecret(clientKey: String, requestId: String, secret: String) { bridgeUnimplemented() }
+    open func mcpRegenerateToken() async throws  -> McpStatus { bridgeUnimplemented() }
+    open func mcpSetMode(mode: AiMode, trustMinutes: UInt32?) { bridgeUnimplemented() }
+    open func mcpStart(config: McpConfig, listener: McpListener) async throws  -> McpStatus { bridgeUnimplemented() }
+    open func mcpStatus()  -> McpStatus { bridgeUnimplemented() }
+    open func mcpStop() { bridgeUnimplemented() }
+    open func mcpStopClient(clientKey: String) { bridgeUnimplemented() }
 }
 
 open class HostService: HostServiceProtocol, @unchecked Sendable {
@@ -2851,8 +3214,10 @@ open class PeerSession: PeerSessionProtocol, @unchecked Sendable {
     required public init(unsafeFromHandle handle: UInt64) {}
     open func addVirtualDisplay(width: UInt32, height: UInt32, refresh: UInt32) async throws  -> DisplayInfo { bridgeUnimplemented() }
     open func clipboardGet() async throws  -> ClipboardData? { bridgeUnimplemented() }
+    open func clipboardOfferFiles(localPaths: [String]) async throws  -> ClipOfferInfo { bridgeUnimplemented() }
     open func clipboardPullFiles(remotePaths: [String], localDir: String, listener: TransferListener)  -> ClipboardTransfer { bridgeUnimplemented() }
     open func clipboardPushFiles(localPaths: [String], listener: TransferListener)  -> ClipboardTransfer { bridgeUnimplemented() }
+    open func clipboardRemoteOffer(remotePaths: [String]) async throws  -> RemoteClipOffer { bridgeUnimplemented() }
     open func clipboardSet(data: ClipboardData) async throws { bridgeUnimplemented() }
     open func disconnect() { bridgeUnimplemented() }
     open func exec(request: ExecRequest) async throws  -> ExecResult { bridgeUnimplemented() }
@@ -2881,6 +3246,14 @@ open class PortForward: PortForwardProtocol, @unchecked Sendable {
     required public init(unsafeFromHandle handle: UInt64) {}
     open func localPort()  -> UInt16 { bridgeUnimplemented() }
     open func stop() { bridgeUnimplemented() }
+}
+
+open class RemoteClipOffer: RemoteClipOfferProtocol, @unchecked Sendable {
+    public struct NoHandle { public init() {} }
+    public init(noHandle: NoHandle) {}
+    required public init(unsafeFromHandle handle: UInt64) {}
+    open func info()  -> ClipOfferInfo { bridgeUnimplemented() }
+    open func `open`(index: UInt32, offset: UInt64) throws  -> ClipReader { bridgeUnimplemented() }
 }
 
 open class SshSession: SshSessionProtocol, @unchecked Sendable {
