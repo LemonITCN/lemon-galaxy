@@ -1,10 +1,12 @@
 package cn.lemonit.galaxy
 
 import cn.lemonit.galaxy.app.AccountController
+import cn.lemonit.galaxy.app.DeviceUpgrade
 import cn.lemonit.galaxy.app.HostItem
 import cn.lemonit.galaxy.app.HostTree
 import cn.lemonit.galaxy.app.HostsData
 import cn.lemonit.galaxy.app.RdpLinks
+import cn.lemonit.galaxy.app.RemoteUpgrade
 import cn.lemonit.galaxy.core.bridge.RdpTarget
 import cn.lemonit.galaxy.core.bridge.FileKind
 import cn.lemonit.galaxy.core.bridge.InputEvent
@@ -94,6 +96,42 @@ class LogicTest {
         assertTrue(HostTree.rows(data, favoritesOnly = true).all { it.item!!.favorite })
         // 移动文件夹时不能移进自己或子孙
         assertEquals(setOf(MockData.F_PROD, MockData.F_DB), HostTree.descendants(data, MockData.F_PROD))
+    }
+
+    @Test
+    fun remoteUpgradeOnlyForControllableDevicesWithNewVersion() {
+        val all = MockData.devices().associateBy { it.id }
+        fun d(id: String) = all.getValue(id)
+        // worker 与 macOS 客户端（带本机被控）可升级
+        assertTrue(RemoteUpgrade.available(d(MockData.DEV_WEB_01)))
+        assertTrue(RemoteUpgrade.available(d(MockData.DEV_BUILD_MAC)))
+        // Windows 客户端不被控：服务器报了新版本也不算
+        assertFalse(RemoteUpgrade.controllable(d(MockData.DEV_OFFICE_PC)))
+        assertFalse(RemoteUpgrade.available(d(MockData.DEV_OFFICE_PC)))
+        // 本机（手机）不算；没有新版本的不标
+        assertFalse(RemoteUpgrade.controllable(d(MockData.DEV_SELF)))
+        assertFalse(RemoteUpgrade.controllable(d(MockData.DEV_SELF).copy(kind = cn.lemonit.galaxy.core.bridge.DeviceKind.WORKER)))
+        assertFalse(RemoteUpgrade.available(d(MockData.DEV_DB_01)))
+        assertTrue(RemoteUpgrade.controllable(d(MockData.DEV_MACBOOK)))
+        assertFalse(RemoteUpgrade.available(d(MockData.DEV_MACBOOK)))
+        // 离线时列表照样标，但按钮不可点
+        val render = d(MockData.DEV_RENDER)
+        assertTrue(RemoteUpgrade.available(render))
+        assertFalse(RemoteUpgrade.canStart(render, null))
+        // 在线：可点；进行中不可点；失败后（即使服务器已不报新版本）可重试
+        val web = d(MockData.DEV_WEB_01)
+        assertTrue(RemoteUpgrade.canStart(web, null))
+        assertFalse(RemoteUpgrade.canStart(web, DeviceUpgrade.Requesting("0.1.1")))
+        assertFalse(RemoteUpgrade.canStart(web, DeviceUpgrade.Installing("0.1.1")))
+        assertFalse(RemoteUpgrade.canStart(web, DeviceUpgrade.Restarting("0.1.1")))
+        assertTrue(RemoteUpgrade.canStart(web.copy(updateVersion = ""), DeviceUpgrade.Failed("x")))
+        assertFalse(RemoteUpgrade.canStart(web.copy(updateVersion = ""), DeviceUpgrade.Done("0.1.1", false)))
+        // 升级完成后服务器又报了更新的版本：详情按「有新版本」显示；已是最新的结果照常显示
+        val done = DeviceUpgrade.Done("0.1.1", alreadyLatest = false)
+        assertEquals(done, done.shownFor(web.copy(appVersion = "0.1.1", updateVersion = "")))
+        assertEquals(null, done.shownFor(web.copy(appVersion = "0.1.1", updateVersion = "0.1.2")))
+        val latest = DeviceUpgrade.Done("0.1.0", alreadyLatest = true)
+        assertEquals(latest, latest.shownFor(web))
     }
 
     @Test

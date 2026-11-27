@@ -7,6 +7,7 @@ import cn.lemonit.galaxy.core.bridge.DeviceKind
 import cn.lemonit.galaxy.core.bridge.GalaxyCore
 import cn.lemonit.galaxy.core.bridge.GalaxyException
 import cn.lemonit.galaxy.core.bridge.Platform
+import cn.lemonit.galaxy.core.bridge.UpgradeListener
 import cn.lemonit.galaxy.core.platform.MemorySecureStore
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -19,6 +20,8 @@ import org.junit.BeforeClass
 import org.junit.Test
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * 真内核适配层冒烟测试：在主机 JVM 上通过 JNA 加载主机版 galaxy_ffi（与安卓 .so 同源），
@@ -91,5 +94,31 @@ class UniffiCoreSmokeTest {
         assertFalse(client.canWake("00112233445566778899aabbccddeeff"))
         val e = runCatching { withTimeout(10_000) { client.wakeDevice("00112233445566778899aabbccddeeff") } }.exceptionOrNull()
         assertTrue("应抛 GalaxyException，实际 $e", e is GalaxyException)
+    }
+
+    @Test
+    fun upgradeDeviceCallbackWithoutServer() {
+        assumeTrue("主机版 galaxy_ffi 不可用，跳过", core != null)
+        val client = newClient()
+        // 没登录：立即返回，经监听器以失败结束（验证回调接口经 JNA 接通）
+        val done = CountDownLatch(1)
+        var started = false
+        var result: Pair<String?, String?>? = null
+        client.upgradeDevice("00112233445566778899aabbccddeeff", object : UpgradeListener {
+            override fun onStarted(version: String) {
+                started = true
+            }
+
+            override fun onOffline() = Unit
+
+            override fun onFinished(version: String?, error: String?) {
+                result = version to error
+                done.countDown()
+            }
+        })
+        assertTrue("20 秒内没有回调 onFinished", done.await(20, TimeUnit.SECONDS))
+        assertFalse(started)
+        assertNull(result!!.first)
+        assertTrue("应带失败原因，实际 $result", !result!!.second.isNullOrBlank())
     }
 }

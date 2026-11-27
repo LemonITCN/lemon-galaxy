@@ -85,6 +85,12 @@ interface GalaxyClientInterface {
     /** 下载新版本到本地文件并核对 SHA-256，进度与结果经 [listener]。 */
     fun downloadUpdate(info: UpdateInfo, dest: String, listener: TransferListener)
 
+    /**
+     * 远程升级被控端（ffi.md 5.0）：立即返回。内核连上对方发请求，对方自己走完整个零交互升级，
+     * 内核接着轮询设备列表直到它以新版本重新上线（最多 10 分钟），进度经 [listener]。
+     */
+    fun upgradeDevice(deviceId: String, listener: UpgradeListener)
+
     suspend fun aiModels(): AiModels
 
     /** 新建对话；targets 可以为空（聊天式，设备用到时才连接）。 */
@@ -106,6 +112,18 @@ interface ClientListener {
     fun onDevicesChanged()
     fun onVaultChanged()
     fun onSessionRevoked()
+}
+
+/** [GalaxyClientInterface.upgradeDevice] 的进度。内核线程回调，界面自己切回主线程。 */
+interface UpgradeListener {
+    /** 对方开始升级到 [version]（之后会断开、以新版本重新上线）。 */
+    fun onStarted(version: String)
+
+    /** 对方已离线（正在替换、重启）。 */
+    fun onOffline()
+
+    /** 结束：成功时 [version] 是对方现在的版本（本来就是最新也走这里，[error] 为空）；失败时 [error] 是原因。 */
+    fun onFinished(version: String?, error: String?)
 }
 
 // ---------- 3. PeerSession ----------

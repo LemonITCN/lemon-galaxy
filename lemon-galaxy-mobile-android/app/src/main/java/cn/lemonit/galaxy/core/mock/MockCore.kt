@@ -25,6 +25,7 @@ import cn.lemonit.galaxy.core.bridge.PeerSessionInterface
 import cn.lemonit.galaxy.core.bridge.RdpTarget
 import cn.lemonit.galaxy.core.bridge.TransferListener
 import cn.lemonit.galaxy.core.bridge.UpdateInfo
+import cn.lemonit.galaxy.core.bridge.UpgradeListener
 import cn.lemonit.galaxy.core.bridge.Platform
 import cn.lemonit.galaxy.core.bridge.RiskLevel
 import cn.lemonit.galaxy.core.bridge.SecretPrompt
@@ -344,6 +345,44 @@ internal class MockClient(
         }
     }
 
+    private fun updateDevice(deviceId: String, block: (DeviceInfo) -> DeviceInfo) {
+        devices = devices.map { if (it.id == deviceId) block(it) else it }
+        listener.onDevicesChanged()
+    }
+
+    /**
+     * 模拟远程升级被控端，节奏同真内核：连上对方、对方回复要升级到的版本 → 对方断开（替换、重启）→ 以新版本重新上线。
+     * 对方本来就是最新时直接报完成；离线、本机、手机报错。
+     */
+    override fun upgradeDevice(deviceId: String, listener: UpgradeListener) {
+        scope.launch {
+            delay(UPGRADE_REQUEST_MS)
+            val d = devices.firstOrNull { it.id == deviceId }
+            val error = when {
+                d == null -> tr("找不到这台设备", "Device not found")
+                d.isSelf || d.kind == cn.lemonit.galaxy.core.bridge.DeviceKind.MOBILE -> tr("这台设备不能被控", "This device cannot be controlled")
+                !d.online -> tr("设备离线", "Device is offline")
+                else -> null
+            }
+            if (d == null || error != null) {
+                listener.onFinished(null, error)
+                return@launch
+            }
+            val target = d.updateVersion
+            if (target.isEmpty()) {
+                listener.onFinished(d.appVersion, null)
+                return@launch
+            }
+            listener.onStarted(target)
+            delay(UPGRADE_INSTALL_MS)
+            updateDevice(deviceId) { it.copy(online = false, lanSeen = false, lastSeenAt = System.currentTimeMillis()) }
+            listener.onOffline()
+            delay(UPGRADE_RESTART_MS)
+            updateDevice(deviceId) { it.copy(online = true, lanSeen = d.lanSeen, appVersion = target, updateVersion = "", lastSeenAt = System.currentTimeMillis()) }
+            listener.onFinished(target, null)
+        }
+    }
+
     /**
      * 模拟账号：用户名以 noai 开头 = 账号没开通 AI；以 nomodel 开头 = 开通了 AI 但没有可用模型
      * （用来看 ai-chat-ui.md 第 5 节的提示）。
@@ -492,6 +531,10 @@ internal class MockClient(
         private const val SESSION_KEY = "mock.session"
         /** 远程开机后多久「开机完成」上线 */
         const val WAKE_ONLINE_DELAY_MS = 8_000L
+        /** 远程升级：连上对方并收到回复、对方下载安装后断开、替换重启后重新上线 */
+        const val UPGRADE_REQUEST_MS = 800L
+        const val UPGRADE_INSTALL_MS = 2_500L
+        const val UPGRADE_RESTART_MS = 3_500L
         val SERVER_RE = Regex("^[A-Za-z0-9.\\-\\[\\]:]+:\\d{1,5}#sha256-[A-Za-z0-9+/_=\\-]{8,}$")
     }
 }

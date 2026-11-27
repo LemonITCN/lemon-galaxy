@@ -586,4 +586,18 @@
     <string name="update_unknown_title">Allow app installs</string>
     <string name="update_unknown_body">Android has not allowed LemonGalaxy to install apps yet. Turn on “Allow from this source” on the next screen, then come back and tap Install.</string>
     <string name="update_unknown_settings">Open settings</string>
+    <!-- 远程升级被控端 -->
+    <string name="upgrade_badge">New version</string>
+    <string name="upgrade_badge_running">Upgrading</string>
+    <string name="upgrade_action">Upgrade</string>
+    <string name="upgrade_new_version">New version %1$s</string>
+    <string name="upgrade_requesting">Requesting upgrade</string>
+    <string name="upgrade_installing">Upgrading to %1$s</string>
+    <string name="upgrade_installing_detail">Downloading and installing on the device</string>
+    <string name="upgrade_restarting_detail">Disconnected, replacing files and restarting</string>
+    <string name="upgrade_done">Upgraded to %1$s</string>
+    <string name="upgrade_done_detail">Back online</string>
+    <string name="upgrade_done_plain">Upgraded</string>
+    <string name="upgrade_latest">Already up to date</string>
+    <string name="upgrade_failed">Upgrade failed</string>
 </resources>

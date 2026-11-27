@@ -50,6 +50,7 @@ import cn.lemonit.galaxy.core.bridge.TotpSetup
 import cn.lemonit.galaxy.core.bridge.TransferInterface
 import cn.lemonit.galaxy.core.bridge.TransferListener
 import cn.lemonit.galaxy.core.bridge.UpdateInfo
+import cn.lemonit.galaxy.core.bridge.UpgradeListener
 import cn.lemonit.galaxy.core.bridge.UserInfo
 import cn.lemonit.galaxy.core.bridge.VaultEntry
 import cn.lemonit.galaxy.core.bridge.VideoSink
@@ -73,6 +74,7 @@ import uniffi.galaxy_ffi.TerminalChannel as FTerminalChannel
 import uniffi.galaxy_ffi.TerminalSink as FTerminalSink
 import uniffi.galaxy_ffi.Transfer as FTransfer
 import uniffi.galaxy_ffi.TransferListener as FTransferListener
+import uniffi.galaxy_ffi.UpgradeListener as FUpgradeListener
 import uniffi.galaxy_ffi.VideoCodec as FVideoCodec
 import uniffi.galaxy_ffi.VideoSink as FVideoSink
 
@@ -170,6 +172,16 @@ internal class UniffiClient(private val c: FGalaxyClient) : GalaxyClientInterfac
             object : FTransferListener {
                 override fun onProgress(done: ULong, total: ULong) = listener.onProgress(done, total)
                 override fun onFinished(error: String?) = listener.onFinished(error)
+            },
+        )
+
+    override fun upgradeDevice(deviceId: String, listener: UpgradeListener) =
+        c.upgradeDevice(
+            deviceId,
+            object : FUpgradeListener {
+                override fun onStarted(version: String) = listener.onStarted(version)
+                override fun onOffline() = listener.onOffline()
+                override fun onFinished(version: String?, error: String?) = listener.onFinished(version, error)
             },
         )
 

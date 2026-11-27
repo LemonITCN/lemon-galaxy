@@ -102,6 +102,8 @@ fun openHostAction(container: AppContainer, nav: Navigator, item: HostItem, acti
         }
         HostAction.FAVORITE -> container.hosts.toggleFavorite(item)
         HostAction.WAKE -> (item as? HostItem.Device)?.let { d -> container.appContext?.resources?.let { wakeDevice(container, d.device.id, it) } }
+        // 远程升级被控端：不再确认，直接开始；进度在设备详情与列表里
+        HostAction.UPGRADE -> (item as? HostItem.Device)?.let { container.upgrades.upgrade(it.device) }
         HostAction.MOVE, HostAction.DELETE -> Unit
     }
 }
@@ -125,6 +127,7 @@ fun HostsTab(container: AppContainer, nav: Navigator) {
     val context = LocalContext.current
     val data by container.hosts.data.collectAsState()
     val refreshing by container.hosts.refreshing.collectAsState()
+    val upgrades by container.upgrades.states.collectAsState()
     var filter by remember { mutableStateOf(HostsFilter()) }
     var sheetItem by remember { mutableStateOf<HostItem?>(null) }
     var moveItem by remember { mutableStateOf<HostItem?>(null) }
@@ -153,6 +156,7 @@ fun HostsTab(container: AppContainer, nav: Navigator) {
         filter = filter,
         refreshing = refreshing,
         selectedKey = selectedKey,
+        upgrades = upgrades,
         actions = object : HostsActions {
             override fun onFilter(f: HostsFilter) {
                 filter = f
@@ -189,14 +193,18 @@ fun HostsTab(container: AppContainer, nav: Navigator) {
         },
     )
 
-    sheetItem?.let { item ->
+    sheetItem?.let { picked ->
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         val liveVia by container.connections.sshVia.collectAsState()
+        // 设备按最新列表显示（远程升级时在线状态与版本号会变）
+        val item = (picked as? HostItem.Device)?.let { d -> data.device(d.device.id)?.let { HostItem.Device(it, data.metaFor(it.id)) } } ?: picked
         val via = (item as? HostItem.Ssh)?.let { sshViaText(data, it.host, liveVia[it.entry.id]) }
         ModalBottomSheet(onDismissRequest = { sheetItem = null }, sheetState = sheetState) {
             val canWake = item is HostItem.Device && data.canWake(item.device.id)
-            HostActionsContent(item, sshVia = via, sshConnected = item is HostItem.Ssh && item.entry.id in liveVia, canWake = canWake, onAction = { a ->
-                sheetItem = null
+            val upgrade = (item as? HostItem.Device)?.let { upgrades[it.device.id] }
+            HostActionsContent(item, sshVia = via, sshConnected = item is HostItem.Ssh && item.entry.id in liveVia, canWake = canWake, upgrade = upgrade, onAction = { a ->
+                // 升级就地显示进度，面板不关
+                if (a != HostAction.UPGRADE) sheetItem = null
                 when (a) {
                     HostAction.MOVE -> moveItem = item
                     HostAction.DELETE -> deleteItem = item

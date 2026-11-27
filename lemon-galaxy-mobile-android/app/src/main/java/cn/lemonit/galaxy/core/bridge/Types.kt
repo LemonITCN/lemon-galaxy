@@ -70,6 +70,8 @@ data class DeviceInfo(
     val lanSeen: Boolean,
     val lastSeenAt: Long,
     val isSelf: Boolean,
+    /** 服务器上有比 [appVersion] 新的版本时是那个版本号（列表标「可升级」、详情里「升级被控端」），否则为空。 */
+    val updateVersion: String = "",
 )
 
 // ---------- 2.1 加密库条目 ----------

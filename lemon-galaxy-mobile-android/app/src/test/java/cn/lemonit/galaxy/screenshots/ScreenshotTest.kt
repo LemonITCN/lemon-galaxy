@@ -25,6 +25,12 @@ import androidx.compose.ui.test.onRoot
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import cn.lemonit.galaxy.app.AppContainer
+import cn.lemonit.galaxy.app.DeviceUpgrade
+import cn.lemonit.galaxy.core.bridge.DeviceInfo
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.onNodeWithText
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import cn.lemonit.galaxy.app.ChatItem
 import cn.lemonit.galaxy.app.EntryKind
 import cn.lemonit.galaxy.app.HostItem
@@ -281,6 +287,75 @@ class ScreenshotTest {
 
     @Test @Config(qualifiers = PHONE_EN)
     fun hostSheetSshEnDark() = sshSheet(true)
+
+    // ---------------- 远程升级被控端 ----------------
+
+    private fun upgradeSheet(dark: Boolean, deviceId: String, name: String, state: DeviceUpgrade?, edit: (DeviceInfo) -> DeviceInfo = { it }) = shot(name, dark) {
+        val base = HostTree.items(Fixtures.hosts).first { it is HostItem.Device && it.device.id == deviceId } as HostItem.Device
+        val item = base.copy(device = edit(base.device))
+        Surface(color = MaterialTheme.colorScheme.surfaceContainerLow) {
+            HostActionsContent(item, onAction = {}, canWake = Fixtures.hosts.canWake(deviceId), upgrade = state)
+        }
+    }
+
+    private val upgradeOffline: (DeviceInfo) -> DeviceInfo = { it.copy(online = false, lanSeen = false, lastSeenAt = MockData.NOW - 60_000) }
+    private val upgraded: (DeviceInfo) -> DeviceInfo = { it.copy(appVersion = MockData.UPGRADE_TO, updateVersion = "") }
+
+    /** 有新版本：当前版本、新版本与「升级被控端」 */
+    @Test fun hostSheetUpgradeZhLight() = upgradeSheet(false, MockData.DEV_WEB_01, "host_sheet_upgrade", null)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun hostSheetUpgradeEnDark() = upgradeSheet(true, MockData.DEV_BUILD_MAC, "host_sheet_upgrade", null)
+
+    /** 点了之后：对方正在下载安装 */
+    @Test fun hostSheetUpgradeInstallingZhDark() = upgradeSheet(true, MockData.DEV_WEB_01, "host_sheet_upgrade_installing", DeviceUpgrade.Installing(MockData.UPGRADE_TO))
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun hostSheetUpgradeInstallingEnLight() = upgradeSheet(false, MockData.DEV_WEB_01, "host_sheet_upgrade_installing", DeviceUpgrade.Installing(MockData.UPGRADE_TO))
+
+    /** 对方已断开、正在替换重启（设备此时显示离线） */
+    @Test fun hostSheetUpgradeRestartingZhLight() =
+        upgradeSheet(false, MockData.DEV_WEB_01, "host_sheet_upgrade_restarting", DeviceUpgrade.Restarting(MockData.UPGRADE_TO), upgradeOffline)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun hostSheetUpgradeRestartingEnDark() =
+        upgradeSheet(true, MockData.DEV_WEB_01, "host_sheet_upgrade_restarting", DeviceUpgrade.Restarting(MockData.UPGRADE_TO), upgradeOffline)
+
+    /** 以新版本重新上线 */
+    @Test fun hostSheetUpgradeDoneZhLight() =
+        upgradeSheet(false, MockData.DEV_WEB_01, "host_sheet_upgrade_done", DeviceUpgrade.Done(MockData.UPGRADE_TO, alreadyLatest = false), upgraded)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun hostSheetUpgradeDoneEnDark() =
+        upgradeSheet(true, MockData.DEV_WEB_01, "host_sheet_upgrade_done", DeviceUpgrade.Done(MockData.UPGRADE_TO, alreadyLatest = false), upgraded)
+
+    /** 失败：显示原因，按钮变「重试」 */
+    private fun upgradeFailed(dark: Boolean) = upgradeSheet(
+        dark, MockData.DEV_BUILD_MAC, "host_sheet_upgrade_failed",
+        DeviceUpgrade.Failed(
+            if (zh) "10 分钟内没有以新版本 ${MockData.UPGRADE_TO} 重新上线（现在 0.1.0，离线）"
+            else "Did not come back online with ${MockData.UPGRADE_TO} within 10 minutes (now 0.1.0, offline)",
+        ),
+    )
+
+    @Test fun hostSheetUpgradeFailedZhDark() = upgradeFailed(true)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun hostSheetUpgradeFailedEnLight() = upgradeFailed(false)
+
+    /** 有新版本但设备离线：按钮不可用（离线设备照常有远程开机） */
+    @Test fun hostSheetUpgradeOfflineZhLight() = upgradeSheet(false, MockData.DEV_RENDER, "host_sheet_upgrade_offline", null)
+
+    /** 列表：web-01 正在升级（离线中）标「升级中」，其余有新版本的标「可升级」 */
+    private fun hostsUpgrading(dark: Boolean) = shot("hosts_upgrading", dark) {
+        val data = Fixtures.hosts.copy(devices = Fixtures.hosts.devices.map { if (it.id == MockData.DEV_WEB_01) upgradeOffline(it) else it })
+        HostsScreen(data, HostsFilter(), refreshing = false, actions = noHostsActions, upgrades = mapOf(MockData.DEV_WEB_01 to DeviceUpgrade.Restarting(MockData.UPGRADE_TO)))
+    }
+
+    @Test fun hostsUpgradingZhLight() = hostsUpgrading(false)
+
+    @Test @Config(qualifiers = PHONE_EN)
+    fun hostsUpgradingEnDark() = hostsUpgrading(true)
 
     private fun hostKey(dark: Boolean, changed: Boolean) = shotScreen(if (changed) "ssh_host_key_changed" else "ssh_host_key", dark) {
         HostKeyDialog("10.0.2.15", 22, "ssh-ed25519", "SHA256:3EDwKv5fv67WpFIHRKfVmkbbTSnNckJjoNmrY5SyKAM", changed, onTrust = {}, onReject = {})
@@ -881,6 +956,54 @@ class ScreenshotTest {
         val c = appContainer(true)
         val nav = Navigator(Tab.SETTINGS)
         app("app_settings", true, c, nav, settle = 600)
+    }
+
+    /**
+     * 真实 AppContainer + 模拟内核走一遍远程升级：点设备打开详情 → 点「升级被控端」（不再确认），
+     * 面板不关、就地显示进度；对方以新版本重新上线后列表刷新（版本号变了、不再标「可升级」）。
+     */
+    @OptIn(ExperimentalRoborazziApi::class)
+    @Test
+    fun appHostUpgradeZhLight() {
+        val c = appContainer(false)
+        val nav = Navigator(Tab.HOSTS)
+        val id = MockData.DEV_WEB_01
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            GalaxyTheme(mode = ThemeMode.LIGHT) {
+                Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) { MainRoute(c, remember { nav }) }
+            }
+        }
+        compose.mainClock.advanceTimeBy(500)
+        // 点按要跟着时钟走：点的时候打开自动推进，等面板弹出；点完升级立刻停住（之后有转圈，等不到空闲）
+        compose.mainClock.autoAdvance = true
+        compose.onNodeWithText("web-01 (nginx)").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag("upgrade_button").assertIsEnabled().performClick()
+        compose.mainClock.autoAdvance = false
+
+        fun settle(ms: Long, until: () -> Boolean) {
+            val end = System.currentTimeMillis() + ms
+            while (System.currentTimeMillis() < end && !until()) {
+                pump(60)
+                compose.mainClock.advanceTimeBy(100)
+            }
+            pump(60)
+            compose.mainClock.advanceTimeBy(400)
+        }
+
+        settle(5_000) { c.upgrades.state(id) is DeviceUpgrade.Installing }
+        assertTrue("应在升级中，实际 ${c.upgrades.state(id)}", c.upgrades.state(id) is DeviceUpgrade.Installing)
+        // 面板没关，进度就地显示
+        compose.onNodeWithTag("upgrade_card").assertExists()
+        captureScreenRoboImage(fileFor("app_host_upgrade_installing", false))
+
+        settle(15_000) { c.upgrades.state(id) is DeviceUpgrade.Done && c.hosts.data.value.device(id)?.appVersion == MockData.UPGRADE_TO }
+        assertEquals(DeviceUpgrade.Done(MockData.UPGRADE_TO, alreadyLatest = false), c.upgrades.state(id))
+        assertEquals(MockData.UPGRADE_TO, c.hosts.data.value.device(id)?.appVersion)
+        assertEquals("", c.hosts.data.value.device(id)?.updateVersion)
+        compose.onNodeWithTag("upgrade_card").assertExists()
+        captureScreenRoboImage(fileFor("app_host_upgrade_done", false))
     }
 
     @Test @Config(qualifiers = TABLET_EN)

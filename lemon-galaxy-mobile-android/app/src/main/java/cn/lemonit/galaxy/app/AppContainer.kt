@@ -55,6 +55,7 @@ class AppContainer(
                 rdp.closeAll()
                 connections.disconnectAll()
                 terminals.closeAll()
+                upgrades.clear()
                 account.onSessionRevoked()
                 appContext?.getString(cn.lemonit.galaxy.R.string.session_revoked)?.let(::toast)
             }
@@ -64,6 +65,8 @@ class AppContainer(
     val client: GalaxyClientInterface = core.newGalaxyClient(store, listener)
     val account = AccountController(client, settings, scope)
     val hosts = HostsController(client, scope, ::toast)
+    /** 远程升级被控端：完成后刷新设备列表（新版本号、可升级标记）。 */
+    val upgrades = DeviceUpgradeController(client, scope, afterFinish = { hosts.refresh() })
     val connections = ConnectionManager(client, prompts)
     val terminals = TerminalController(scope, connections, appContext) { hosts.data.value.targetName(it) }
     val transfers = TransferManager(appContext, scope, connections)
@@ -93,6 +96,7 @@ class AppContainer(
         rdp.closeAll()
         terminals.closeAll()
         connections.disconnectAll()
+        upgrades.clear()
         account.logout()
     }
 

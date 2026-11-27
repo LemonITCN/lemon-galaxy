@@ -19,6 +19,7 @@ import cn.lemonit.galaxy.core.bridge.SecretPrompt
 import cn.lemonit.galaxy.core.bridge.TerminalOptions
 import cn.lemonit.galaxy.core.bridge.TerminalSink
 import cn.lemonit.galaxy.core.bridge.TransferListener
+import cn.lemonit.galaxy.core.bridge.UpgradeListener
 import cn.lemonit.galaxy.core.bridge.VaultData
 import cn.lemonit.galaxy.core.bridge.VaultEntry
 import cn.lemonit.galaxy.core.mock.MockAudioPlayback
@@ -349,6 +350,58 @@ class MockCoreTest {
     }
 
     @Volatile private var updateError: String? = null
+
+    /** 记下远程升级的回调顺序。 */
+    private class UpgradeRecorder : UpgradeListener {
+        val events = CopyOnWriteArrayList<String>()
+        val done = CountDownLatch(1)
+
+        override fun onStarted(version: String) {
+            events.add("started:$version")
+        }
+
+        override fun onOffline() {
+            events.add("offline")
+        }
+
+        override fun onFinished(version: String?, error: String?) {
+            events.add(if (error != null) "failed" else "finished:$version")
+            done.countDown()
+        }
+    }
+
+    @Test
+    fun upgradeDeviceGoesOfflineAndComesBackWithNewVersion() = runBlocking<Unit> {
+        client.login(server, "alice", "pw", null)
+        val before = client.devices().first { it.id == MockData.DEV_WEB_01 }
+        assertEquals(MockData.UPGRADE_TO, before.updateVersion)
+        val r = UpgradeRecorder()
+        client.upgradeDevice(MockData.DEV_WEB_01, r)
+        // 升级途中设备掉线
+        waitFor(10_000) { "offline" in r.events }
+        assertFalse(client.devices().first { it.id == MockData.DEV_WEB_01 }.online)
+        assertTrue(r.done.await(15, TimeUnit.SECONDS))
+        assertEquals(listOf("started:${MockData.UPGRADE_TO}", "offline", "finished:${MockData.UPGRADE_TO}"), r.events.toList())
+        val after = client.devices().first { it.id == MockData.DEV_WEB_01 }
+        assertTrue(after.online)
+        assertEquals(MockData.UPGRADE_TO, after.appVersion)
+        assertEquals("", after.updateVersion)
+    }
+
+    @Test
+    fun upgradeDeviceAlreadyLatestOrOfflineEndsRightAway() = runBlocking<Unit> {
+        client.login(server, "alice", "pw", null)
+        // 本来就是最新：直接完成，带现在的版本，不经过开始与掉线
+        val latest = UpgradeRecorder()
+        client.upgradeDevice(MockData.DEV_MACBOOK, latest)
+        assertTrue(latest.done.await(5, TimeUnit.SECONDS))
+        assertEquals(listOf("finished:0.1.0"), latest.events.toList())
+        // 离线设备：以原因结束
+        val offline = UpgradeRecorder()
+        client.upgradeDevice(MockData.DEV_RENDER, offline)
+        assertTrue(offline.done.await(5, TimeUnit.SECONDS))
+        assertEquals(listOf("failed"), offline.events.toList())
+    }
 
     @Test
     fun sshRejectingHostKeyCancels() = runBlocking<Unit> {

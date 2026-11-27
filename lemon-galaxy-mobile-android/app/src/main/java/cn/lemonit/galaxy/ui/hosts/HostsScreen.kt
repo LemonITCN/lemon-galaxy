@@ -64,6 +64,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.lemonit.galaxy.R
+import cn.lemonit.galaxy.app.DeviceUpgrade
 import cn.lemonit.galaxy.app.HostItem
 import cn.lemonit.galaxy.app.HostTree
 import cn.lemonit.galaxy.app.HostsData
@@ -116,6 +117,7 @@ fun HostsScreen(
     actions: HostsActions,
     modifier: Modifier = Modifier,
     selectedKey: String? = null,
+    upgrades: Map<String, DeviceUpgrade> = emptyMap(),
 ) {
     Scaffold(
         modifier = modifier,
@@ -151,7 +153,7 @@ fun HostsScreen(
                 }
             }
             when (filter.subTab) {
-                HostsSubTab.HOSTS -> HostsList(data, filter, actions, selectedKey)
+                HostsSubTab.HOSTS -> HostsList(data, filter, actions, selectedKey, upgrades)
                 HostsSubTab.CREDENTIALS -> SimpleEntryList(
                     data.credentials.filter { matches(it, filter.query) }, Icons.Rounded.Key,
                     { (it.data as VaultData.Credential).label }, { (it.data as VaultData.Credential).username },
@@ -228,7 +230,7 @@ fun SearchField(value: String, onChange: (String) -> Unit, placeholder: String, 
 }
 
 @Composable
-private fun HostsList(data: HostsData, filter: HostsFilter, actions: HostsActions, selectedKey: String?) {
+private fun HostsList(data: HostsData, filter: HostsFilter, actions: HostsActions, selectedKey: String?, upgrades: Map<String, DeviceUpgrade>) {
     val rows = HostTree.rows(data, filter.query, filter.tag, filter.favoritesOnly)
     val tags = HostTree.allTags(data)
     LazyColumn(Modifier.fillMaxSize()) {
@@ -269,7 +271,8 @@ private fun HostsList(data: HostsData, filter: HostsFilter, actions: HostsAction
             if (row.folder != null) {
                 FolderRow(row, actions)
             } else {
-                ItemRow(row.item!!, row.depth, row.path, selected = row.key == selectedKey) { actions.onItem(row.item) }
+                val item = row.item!!
+                ItemRow(item, row.depth, row.path, selected = row.key == selectedKey, upgrade = (item as? HostItem.Device)?.let { upgrades[it.device.id] }) { actions.onItem(item) }
             }
         }
         item("bottom") { Spacer(Modifier.height(24.dp)) }
@@ -320,10 +323,13 @@ private fun FolderRow(row: TreeRow, actions: HostsActions) {
     }
 }
 
-/** 条目行（设备、SSH、RDP）。长按与点按一样弹出操作面板（离线设备在面板里远程开机）。 */
+/**
+ * 条目行（设备、SSH、RDP）。长按与点按一样弹出操作面板（离线设备在面板里远程开机）。
+ * 能被控的设备有新版本时标题旁标「可升级」，正在远程升级时标「升级中」（[upgrade] 是这台设备的升级进度）。
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ItemRow(item: HostItem, depth: Int, path: String?, selected: Boolean = false, onClick: () -> Unit) {
+fun ItemRow(item: HostItem, depth: Int, path: String?, selected: Boolean = false, upgrade: DeviceUpgrade? = null, onClick: () -> Unit) {
     val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
     Row(
         Modifier
@@ -345,6 +351,7 @@ fun ItemRow(item: HostItem, depth: Int, path: String?, selected: Boolean = false
                     Spacer(Modifier.width(4.dp))
                     Icon(Icons.Rounded.Star, null, tint = Galaxy.colors.warning, modifier = Modifier.size(14.dp))
                 }
+                if (item is HostItem.Device) UpgradeBadge(item.device, upgrade, Modifier.padding(start = 6.dp))
             }
             Text(
                 subtitleFor(item) + (path?.let { "  ·  $it" } ?: ""),

@@ -58,6 +58,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.lemonit.galaxy.R
+import cn.lemonit.galaxy.app.DeviceUpgrade
 import cn.lemonit.galaxy.app.HostItem
 import cn.lemonit.galaxy.app.HostsData
 import cn.lemonit.galaxy.core.bridge.Platform
@@ -67,7 +68,7 @@ import cn.lemonit.galaxy.ui.components.InfoButton
 import cn.lemonit.galaxy.ui.components.Tag
 import cn.lemonit.galaxy.ui.theme.Galaxy
 
-enum class HostAction { REMOTE, TERMINAL, FILES, AI, EDIT, FAVORITE, MOVE, DELETE, WAKE }
+enum class HostAction { REMOTE, TERMINAL, FILES, AI, EDIT, FAVORITE, MOVE, DELETE, WAKE, UPGRADE }
 
 /** 远程开机成功的提示：代发名单里空字符串是本机。 */
 fun wakeSentMessage(res: Resources, relays: List<String>): String {
@@ -107,6 +108,7 @@ fun sshViaText(data: HostsData, host: VaultData.SshHost, liveVia: String?): Stri
  * 点设备 / 主机弹出的操作面板内容（底部弹层与平板详情栏共用）。
  * [sshVia] 是 SSH 主机的连接路径（见 [sshViaText]），[sshConnected] 表示当前有这台主机的直连会话。
  * [canWake] 为真时（设备离线且能远程开机）显示「远程开机」。
+ * 能被控的设备有新版本或有升级记录时显示升级块（[upgrade] 是这台设备的升级进度），点「升级被控端」发 [HostAction.UPGRADE]。
  */
 @Composable
 fun HostActionsContent(
@@ -116,6 +118,7 @@ fun HostActionsContent(
     sshVia: String? = null,
     sshConnected: Boolean = false,
     canWake: Boolean = false,
+    upgrade: DeviceUpgrade? = null,
 ) {
     Column(modifier.fillMaxWidth().padding(bottom = 16.dp)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -178,7 +181,12 @@ fun HostActionsContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
                     )
-                    if (canWake) WakeRow { onAction(HostAction.WAKE) }
+                    // 升级途中对方重启离线是正常的，不提供远程开机
+                    if (canWake && upgrade?.running != true) WakeRow { onAction(HostAction.WAKE) }
+                }
+                if (showUpgradeCard(item.device, upgrade)) {
+                    Spacer(Modifier.height(if (ok) 10.dp else 8.dp))
+                    UpgradeCard(item.device, upgrade, onUpgrade = { onAction(HostAction.UPGRADE) })
                 }
             }
             is HostItem.Ssh -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {

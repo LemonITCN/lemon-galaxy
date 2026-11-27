@@ -32,13 +32,19 @@ object MockData {
     const val DEV_MACBOOK = "6f708192a3b4c5d6e7f8011223344556"
     const val DEV_SELF = "708192a3b4c5d6e7f801122334455667"
 
+    /**
+     * 服务器上被控端的新版本。web-01、build-mac 在线可升级；render-ws 有新版本但离线（详情里按钮不可用）；
+     * OFFICE-PC 是 Windows 主控端（不被控），服务器也报了新版本，但界面不当作可升级的被控端。
+     */
+    const val UPGRADE_TO = "0.1.1"
+
     fun devices(now: Long = NOW): List<DeviceInfo> = listOf(
-        DeviceInfo(DEV_BUILD_MAC, DeviceKind.CONTROL, Platform.MACOS, "build-mac", "macOS 27.2", "arm64", "0.1.0", true, true, now, false),
-        DeviceInfo(DEV_WEB_01, DeviceKind.WORKER, Platform.LINUX, "web-01", "Ubuntu 24.04.3 LTS", "x86_64", "0.1.0", true, false, now, false),
+        DeviceInfo(DEV_BUILD_MAC, DeviceKind.CONTROL, Platform.MACOS, "build-mac", "macOS 27.2", "arm64", "0.1.0", true, true, now, false, UPGRADE_TO),
+        DeviceInfo(DEV_WEB_01, DeviceKind.WORKER, Platform.LINUX, "web-01", "Ubuntu 24.04.3 LTS", "x86_64", "0.1.0", true, false, now, false, UPGRADE_TO),
         DeviceInfo(DEV_DB_01, DeviceKind.WORKER, Platform.LINUX, "db-01", "Debian 13", "x86_64", "0.1.0", false, false, now - 3 * HOUR, false),
-        DeviceInfo(DEV_OFFICE_PC, DeviceKind.CONTROL, Platform.WINDOWS, "OFFICE-PC", "Windows 11 24H2", "x86_64", "0.1.0", true, false, now, false),
+        DeviceInfo(DEV_OFFICE_PC, DeviceKind.CONTROL, Platform.WINDOWS, "OFFICE-PC", "Windows 11 24H2", "x86_64", "0.1.0", true, false, now, false, UPGRADE_TO),
         DeviceInfo(DEV_NAS, DeviceKind.WORKER, Platform.LINUX, "nas", "Ubuntu 22.04 LTS", "aarch64", "0.1.0", false, true, now - 20 * MIN, false),
-        DeviceInfo(DEV_RENDER, DeviceKind.WORKER, Platform.WINDOWS, "render-ws", "Windows 10 22H2", "x86_64", "0.1.0", false, false, now - 2 * DAY, false),
+        DeviceInfo(DEV_RENDER, DeviceKind.WORKER, Platform.WINDOWS, "render-ws", "Windows 10 22H2", "x86_64", "0.1.0", false, false, now - 2 * DAY, false, UPGRADE_TO),
         DeviceInfo(DEV_MACBOOK, DeviceKind.CONTROL, Platform.MACOS, "MacBook-Air", "macOS 26.4", "arm64", "0.1.0", true, false, now, false),
         DeviceInfo(DEV_SELF, DeviceKind.MOBILE, Platform.ANDROID, "Pixel 9", "Android 16", "arm64-v8a", "0.1.0", true, true, now, true),
     )
